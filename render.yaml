@@ -5,10 +5,11 @@ services:
     region: singapore
     plan: free
     branch: main
+    autoDeploy: false   # deploys are triggered by GitHub Actions after CI passes (see .github/workflows/backend.yml)
     dockerfilePath: ./Dockerfile
     healthCheckPath: /health
     envVars:
       - key: DATABASE_URL
-        sync: false   # set manually in Render dashboard
+        sync: false     # set manually in Render dashboard
       - key: DEBUG
         value: "false"

@@ -33,5 +33,17 @@ jobs:
           DATABASE_URL: "postgresql://user:pass@localhost:5432/db"
         run: python -c "import main; print('app:', main.app.title)"
 
-  # Render auto-deploys from main branch (configured via render.yaml).
-  # When real tests + linting land in B3, add them as gating jobs here.
+  deploy:
+    name: Trigger Render deploy
+    runs-on: ubuntu-latest
+    needs: smoke
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - name: Call Render Deploy API
+        run: |
+          curl -fsS -X POST \
+            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/deploys"
+
+  # When real tests + linting land in B3, add ruff/mypy/pytest jobs before `deploy`.
