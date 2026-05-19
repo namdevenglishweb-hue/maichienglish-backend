@@ -1,0 +1,37 @@
+name: Backend CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  PYTHON_VERSION: '3.14'
+
+jobs:
+  smoke:
+    name: Install + import smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verify app imports
+        env:
+          # Dummy DSN — settings only validates that DATABASE_URL is present at import time.
+          DATABASE_URL: "postgresql://user:pass@localhost:5432/db"
+        run: python -c "import main; print('app:', main.app.title)"
+
+  # Render auto-deploys from main branch (configured via render.yaml).
+  # When real tests + linting land in B3, add them as gating jobs here.

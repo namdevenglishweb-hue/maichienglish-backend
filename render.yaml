@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: maichienglish-api
+    runtime: docker
+    region: singapore
+    plan: free
+    branch: main
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        sync: false   # set manually in Render dashboard
+      - key: DEBUG
+        value: "false"

@@ -13,8 +13,8 @@
 maichienglish-be/
 ├── main.py                          # ✅ FastAPI app entry — lifespan inits DB pool, exposes /health and /db-ping (B1 walking skeleton)
 ├── requirements.txt                 # ✅ Pinned deps for B1: fastapi, uvicorn[standard], pydantic, pydantic-settings, asyncpg
-├── Dockerfile                       # ⏳ Python 3.14-slim base, non-root user, EXPOSE 8000, healthcheck on /health
-├── render.yaml                      # ⏳ Render service config (web, Singapore region, $PORT, healthCheckPath: /health)
+├── Dockerfile                       # ✅ Python 3.14-slim, non-root appuser, EXPOSE 8000, HEALTHCHECK on /health
+├── render.yaml                      # ✅ Render web service: docker runtime, Singapore region, free plan, auto-deploy from main, healthCheckPath /health
 ├── .env.example                     # ✅ Template for DATABASE_URL + DEBUG (more vars added in later phases)
 ├── .env                             # ⏳ Local secrets (gitignored)
 ├── .gitignore                       # ✅ Ignore .env, __pycache__, .venv, .pytest_cache, IDE files
@@ -146,7 +146,7 @@ tests/
 ```
 .github/
 └── workflows/
-    └── backend.yml                  # ⏳ Lint (ruff, mypy) → Test (pytest + postgres:17 service) → Deploy to Render (main branch only)
+    └── backend.yml                  # ✅ Smoke test (install + import). Lint (ruff/mypy) + pytest jobs will be added in B3.
 ```
 
 ---
