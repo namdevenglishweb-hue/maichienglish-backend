@@ -12,11 +12,11 @@
 ```
 maichienglish-be/
 ├── main.py                          # ✅ FastAPI app entry — lifespan inits DB pool, uses setup_logging(), mounts auth/users/subscriptions/admin routers, exposes /health and /db-ping
-├── requirements.txt                 # ✅ Pinned deps: fastapi, uvicorn, pydantic, pydantic-settings, asyncpg, pyjwt, bcrypt
+├── requirements.txt                 # ✅ Pinned deps: fastapi, uvicorn, pydantic, pydantic-settings, email-validator, asyncpg, pyjwt, bcrypt
 ├── Dockerfile                       # ✅ Python 3.14-slim, non-root appuser, EXPOSE 8000, HEALTHCHECK on /health
 ├── render.yaml                      # ✅ Render web service: docker runtime, Singapore region, free plan, autoDeploy:false (deploy triggered by GHA after CI passes), healthCheckPath /health
 ├── schema.sql                       # ✅ Initial Postgres schema — paste into Supabase SQL Editor on first setup. Source of truth: MAICHIENGLISH_BACKEND_PLAN.md §3
-├── .env.example                     # ✅ Template for DATABASE_URL + DEBUG + CORS_ORIGINS + JWT_*
+├── .env.example                     # ✅ Template for DATABASE_URL, DEBUG, CORS_ORIGINS, CORS_ORIGIN_REGEX, JWT_*, ADMIN_* (seed-only)
 ├── .env                             # ⏳ Local secrets (gitignored)
 ├── .gitignore                       # ✅ Ignore .env, __pycache__, .venv, .pytest_cache, IDE files
 ├── README.md                        # ✅ Project intro + quickstart
@@ -29,7 +29,7 @@ maichienglish-be/
 ```
 config/
 ├── __init__.py                      # ✅ Empty package marker
-├── settings.py                      # ✅ Pydantic `Settings(BaseSettings)` — DATABASE_URL, DEBUG, CORS_ORIGINS, JWT_*; cached via @lru_cache
+├── settings.py                      # ✅ Pydantic `Settings(BaseSettings)` — DATABASE_URL, DEBUG, CORS_ORIGINS, CORS_ORIGIN_REGEX, JWT_*; cached via @lru_cache
 ├── database.py                      # ✅ asyncpg pool lifecycle — init_db_pool / close_db_pool / get_db_pool
 └── logging.py                       # ✅ `setup_logging()` — stdout handler, common format, quiets httpx/uvicorn.access
 ```
@@ -38,7 +38,7 @@ config/
 
 ```
 api/
-├── __init__.py                      # ⏳ Aggregates all routers — imports each domain router and re-exports them for main.py
+├── __init__.py                      # ✅ Empty package marker (main.py imports each subpackage's router directly, no aggregator)
 │
 ├── auth/
 │   ├── __init__.py                  # ✅ Re-exports `router`
