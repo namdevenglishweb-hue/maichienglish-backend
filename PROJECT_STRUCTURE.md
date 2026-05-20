@@ -15,13 +15,13 @@ maichienglish-be/
 ├── requirements.txt                 # ✅ Pinned deps for B1: fastapi, uvicorn[standard], pydantic, pydantic-settings, asyncpg
 ├── Dockerfile                       # ✅ Python 3.14-slim, non-root appuser, EXPOSE 8000, HEALTHCHECK on /health
 ├── render.yaml                      # ✅ Render web service: docker runtime, Singapore region, free plan, autoDeploy:false (deploy triggered by GHA after CI passes), healthCheckPath /health
-├── .env.example                     # ✅ Template for DATABASE_URL + DEBUG (more vars added in later phases)
+├── schema.sql                       # ✅ Initial Postgres schema — paste into Supabase SQL Editor on first setup. Source of truth: MAICHIENGLISH_BACKEND_PLAN.md §3
+├── .env.example                     # ✅ Template for DATABASE_URL + DEBUG + CORS_ORIGINS (JWT vars added in B3.1)
 ├── .env                             # ⏳ Local secrets (gitignored)
 ├── .gitignore                       # ✅ Ignore .env, __pycache__, .venv, .pytest_cache, IDE files
 ├── README.md                        # ✅ Project intro + quickstart
 ├── PROJECT_STRUCTURE.md             # ✅ This file — repo map
-├── MAICHIENGLISH_BACKEND_PLAN.md    # ✅ Backend spec + HLD (source of truth for schema, API, decisions)
-└── MAICHIENGLISH_REFACTORING_PLAN.md # ✅ Original combined frontend+backend plan (reference only)
+└── MAICHIENGLISH_BACKEND_PLAN.md    # ✅ Backend spec + HLD (source of truth for schema, API, decisions)
 ```
 
 ## Configuration
@@ -125,7 +125,13 @@ dependencies.py                      # ⏳ get_current_user (Bearer JWT validato
 
 ## Database Migrations
 
-> The greenfield schema (per §3 of the backend plan) is applied directly via Supabase SQL Editor on first setup. If future schema changes accumulate, introduce migrations under `db/` or `migrations/` at that point — not before.
+> The initial schema lives in [`schema.sql`](schema.sql). Apply it with [`scripts/init_schema.py`](scripts/init_schema.py) (recommended) or by pasting into the Supabase SQL Editor manually. If future schema changes accumulate, introduce a real migration tool (Alembic) under `migrations/` at that point — not before.
+
+```
+scripts/
+├── __init__.py                      # ✅ Empty package marker
+└── init_schema.py                   # ✅ Apply schema.sql via asyncpg. Flags: --check, --drop, -y. Used for fresh setup + dev resets.
+```
 
 ## Tests
 

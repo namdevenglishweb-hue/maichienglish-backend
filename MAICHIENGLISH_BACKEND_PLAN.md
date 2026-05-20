@@ -180,6 +180,8 @@ maichienglish_api/
 ## 3. Database Schema
 
 > **Delete semantics for exams & questions**: the default `DELETE` endpoint behavior is **soft delete** (set `deleted_at = now()`, all queries filter `WHERE deleted_at IS NULL`). A separate admin-only **hard delete** path runs an actual `DELETE` row, which `CASCADE`s through `attempts` and `answers` — used only to remove broken/erroneous content.
+>
+> Schema is reconciled with the prior Supabase project's tables (preserving domain features like listening audio + reading passage + per-question points) and extended with refactor-only additions (custom JWT auth, subscriptions, soft delete, `ON DELETE CASCADE`). Run the SQL in [`schema.sql`](../schema.sql).
 
 ### 3.1 `profiles` — users + auth
 
@@ -218,6 +220,8 @@ CREATE TABLE public.subscriptions (
 
 ### 3.3 `exams` — exam definitions
 
+`audio_url` + `max_audio_plays` apply to listening exams (one shared audio per exam, with a play-count limit enforced via `attempts.audio_play_count`). `passage` applies to reading exams.
+
 ```sql
 CREATE TABLE public.exams (
   id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -226,10 +230,16 @@ CREATE TABLE public.exams (
                       CHECK (level IN ('primary', 'secondary', 'KET', 'PET', 'IELTS')),
   skill             text NOT NULL
                       CHECK (skill IN ('listening', 'reading')),
-  duration_minutes  int  NOT NULL CHECK (duration_minutes > 0),
+  duration_minutes  int  NOT NULL DEFAULT 45 CHECK (duration_minutes > 0),
+  description       text,
+  audio_url         text,                              -- listening: one shared audio file
+  passage           text,                              -- reading: passage text
+  max_audio_plays   int  NOT NULL DEFAULT 3,           -- listening: cap on student replays
   is_published      boolean NOT NULL DEFAULT false,
+  created_by        uuid REFERENCES public.profiles(id) ON DELETE SET NULL,
   created_at        timestamptz NOT NULL DEFAULT now(),
-  deleted_at        timestamptz                       -- soft delete; NULL = active
+  updated_at        timestamptz NOT NULL DEFAULT now(),
+  deleted_at        timestamptz                        -- soft delete; NULL = active
 );
 ```
 
@@ -237,21 +247,21 @@ CREATE TABLE public.exams (
 
 `question_data` shape varies by `question_type`:
 
-- `multiple_choice`: `{ "options": ["A","B","C","D"], "correct_index": 2, "audio_url": "..." }`
+- `multiple_choice`: `{ "options": ["A","B","C","D"], "correct_index": 2 }`
 - `fill_blank`: `{ "correct_answers": ["nine", "9"], "case_sensitive": false }`
 - `matching`: `{ "left": [...], "right": [...], "correct_pairs": [[0,1],[1,0],[2,2]] }`
-- `image_choice`: `{ "image_url": "...", "options": [...], "correct_index": 1 }`
 
 ```sql
 CREATE TABLE public.questions (
   id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   exam_id        uuid NOT NULL REFERENCES public.exams(id) ON DELETE CASCADE,
+  position       int  NOT NULL,
   question_type  text NOT NULL
-                  CHECK (question_type IN ('multiple_choice', 'fill_blank', 'matching', 'image_choice')),
-  question_text  text NOT NULL,
+                  CHECK (question_type IN ('multiple_choice', 'fill_blank', 'matching')),
   question_data  jsonb NOT NULL,
+  points         int  NOT NULL DEFAULT 1,
   created_at     timestamptz NOT NULL DEFAULT now(),
-  deleted_at     timestamptz                          -- soft delete; NULL = active
+  deleted_at     timestamptz                           -- soft delete; NULL = active
 );
 ```
 
@@ -266,6 +276,7 @@ CREATE TABLE public.attempts (
   total_points         numeric(6,2),
   percentage           numeric(5,2),
   time_spent_seconds   int,
+  audio_play_count     int NOT NULL DEFAULT 0,         -- listening: tracks plays for limit enforcement
   started_at           timestamptz NOT NULL DEFAULT now(),
   submitted_at         timestamptz
 );
@@ -278,7 +289,9 @@ CREATE TABLE public.answers (
   id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   attempt_id      uuid NOT NULL REFERENCES public.attempts(id) ON DELETE CASCADE,
   question_id     uuid NOT NULL REFERENCES public.questions(id) ON DELETE CASCADE,
-  student_answer  jsonb NOT NULL,
+  student_answer  jsonb,                               -- nullable: student may skip a question
+  is_correct      boolean,
+  points_earned   int NOT NULL DEFAULT 0,
   created_at      timestamptz NOT NULL DEFAULT now()
 );
 ```
@@ -289,8 +302,8 @@ Create two buckets in the new Supabase project:
 
 | Bucket | Purpose |
 |--------|---------|
-| `audio` | Listening question audio files (`.mp3`, `.m4a`) |
-| `images` | Image-choice question assets (`.png`, `.jpg`, `.webp`) |
+| `audio` | Listening exam audio files (`.mp3`, `.m4a`) — referenced by `exams.audio_url` |
+| `images` | Image assets for questions (`.png`, `.jpg`, `.webp`) — referenced inside `questions.question_data` |
 
 ---
 
