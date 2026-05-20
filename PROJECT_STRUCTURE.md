@@ -11,7 +11,7 @@
 
 ```
 maichienglish-be/
-├── main.py                          # ✅ FastAPI app entry — lifespan inits DB pool, uses setup_logging(), exposes /health and /db-ping
+├── main.py                          # ✅ FastAPI app entry — lifespan inits DB pool, uses setup_logging(), mounts auth router, exposes /health and /db-ping
 ├── requirements.txt                 # ✅ Pinned deps: fastapi, uvicorn, pydantic, pydantic-settings, asyncpg, pyjwt, bcrypt
 ├── Dockerfile                       # ✅ Python 3.14-slim, non-root appuser, EXPOSE 8000, HEALTHCHECK on /health
 ├── render.yaml                      # ✅ Render web service: docker runtime, Singapore region, free plan, autoDeploy:false (deploy triggered by GHA after CI passes), healthCheckPath /health
@@ -41,9 +41,9 @@ api/
 ├── __init__.py                      # ⏳ Aggregates all routers — imports each domain router and re-exports them for main.py
 │
 ├── auth/
-│   ├── __init__.py                  # ⏳ Empty
-│   ├── routes.py                    # ⏳ POST /login, /refresh, /verify, /password/request-code, /password/reset
-│   └── schemas.py                   # ⏳ LoginRequest, LoginResponse, RefreshRequest, VerifyResponse, PasswordReset* schemas
+│   ├── __init__.py                  # ✅ Re-exports `router`
+│   ├── routes.py                    # ✅ POST /login, /refresh, /verify (password reset endpoints land in B3.6)
+│   └── schemas.py                   # ✅ LoginRequest, LoginResponse, RefreshRequest/Response, VerifyResponse
 │
 ├── users/
 │   ├── __init__.py                  # ⏳ Empty
@@ -82,8 +82,8 @@ api/
 services/
 ├── __init__.py                      # ✅ Empty
 ├── exceptions.py                    # ✅ ServiceError base + NotFoundError, AlreadyExistsError, ValidationError, PermissionDeniedError, InvalidCredentialsError, InsufficientCreditsError
-├── auth_service.py                  # ⏳ Login flow, password reset code lifecycle (impl-time decision: Redis vs ad-hoc table), token issuance/verification helpers
-├── user_service.py                  # ⏳ create_user, authenticate, get_by_email, update_profile, admin_reset_password, normalize_email, hash/verify password
+├── auth_service.py                  # ⏳ Password reset code lifecycle (impl-time decision in B3.6). Login/token logic currently lives directly in api/auth/routes.py + utils/jwt_utils.py
+├── user_service.py                  # ✅ create_user (with subscription), authenticate, get_by_email, normalize_email. update_profile + admin_reset_password land in B3.3
 ├── exam_service.py                  # ⏳ Exam CRUD, publish/unpublish (with question-count check), soft delete (set deleted_at), hard delete (CASCADE)
 ├── question_service.py              # ⏳ Question CRUD with per-type validation of question_data, soft/hard delete, Excel import parsing
 ├── attempt_service.py               # ⏳ Start attempt (enforce tier limits via COUNT), submit + auto-grading per question type, history queries
@@ -130,7 +130,8 @@ dependencies.py                      # ✅ get_current_user (Bearer JWT validato
 ```
 scripts/
 ├── __init__.py                      # ✅ Empty package marker
-└── init_schema.py                   # ✅ Apply schema.sql via asyncpg. Flags: --check, --drop, -y. Used for fresh setup + dev resets.
+├── init_schema.py                   # ✅ Apply schema.sql via asyncpg. Flags: --check, --drop, -y. Used for fresh setup + dev resets.
+└── seed_admin.py                    # ✅ One-shot: create the first admin user from ADMIN_EMAIL/ADMIN_PASSWORD/ADMIN_FULL_NAME env vars. Idempotent (no-op if already exists).
 ```
 
 ## Tests
