@@ -116,13 +116,14 @@ This document outlines the backend portion of the Mai Chi English system: a **Fa
 | Database | PostgreSQL (via new Supabase project) | `17.x` |
 | ORM / DB driver | SQLAlchemy 2.0 or asyncpg | SQLAlchemy `>=2.0.49,<2.1`, asyncpg `>=0.31,<1` |
 | Auth | PyJWT + bcrypt | PyJWT `>=2.12,<3`, bcrypt `>=4.2,<5` |
-| Validation | Pydantic v2 | `>=2.13,<3` |
+| Validation | Pydantic v2 + email-validator | pydantic `>=2.13,<3`, email-validator `>=2.0,<3` |
+| Settings | pydantic-settings | `>=2.7,<3` |
 | ASGI Server | Uvicorn | `>=0.47,<0.48` |
 
 ### 2.2 Required API Modules
 
 ```
-maichienglish_api/
+maichienglish-be/
 ├── api/
 │   ├── auth/           # Authentication endpoints
 │   ├── exams/          # Exam CRUD + publishing
@@ -132,11 +133,15 @@ maichienglish_api/
 │   ├── admin/          # Admin-only operations
 │   └── subscriptions/  # Subscription management
 ├── services/           # Business logic layer
-├── models/             # SQLAlchemy models
-├── schemas/            # Pydantic schemas
-├── utils/              # JWT, password hashing, etc.
-└── config/             # Settings, database config
+├── models/             # SQLAlchemy models (optional)
+├── utils/              # JWT, password hashing, grading, Excel import
+└── config/             # Settings, database, logging
 ```
+
+> Pydantic request/response schemas live alongside their routes
+> (`api/<domain>/schemas.py`) — no separate root `schemas/` folder.
+> See §8 for the full tree and [`PROJECT_STRUCTURE.md`](../PROJECT_STRUCTURE.md)
+> for current file-by-file status.
 
 ### 2.3 Functional Requirements
 
@@ -164,7 +169,7 @@ maichienglish_api/
 #### Exam Management
 - [x] CRUD for exams
 - [x] Publish/unpublish toggle
-- [x] Question CRUD (4 types: multiple_choice, fill_blank, matching, image_choice)
+- [x] Question CRUD (3 types: multiple_choice, fill_blank, matching)
 - [x] Excel import for questions
 - [x] Audio file management
 
@@ -863,54 +868,70 @@ SUBSCRIPTION_PLANS = {
 
 ## 8. File Structure (Backend)
 
+> Per-domain Pydantic schemas live next to their routes (`api/<domain>/schemas.py`), not in a separate root `schemas/` folder. See [`PROJECT_STRUCTURE.md`](../PROJECT_STRUCTURE.md) for the current per-file status and notes.
+
 ```
-maichienglish_api/
+maichienglish-be/
 ├── main.py                         # FastAPI app entry point
+├── dependencies.py                 # FastAPI DI: get_current_user, require_admin, etc.
 ├── requirements.txt
 ├── Dockerfile
+├── render.yaml                     # Render deploy config (autoDeploy:false; gated by GHA)
+├── schema.sql                      # Initial DB schema (run via scripts/init_schema.py)
 ├── .env.example
+├── .github/
+│   └── workflows/
+│       └── backend.yml             # CI: smoke import + Render deploy on main
 │
 ├── config/
 │   ├── __init__.py
 │   ├── settings.py                 # Pydantic settings (env vars)
-│   └── database.py                 # Database connection
+│   ├── database.py                 # asyncpg pool lifecycle
+│   └── logging.py                  # setup_logging() helper
 │
 ├── api/
-│   ├── __init__.py
+│   ├── __init__.py                 # Empty (each subpackage exposes its own router)
 │   ├── auth/
-│   │   ├── __init__.py
+│   │   ├── __init__.py             # Re-exports `router`
 │   │   ├── routes.py               # Auth endpoints
 │   │   └── schemas.py              # Auth Pydantic models
 │   ├── users/
+│   │   ├── __init__.py
 │   │   ├── routes.py
 │   │   └── schemas.py
 │   ├── admin/
-│   │   ├── routes.py               # Admin-only endpoints
+│   │   ├── __init__.py
+│   │   ├── routes.py               # Admin-only endpoints (require_admin at router level)
 │   │   └── schemas.py
 │   ├── exams/
+│   │   ├── __init__.py
 │   │   ├── routes.py
 │   │   └── schemas.py
 │   ├── questions/
+│   │   ├── __init__.py
 │   │   ├── routes.py
 │   │   └── schemas.py
 │   ├── attempts/
+│   │   ├── __init__.py
 │   │   ├── routes.py
 │   │   └── schemas.py
 │   └── subscriptions/
+│       ├── __init__.py
 │       ├── routes.py
 │       └── schemas.py
 │
 ├── services/
 │   ├── __init__.py
-│   ├── auth_service.py             # Login, JWT, password reset
-│   ├── user_service.py             # User CRUD
+│   ├── exceptions.py               # ServiceError base + typed subclasses
+│   ├── auth_service.py             # Password reset code lifecycle (B3.6)
+│   ├── user_service.py             # User CRUD + authenticate
 │   ├── exam_service.py             # Exam CRUD
 │   ├── question_service.py
 │   ├── attempt_service.py          # Attempts + grading
 │   ├── subscription_service.py
-│   └── subscription_plans.py       # Plan definitions
+│   └── subscription_plans.py       # Static plan catalog (Free / Basic / Pro / Ultra)
 │
-├── models/                          # SQLAlchemy models (if using ORM)
+├── models/                          # SQLAlchemy models (optional — only if ORM is adopted)
 │   ├── __init__.py
 │   ├── user.py
 │   ├── exam.py
@@ -922,10 +943,23 @@ maichienglish_api/
 │   ├── __init__.py
 │   ├── jwt_utils.py                # Token generation/validation
 │   ├── password_utils.py           # Bcrypt hashing
-│   ├── grading_utils.py            # Grade fill_blank, matching
+│   ├── grading_utils.py            # Grade multiple_choice / fill_blank / matching
 │   └── excel_utils.py              # Excel import
 │
-└── dependencies.py                  # FastAPI dependencies
+├── scripts/
+│   ├── __init__.py
+│   ├── init_schema.py              # Apply schema.sql via asyncpg (--check / --drop / -y)
+│   └── seed_admin.py               # One-shot create first admin from ADMIN_* env vars
+│
+└── tests/                           # pytest suite (B3.6)
+    ├── __init__.py
+    ├── conftest.py
+    ├── test_auth.py
+    ├── test_users.py
+    ├── test_exams.py
+    ├── test_questions.py
+    ├── test_attempts.py
+    └── test_subscriptions.py
 ```
 
 ---
