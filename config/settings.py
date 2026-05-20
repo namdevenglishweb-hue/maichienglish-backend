@@ -16,6 +16,14 @@ class Settings(BaseSettings):
 
     database_url: str = Field(..., alias="DATABASE_URL")
     debug: bool = Field(default=False, alias="DEBUG")
+    cors_origins: str = Field(
+        default="http://localhost:3000,https://maichienglish-frontend.vercel.app",
+        alias="CORS_ORIGINS",
+    )
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
 
 @lru_cache
