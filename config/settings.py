@@ -17,8 +17,14 @@ class Settings(BaseSettings):
     database_url: str = Field(..., alias="DATABASE_URL")
     debug: bool = Field(default=False, alias="DEBUG")
     cors_origins: str = Field(
-        default="http://localhost:3000,https://maichienglish-frontend.vercel.app",
+        default="http://localhost:3000",
         alias="CORS_ORIGINS",
+    )
+    cors_origin_regex: str = Field(
+        # Matches the Vercel production URL + every preview deploy of the
+        # `maichienglish-frontend` project.
+        default=r"^https://maichienglish-frontend(-[\w-]+)?\.vercel\.app$",
+        alias="CORS_ORIGIN_REGEX",
     )
 
     jwt_secret_key: str = Field(default="change-me-in-prod", alias="JWT_SECRET_KEY")
