@@ -32,9 +32,12 @@ class Settings(BaseSettings):
         alias="CORS_ORIGINS",
     )
     cors_origin_regex: str = Field(
-        # Matches the Vercel production URL + every preview deploy of the
-        # `maichienglish-frontend` project.
-        default=r"^https://maichienglish-frontend(-[\w-]+)?\.vercel\.app$",
+        # Matches every Vercel deploy of the frontend Vercel projects:
+        #   - maichienglish              (production)
+        #   - dev-maichienglish          (dev)
+        #   - maichienglish-frontend     (legacy)
+        # plus their preview URLs (e.g. maichienglish-<hash>-<team>.vercel.app).
+        default=r"^https://(dev-)?maichienglish(-[\w-]+)?\.vercel\.app$",
         alias="CORS_ORIGIN_REGEX",
     )
 
