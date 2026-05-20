@@ -314,6 +314,8 @@ Create two buckets in the new Supabase project:
 
 ## 4. API Specification
 
+> **Response envelope**: every success response follows §10.10 — `{"status": <int>, "data": {...}}`. Errors return `{"detail": "<message>"}` via FastAPI `HTTPException`. Endpoints that return `204 No Content` (e.g. admin delete) have an empty body and no envelope.
+
 ### 4.1 Authentication Endpoints
 
 #### POST /api/auth/login
@@ -390,12 +392,15 @@ Verify an access token and return the decoded user/claims. Frontend uses this to
 **Response (200):**
 ```json
 {
-  "valid": true,
-  "user": {
-    "id": "uuid",
-    "email": "user@example.com",
-    "role": "student",
-    "tier": "basic"
+  "status": 200,
+  "data": {
+    "valid": true,
+    "user": {
+      "id": "uuid",
+      "email": "user@example.com",
+      "role": "student",
+      "tier": "basic"
+    }
   }
 }
 ```
@@ -420,8 +425,11 @@ Request password reset code.
 **Response (200):**
 ```json
 {
-  "message": "Code sent",
-  "expiresIn": 600
+  "status": 200,
+  "data": {
+    "message": "Code sent",
+    "expiresIn": 600
+  }
 }
 ```
 
@@ -444,21 +452,26 @@ Get current user profile.
 
 **Headers:** `Authorization: Bearer <token>`
 
-**Response:**
+**Response (200):**
 ```json
 {
-  "id": "uuid",
-  "email": "user@example.com",
-  "fullName": "Nguyen Van A",
-  "role": "student",
-  "phone": "0901234567",
-  "subscription": {
-    "tier": "basic",
-    "status": "active",
-    "creditsMonthly": 10000,
-    "creditsRemaining": 7500
-  },
-  "createdAt": "2026-01-15T10:30:00Z"
+  "status": 200,
+  "data": {
+    "user": {
+      "id": "uuid",
+      "email": "user@example.com",
+      "fullName": "Nguyen Van A",
+      "role": "student",
+      "phone": "0901234567",
+      "subscription": {
+        "tier": "basic",
+        "status": "active",
+        "creditsMonthly": 10000,
+        "creditsRemaining": 7500
+      },
+      "createdAt": "2026-01-15T10:30:00Z"
+    }
+  }
 }
 ```
 
@@ -543,13 +556,16 @@ Start new exam attempt.
 }
 ```
 
-**Response:**
+**Response (200):**
 ```json
 {
-  "attemptId": "uuid",
-  "exam": { ... },
-  "questions": [ ... ],
-  "startedAt": "2026-05-12T10:00:00Z"
+  "status": 200,
+  "data": {
+    "attemptId": "uuid",
+    "exam": { ... },
+    "questions": [ ... ],
+    "startedAt": "2026-05-12T10:00:00Z"
+  }
 }
 ```
 
@@ -568,13 +584,16 @@ Submit answers and get score.
 }
 ```
 
-**Response:**
+**Response (200):**
 ```json
 {
-  "score": 8.5,
-  "totalPoints": 10,
-  "percentage": 85,
-  "submittedAt": "2026-05-12T10:30:00Z"
+  "status": 200,
+  "data": {
+    "score": 8.5,
+    "totalPoints": 10,
+    "percentage": 85,
+    "submittedAt": "2026-05-12T10:30:00Z"
+  }
 }
 ```
 

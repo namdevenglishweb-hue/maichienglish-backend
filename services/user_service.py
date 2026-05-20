@@ -68,6 +68,7 @@ class UserService:
                     email,
                 )
                 if existing:
+                    logger.warning("Attempted to create duplicate user: %s", email)
                     raise AlreadyExistsError(
                         f"User with email {email} already exists"
                     )
@@ -148,6 +149,7 @@ class UserService:
         # asyncpg returns "DELETE <n>" — parse the count
         deleted = int(result.split()[-1]) if result else 0
         if deleted == 0:
+            logger.warning("delete_user: user %s not found", user_id)
             raise NotFoundError(f"User {user_id} not found")
         logger.info("Deleted user %s", user_id)
 
@@ -161,6 +163,7 @@ class UserService:
             )
         updated = int(result.split()[-1]) if result else 0
         if updated == 0:
+            logger.warning("admin_reset_password: user %s not found", user_id)
             raise NotFoundError(f"User {user_id} not found")
         logger.info("Admin reset password for user %s", user_id)
 

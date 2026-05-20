@@ -24,6 +24,7 @@ from .schemas import (
     UserLoginView,
     UserSubscriptionView,
     VerifyResponse,
+    VerifyResponseData,
     VerifyUser,
 )
 
@@ -116,12 +117,17 @@ async def refresh(request: RefreshRequest):
 
 @router.post("/verify", response_model=VerifyResponse)
 async def verify(current_user: dict = Depends(get_current_user)):
-    """Verify an access token (Bearer). Returns claims if valid, 401 otherwise."""
+    """Verify an access token (Bearer). Returns claims if valid, 401 otherwise.
+
+    - **Authorization**: Bearer access token required.
+    """
     return VerifyResponse(
-        valid=True,
-        user=VerifyUser(
-            email=current_user["sub"],
-            role=current_user.get("role", ""),
-            tier=current_user.get("tier", "free"),
+        data=VerifyResponseData(
+            valid=True,
+            user=VerifyUser(
+                email=current_user["sub"],
+                role=current_user.get("role", ""),
+                tier=current_user.get("tier", "free"),
+            ),
         ),
     )

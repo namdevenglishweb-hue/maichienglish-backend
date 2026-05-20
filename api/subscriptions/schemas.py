@@ -1,15 +1,28 @@
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class SubscriptionView(BaseModel):
-    tier: str
-    status: str
+    """Full subscription row as returned to the user."""
+
+    tier: str = Field(..., description="free / basic / pro / ultra")
+    status: str = Field(..., description="active / canceled / expired")
     creditsMonthly: int
     creditsRemaining: int
-    currentPeriodStart: Optional[str] = None
-    currentPeriodEnd: Optional[str] = None
+    currentPeriodStart: Optional[str] = Field(default=None, description="ISO-8601 timestamp")
+    currentPeriodEnd: Optional[str] = Field(default=None, description="ISO-8601 timestamp")
+
+
+class SubscriptionMeResponseData(BaseModel):
+    subscription: SubscriptionView
+
+
+class SubscriptionMeResponse(BaseModel):
+    """Wrapped GET /api/subscriptions/me response."""
+
+    status: int = 200
+    data: SubscriptionMeResponseData
 
 
 class PlanFeatureView(BaseModel):
@@ -23,9 +36,16 @@ class PlanView(BaseModel):
     tier: str
     name: str
     priceMonthly: float
-    attemptsMonthly: int
+    attemptsMonthly: int = Field(..., description="-1 = unlimited")
     features: list[PlanFeatureView]
 
 
-class PlansResponse(BaseModel):
+class PlansResponseData(BaseModel):
     plans: list[PlanView]
+
+
+class PlansResponse(BaseModel):
+    """Wrapped GET /api/subscriptions/plans response."""
+
+    status: int = 200
+    data: PlansResponseData

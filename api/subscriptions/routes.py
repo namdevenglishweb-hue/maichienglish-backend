@@ -4,14 +4,24 @@ from dependencies import get_current_user
 from services.subscription_service import list_plans, subscription_service
 from services.user_service import user_service
 
-from .schemas import PlansResponse, PlanView, SubscriptionView
+from .schemas import (
+    PlansResponse,
+    PlansResponseData,
+    PlanView,
+    SubscriptionMeResponse,
+    SubscriptionMeResponseData,
+    SubscriptionView,
+)
 
 router = APIRouter(prefix="/api/subscriptions", tags=["Subscriptions"])
 
 
-@router.get("/me", response_model=SubscriptionView)
+@router.get("/me", response_model=SubscriptionMeResponse)
 async def get_my_subscription(current_user: dict = Depends(get_current_user)):
-    """Return the current user's subscription row."""
+    """Return the current user's subscription row.
+
+    - **Authorization**: Bearer access token required.
+    """
     user = await user_service.get_by_email(current_user["sub"])
     if not user:
         raise HTTPException(
@@ -25,18 +35,25 @@ async def get_my_subscription(current_user: dict = Depends(get_current_user)):
             detail="Subscription not found",
         )
 
-    return SubscriptionView(
-        tier=sub["tier"],
-        status=sub["status"],
-        creditsMonthly=sub["credits_monthly"],
-        creditsRemaining=sub["credits_remaining"],
-        currentPeriodStart=sub["current_period_start"],
-        currentPeriodEnd=sub["current_period_end"],
+    return SubscriptionMeResponse(
+        data=SubscriptionMeResponseData(
+            subscription=SubscriptionView(
+                tier=sub["tier"],
+                status=sub["status"],
+                creditsMonthly=sub["credits_monthly"],
+                creditsRemaining=sub["credits_remaining"],
+                currentPeriodStart=sub["current_period_start"],
+                currentPeriodEnd=sub["current_period_end"],
+            ),
+        ),
     )
 
 
 @router.get("/plans", response_model=PlansResponse)
 async def get_plans():
-    """Return the static catalog of subscription plans (Free / Basic / Pro / Ultra)."""
+    """Return the static catalog of subscription plans (Free / Basic / Pro / Ultra).
+
+    Public endpoint — no authentication required.
+    """
     plans = [PlanView(**p) for p in list_plans()]
-    return PlansResponse(plans=plans)
+    return PlansResponse(data=PlansResponseData(plans=plans))

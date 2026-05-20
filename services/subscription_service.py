@@ -53,6 +53,11 @@ class SubscriptionService:
 
     async def update_tier(self, user_id: str, new_tier: str) -> dict[str, Any]:
         if new_tier not in _VALID_TIERS:
+            logger.warning(
+                "update_tier: invalid tier '%s' requested for user %s",
+                new_tier,
+                user_id,
+            )
             raise ValidationError(
                 f"Invalid tier '{new_tier}'. Must be one of: {sorted(_VALID_TIERS)}"
             )
@@ -71,6 +76,7 @@ class SubscriptionService:
                 new_tier,
             )
             if not row:
+                logger.warning("update_tier: no subscription for user %s", user_id)
                 raise NotFoundError(f"No subscription found for user {user_id}")
 
         logger.info("Updated subscription for user %s to tier %s", user_id, new_tier)
