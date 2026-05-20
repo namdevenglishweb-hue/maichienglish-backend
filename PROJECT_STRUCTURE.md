@@ -11,12 +11,12 @@
 
 ```
 maichienglish-be/
-├── main.py                          # ✅ FastAPI app entry — lifespan inits DB pool, exposes /health and /db-ping (B1 walking skeleton)
-├── requirements.txt                 # ✅ Pinned deps for B1: fastapi, uvicorn[standard], pydantic, pydantic-settings, asyncpg
+├── main.py                          # ✅ FastAPI app entry — lifespan inits DB pool, uses setup_logging(), exposes /health and /db-ping
+├── requirements.txt                 # ✅ Pinned deps: fastapi, uvicorn, pydantic, pydantic-settings, asyncpg, pyjwt, bcrypt
 ├── Dockerfile                       # ✅ Python 3.14-slim, non-root appuser, EXPOSE 8000, HEALTHCHECK on /health
 ├── render.yaml                      # ✅ Render web service: docker runtime, Singapore region, free plan, autoDeploy:false (deploy triggered by GHA after CI passes), healthCheckPath /health
 ├── schema.sql                       # ✅ Initial Postgres schema — paste into Supabase SQL Editor on first setup. Source of truth: MAICHIENGLISH_BACKEND_PLAN.md §3
-├── .env.example                     # ✅ Template for DATABASE_URL + DEBUG + CORS_ORIGINS (JWT vars added in B3.1)
+├── .env.example                     # ✅ Template for DATABASE_URL + DEBUG + CORS_ORIGINS + JWT_*
 ├── .env                             # ⏳ Local secrets (gitignored)
 ├── .gitignore                       # ✅ Ignore .env, __pycache__, .venv, .pytest_cache, IDE files
 ├── README.md                        # ✅ Project intro + quickstart
@@ -29,9 +29,9 @@ maichienglish-be/
 ```
 config/
 ├── __init__.py                      # ✅ Empty package marker
-├── settings.py                      # ✅ Pydantic `Settings(BaseSettings)` — DATABASE_URL + DEBUG (more keys added as needed), cached via @lru_cache
+├── settings.py                      # ✅ Pydantic `Settings(BaseSettings)` — DATABASE_URL, DEBUG, CORS_ORIGINS, JWT_*; cached via @lru_cache
 ├── database.py                      # ✅ asyncpg pool lifecycle — init_db_pool / close_db_pool / get_db_pool
-└── logging.py                       # ⏳ `setup_logging()` — configures stdout handler, format, quiets httpx/uvicorn noise
+└── logging.py                       # ✅ `setup_logging()` — stdout handler, common format, quiets httpx/uvicorn.access
 ```
 
 ## API Layer (HTTP routes + request/response schemas)
@@ -80,8 +80,8 @@ api/
 
 ```
 services/
-├── __init__.py                      # ⏳ Empty
-├── exceptions.py                    # ⏳ ServiceError base + NotFoundError, AlreadyExistsError, ValidationError, PermissionDeniedError, InsufficientCreditsError
+├── __init__.py                      # ✅ Empty
+├── exceptions.py                    # ✅ ServiceError base + NotFoundError, AlreadyExistsError, ValidationError, PermissionDeniedError, InvalidCredentialsError, InsufficientCreditsError
 ├── auth_service.py                  # ⏳ Login flow, password reset code lifecycle (impl-time decision: Redis vs ad-hoc table), token issuance/verification helpers
 ├── user_service.py                  # ⏳ create_user, authenticate, get_by_email, update_profile, admin_reset_password, normalize_email, hash/verify password
 ├── exam_service.py                  # ⏳ Exam CRUD, publish/unpublish (with question-count check), soft delete (set deleted_at), hard delete (CASCADE)
@@ -110,17 +110,17 @@ models/
 
 ```
 utils/
-├── __init__.py                      # ⏳ Empty
-├── jwt_utils.py                     # ⏳ TokenType constants, create_access_token, create_refresh_token, decode_token (with type verification)
-├── password_utils.py                # ⏳ hash_password, verify_password (bcrypt cost 12)
-├── grading_utils.py                 # ⏳ Per-question-type grading: multiple_choice (index match), fill_blank (string match w/ case_sensitive), matching (pair compare), image_choice (index match)
-└── excel_utils.py                   # ⏳ Excel-to-questions parser (openpyxl), maps spreadsheet rows to question_data shapes
+├── __init__.py                      # ✅ Empty
+├── jwt_utils.py                     # ✅ TokenType constants, create_access_token, create_refresh_token, decode_token (with type verification)
+├── password_utils.py                # ✅ hash_password, verify_password (bcrypt cost 12)
+├── grading_utils.py                 # ⏳ Per-question-type grading (B3.5): multiple_choice (index match), fill_blank (string match w/ case_sensitive), matching (pair compare)
+└── excel_utils.py                   # ⏳ Excel-to-questions parser (B3.4)
 ```
 
 ## Top-level Dependencies (FastAPI DI)
 
 ```
-dependencies.py                      # ⏳ get_current_user (Bearer JWT validator), require_admin, require_teacher_or_admin, require_subscription_tier (factory)
+dependencies.py                      # ✅ get_current_user (Bearer JWT validator), require_admin, require_teacher_or_admin, require_subscription_tier (factory)
 ```
 
 ## Database Migrations

@@ -11,5 +11,7 @@ services:
     envVars:
       - key: DATABASE_URL
         sync: false     # set manually in Render dashboard
+      - key: JWT_SECRET_KEY
+        sync: false     # generate: python -c "import secrets; print(secrets.token_urlsafe(48))"
       - key: DEBUG
         value: "false"

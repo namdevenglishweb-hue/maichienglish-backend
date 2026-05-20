@@ -5,12 +5,10 @@ from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 
 from config.database import close_db_pool, get_db_pool, init_db_pool
+from config.logging import setup_logging
 from config.settings import get_settings
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
+setup_logging(level="DEBUG" if get_settings().debug else "INFO")
 logger = logging.getLogger(__name__)
 
 
