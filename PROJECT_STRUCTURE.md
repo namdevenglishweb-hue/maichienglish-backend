@@ -11,7 +11,7 @@
 
 ```
 maichienglish-be/
-├── main.py                          # ✅ FastAPI app entry — lifespan inits DB pool, uses setup_logging(), mounts auth router, exposes /health and /db-ping
+├── main.py                          # ✅ FastAPI app entry — lifespan inits DB pool, uses setup_logging(), mounts auth/users/subscriptions/admin routers, exposes /health and /db-ping
 ├── requirements.txt                 # ✅ Pinned deps: fastapi, uvicorn, pydantic, pydantic-settings, asyncpg, pyjwt, bcrypt
 ├── Dockerfile                       # ✅ Python 3.14-slim, non-root appuser, EXPOSE 8000, HEALTHCHECK on /health
 ├── render.yaml                      # ✅ Render web service: docker runtime, Singapore region, free plan, autoDeploy:false (deploy triggered by GHA after CI passes), healthCheckPath /health
@@ -46,14 +46,14 @@ api/
 │   └── schemas.py                   # ✅ LoginRequest, LoginResponse, RefreshRequest/Response, VerifyResponse
 │
 ├── users/
-│   ├── __init__.py                  # ⏳ Empty
-│   ├── routes.py                    # ⏳ GET /me — current user's profile + subscription
-│   └── schemas.py                   # ⏳ UserMeResponse, UserSubscriptionView
+│   ├── __init__.py                  # ✅ Re-exports `router`
+│   ├── routes.py                    # ✅ GET /api/users/me — current user's profile + subscription
+│   └── schemas.py                   # ✅ UserMeResponse, UserSubscriptionFull
 │
 ├── admin/
-│   ├── __init__.py                  # ⏳ Empty
-│   ├── routes.py                    # ⏳ Admin-only: POST /users, DELETE /users/{id}, POST /users/{id}/reset-password, PUT /subscriptions/{user_id}
-│   └── schemas.py                   # ⏳ AdminCreateUserRequest, AdminResetPasswordRequest, AdminUpdateSubscriptionRequest
+│   ├── __init__.py                  # ✅ Re-exports `router`
+│   ├── routes.py                    # ✅ POST /users, DELETE /users/{id}, POST /users/{id}/reset-password, PUT /subscriptions/{user_id} (all require_admin)
+│   └── schemas.py                   # ✅ AdminCreateUserRequest, AdminResetPasswordRequest, AdminUpdateSubscriptionRequest + response wrappers
 │
 ├── exams/
 │   ├── __init__.py                  # ⏳ Empty
@@ -71,9 +71,9 @@ api/
 │   └── schemas.py                   # ⏳ AttemptStartRequest/Response, AttemptSubmitRequest/Response, AttemptDetailResponse, AttemptHistoryItem
 │
 └── subscriptions/
-    ├── __init__.py                  # ⏳ Empty
-    ├── routes.py                    # ⏳ GET /me, GET /plans (public plan definitions)
-    └── schemas.py                   # ⏳ SubscriptionResponse, PlanResponse, PlanFeatureView
+    ├── __init__.py                  # ✅ Re-exports `router`
+    ├── routes.py                    # ✅ GET /api/subscriptions/me, GET /api/subscriptions/plans
+    └── schemas.py                   # ✅ SubscriptionView, PlansResponse, PlanView, PlanFeatureView
 ```
 
 ## Service Layer (business logic — no HTTP imports)
@@ -83,12 +83,12 @@ services/
 ├── __init__.py                      # ✅ Empty
 ├── exceptions.py                    # ✅ ServiceError base + NotFoundError, AlreadyExistsError, ValidationError, PermissionDeniedError, InvalidCredentialsError, InsufficientCreditsError
 ├── auth_service.py                  # ⏳ Password reset code lifecycle (impl-time decision in B3.6). Login/token logic currently lives directly in api/auth/routes.py + utils/jwt_utils.py
-├── user_service.py                  # ✅ create_user (with subscription), authenticate, get_by_email, normalize_email. update_profile + admin_reset_password land in B3.3
+├── user_service.py                  # ✅ create_user (profile + subscription tx), authenticate, get_by_email, get_by_id, delete_user, admin_reset_password
 ├── exam_service.py                  # ⏳ Exam CRUD, publish/unpublish (with question-count check), soft delete (set deleted_at), hard delete (CASCADE)
 ├── question_service.py              # ⏳ Question CRUD with per-type validation of question_data, soft/hard delete, Excel import parsing
 ├── attempt_service.py               # ⏳ Start attempt (enforce tier limits via COUNT), submit + auto-grading per question type, history queries
-├── subscription_service.py          # ⏳ Get/update subscription, period reset logic, attempt limit check, credit deduction
-└── subscription_plans.py            # ⏳ Static SUBSCRIPTION_PLANS dict — PlanTier enum, SubscriptionPlan dataclass, feature matrix (Free/Basic/Pro/Ultra)
+├── subscription_service.py          # ✅ get_by_user_id, update_tier, list_plans helper. Attempt-limit + period-reset logic land in B3.5.
+└── subscription_plans.py            # ✅ PlanTier enum, SubscriptionPlan + PlanFeature dataclasses, SUBSCRIPTION_PLANS dict (Free / Basic / Pro / Ultra)
 ```
 
 ## Data Models (SQLAlchemy ORM — optional)

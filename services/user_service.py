@@ -2,7 +2,11 @@ import logging
 import unicodedata
 from typing import Any, Optional
 
-from services.exceptions import AlreadyExistsError, InvalidCredentialsError
+from services.exceptions import (
+    AlreadyExistsError,
+    InvalidCredentialsError,
+    NotFoundError,
+)
 from utils.password_utils import hash_password, verify_password
 
 logger = logging.getLogger(__name__)
@@ -118,6 +122,47 @@ class UserService:
 
     async def get_by_email(self, email: str) -> Optional[dict[str, Any]]:
         return await self._get_by_email_with_subscription(_normalize_email(email))
+
+    async def get_by_id(self, user_id: str) -> Optional[dict[str, Any]]:
+        async with self.db.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT p.id, p.email, p.password_hash, p.full_name, p.phone,
+                       p.role, p.created_at,
+                       s.tier, s.status AS sub_status,
+                       s.credits_monthly, s.credits_remaining
+                FROM public.profiles p
+                LEFT JOIN public.subscriptions s ON s.user_id = p.id
+                WHERE p.id = $1
+                """,
+                user_id,
+            )
+            return _row_to_user(row) if row else None
+
+    async def delete_user(self, user_id: str) -> None:
+        async with self.db.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM public.profiles WHERE id = $1",
+                user_id,
+            )
+        # asyncpg returns "DELETE <n>" — parse the count
+        deleted = int(result.split()[-1]) if result else 0
+        if deleted == 0:
+            raise NotFoundError(f"User {user_id} not found")
+        logger.info("Deleted user %s", user_id)
+
+    async def admin_reset_password(self, user_id: str, new_password: str) -> None:
+        new_hash = hash_password(new_password)
+        async with self.db.acquire() as conn:
+            result = await conn.execute(
+                "UPDATE public.profiles SET password_hash = $2 WHERE id = $1",
+                user_id,
+                new_hash,
+            )
+        updated = int(result.split()[-1]) if result else 0
+        if updated == 0:
+            raise NotFoundError(f"User {user_id} not found")
+        logger.info("Admin reset password for user %s", user_id)
 
     async def _get_by_email_with_subscription(
         self, email: str

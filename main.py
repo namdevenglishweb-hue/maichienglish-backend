@@ -4,7 +4,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 
+from api.admin import router as admin_router
 from api.auth import router as auth_router
+from api.subscriptions import router as subscriptions_router
+from api.users import router as users_router
 from config.database import close_db_pool, get_db_pool, init_db_pool
 from config.logging import setup_logging
 from config.settings import get_settings
@@ -37,6 +40,9 @@ app.add_middleware(
 )
 
 app.include_router(auth_router)
+app.include_router(users_router)
+app.include_router(subscriptions_router)
+app.include_router(admin_router)
 
 
 @app.get("/health")
