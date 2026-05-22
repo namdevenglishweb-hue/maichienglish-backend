@@ -156,9 +156,11 @@ maichienglish-be/
 #### User Management
 - [x] Admin creates student accounts (no self-registration by students)
 - [x] Admin creates teacher accounts
+- [x] Admin creates parent accounts (1 parent shared by both spouses)
+- [x] Admin links a student to a parent (1:N parent → students)
 - [x] Password reset by admin
 - [x] User profile CRUD
-- [x] Role-based access (student, teacher, admin)
+- [x] Role-based access (student, teacher, admin, parent)
 
 #### Subscription Management (NEW)
 - [x] Subscription tiers: Free, Basic, Pro, Ultra
@@ -190,6 +192,8 @@ maichienglish-be/
 
 ### 3.1 `profiles` — users + auth
 
+`parent_id` is a self-FK used to link a `student` row to its `parent` row. One parent can be linked to many students (1:N from parent → students); each student has at most one parent. The column is `NULL` for non-student roles and for students without a registered parent.
+
 ```sql
 CREATE TABLE public.profiles (
   id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -198,7 +202,8 @@ CREATE TABLE public.profiles (
   full_name      text NOT NULL,
   phone          text,
   role           text NOT NULL DEFAULT 'student'
-                  CHECK (role IN ('student', 'teacher', 'admin')),
+                  CHECK (role IN ('student', 'teacher', 'admin', 'parent')),
+  parent_id      uuid REFERENCES public.profiles(id) ON DELETE SET NULL,  -- only set when role='student'
   created_at     timestamptz NOT NULL DEFAULT now()
 );
 ```
@@ -478,7 +483,7 @@ Get current user profile.
 ### 4.3 Admin Endpoints
 
 #### POST /api/admin/users
-Create new user (admin only).
+Create new user (admin only). `role` may be `student`, `teacher`, `admin`, or `parent`. `parentId` is optional and only honored when `role === "student"`; it must reference an existing profile whose role is `parent`.
 
 **Request:**
 ```json
@@ -488,7 +493,8 @@ Create new user (admin only).
   "fullName": "Nguyen Van B",
   "role": "student",
   "phone": "0909876543",
-  "subscriptionTier": "basic"
+  "subscriptionTier": "basic",
+  "parentId": "uuid-of-existing-parent"
 }
 ```
 
@@ -502,6 +508,30 @@ Reset user password (admin only).
 ```json
 {
   "newPassword": "newTempPassword123"
+}
+```
+
+#### PUT /api/admin/users/{student_id}/parent
+Link or unlink a parent on a student (admin only). The target user must be a `student`; the referenced `parentId` (if non-null) must be a `parent`. Pass `parentId: null` to unlink.
+
+**Request:**
+```json
+{
+  "parentId": "uuid-of-existing-parent"
+}
+```
+
+**Response (200):**
+```json
+{
+  "status": 200,
+  "data": {
+    "user": {
+      "id": "uuid",
+      "role": "student",
+      "parentId": "uuid-of-existing-parent"
+    }
+  }
 }
 ```
 
@@ -665,8 +695,9 @@ def verify_password(password: str, hashed: str) -> bool:
 | Role | Permissions |
 |------|-------------|
 | `student` | View published exams, take exams, view own results |
+| `parent` | View profile + attempt history of linked students (via `profiles.parent_id`); cannot take exams |
 | `teacher` | All student permissions + view all results, export data |
-| `admin` | All permissions (Ultra tier), manage users, subscriptions |
+| `admin` | All permissions (Ultra tier), manage users, parent ↔ student links, subscriptions |
 
 ### 5.4 FastAPI Dependencies
 

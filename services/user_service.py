@@ -6,6 +6,7 @@ from services.exceptions import (
     AlreadyExistsError,
     InvalidCredentialsError,
     NotFoundError,
+    ValidationError,
 )
 from utils.password_utils import hash_password, verify_password
 
@@ -30,6 +31,7 @@ def _row_to_user(row) -> dict[str, Any]:
         "full_name": row["full_name"],
         "phone": row["phone"],
         "role": row["role"],
+        "parent_id": str(row["parent_id"]) if row["parent_id"] else None,
         "tier": row["tier"] or "free",
         "subscription_status": row["sub_status"],
         "credits_monthly": row["credits_monthly"] or 0,
@@ -57,9 +59,14 @@ class UserService:
         role: str = "student",
         phone: Optional[str] = None,
         tier: str = "free",
+        parent_id: Optional[str] = None,
     ) -> dict[str, Any]:
         email = _normalize_email(email)
         password_hash_value = hash_password(password)
+
+        # parent_id only meaningful for students; silently ignore otherwise.
+        if parent_id and role != "student":
+            parent_id = None
 
         async with self.db.acquire() as conn:
             async with conn.transaction():
@@ -73,18 +80,22 @@ class UserService:
                         f"User with email {email} already exists"
                     )
 
+                if parent_id:
+                    await self._assert_role(conn, parent_id, "parent")
+
                 row = await conn.fetchrow(
                     """
                     INSERT INTO public.profiles
-                        (email, password_hash, full_name, phone, role)
-                    VALUES ($1, $2, $3, $4, $5)
-                    RETURNING id, email, full_name, phone, role, created_at
+                        (email, password_hash, full_name, phone, role, parent_id)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    RETURNING id, email, full_name, phone, role, parent_id, created_at
                     """,
                     email,
                     password_hash_value,
                     full_name,
                     phone,
                     role,
+                    parent_id,
                 )
 
                 await conn.execute(
@@ -103,9 +114,67 @@ class UserService:
             "full_name": row["full_name"],
             "phone": row["phone"],
             "role": row["role"],
+            "parent_id": str(row["parent_id"]) if row["parent_id"] else None,
             "tier": tier,
             "created_at": row["created_at"].isoformat(),
         }
+
+    async def link_parent(
+        self, student_id: str, parent_id: Optional[str]
+    ) -> dict[str, Any]:
+        """Set or clear `parent_id` on a student row.
+
+        Args:
+            student_id: UUID of the student profile to update.
+            parent_id: UUID of the parent profile, or `None` to unlink.
+
+        Raises:
+            NotFoundError: if `student_id` doesn't exist.
+            ValidationError: if target isn't a student, or `parent_id` isn't a parent.
+        """
+        async with self.db.acquire() as conn:
+            async with conn.transaction():
+                await self._assert_role(conn, student_id, "student")
+                if parent_id:
+                    await self._assert_role(conn, parent_id, "parent")
+
+                row = await conn.fetchrow(
+                    """
+                    UPDATE public.profiles
+                    SET parent_id = $2
+                    WHERE id = $1
+                    RETURNING id, role, parent_id
+                    """,
+                    student_id,
+                    parent_id,
+                )
+
+        logger.info(
+            "Linked student %s to parent %s", student_id, parent_id or "<none>"
+        )
+        return {
+            "id": str(row["id"]),
+            "role": row["role"],
+            "parent_id": str(row["parent_id"]) if row["parent_id"] else None,
+        }
+
+    async def _assert_role(self, conn, user_id: str, expected_role: str) -> None:
+        actual = await conn.fetchval(
+            "SELECT role FROM public.profiles WHERE id = $1", user_id
+        )
+        if actual is None:
+            logger.warning("_assert_role: user %s not found", user_id)
+            raise NotFoundError(f"User {user_id} not found")
+        if actual != expected_role:
+            logger.warning(
+                "_assert_role: user %s has role '%s', expected '%s'",
+                user_id,
+                actual,
+                expected_role,
+            )
+            raise ValidationError(
+                f"User {user_id} has role '{actual}', expected '{expected_role}'"
+            )
 
     async def authenticate(self, email: str, password: str) -> dict[str, Any]:
         email = _normalize_email(email)
@@ -129,7 +198,7 @@ class UserService:
             row = await conn.fetchrow(
                 """
                 SELECT p.id, p.email, p.password_hash, p.full_name, p.phone,
-                       p.role, p.created_at,
+                       p.role, p.parent_id, p.created_at,
                        s.tier, s.status AS sub_status,
                        s.credits_monthly, s.credits_remaining
                 FROM public.profiles p
@@ -174,7 +243,7 @@ class UserService:
             row = await conn.fetchrow(
                 """
                 SELECT p.id, p.email, p.password_hash, p.full_name, p.phone,
-                       p.role, p.created_at,
+                       p.role, p.parent_id, p.created_at,
                        s.tier, s.status AS sub_status,
                        s.credits_monthly, s.credits_remaining
                 FROM public.profiles p

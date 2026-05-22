@@ -9,12 +9,16 @@ class AdminCreateUserRequest(BaseModel):
     email: EmailStr = Field(..., description="User email; must be a real-world TLD")
     password: str = Field(..., min_length=6, description="Initial password (>=6 chars)")
     fullName: str = Field(..., min_length=1, description="Full name shown in UI")
-    role: Literal["student", "teacher", "admin"] = Field(
+    role: Literal["student", "teacher", "admin", "parent"] = Field(
         default="student", description="Role granted to the new user"
     )
     phone: Optional[str] = Field(default=None, description="Optional phone number")
     subscriptionTier: Literal["free", "basic", "pro", "ultra"] = Field(
         default="free", description="Initial subscription tier"
+    )
+    parentId: Optional[str] = Field(
+        default=None,
+        description="UUID of an existing parent profile. Only honored when role='student'.",
     )
 
     model_config = {
@@ -26,6 +30,7 @@ class AdminCreateUserRequest(BaseModel):
                 "role": "student",
                 "phone": "0909876543",
                 "subscriptionTier": "basic",
+                "parentId": None,
             }
         }
     }
@@ -40,6 +45,7 @@ class AdminUserView(BaseModel):
     role: str
     phone: Optional[str] = None
     tier: str
+    parentId: Optional[str] = None
     createdAt: Optional[str] = None
 
 
@@ -62,6 +68,38 @@ class AdminResetPasswordRequest(BaseModel):
     model_config = {
         "json_schema_extra": {"example": {"newPassword": "newTempPassword123"}}
     }
+
+
+class AdminLinkParentRequest(BaseModel):
+    """Body for PUT /api/admin/users/{student_id}/parent."""
+
+    parentId: Optional[str] = Field(
+        ...,
+        description="UUID of an existing parent profile, or null to unlink.",
+    )
+
+    model_config = {
+        "json_schema_extra": {"example": {"parentId": "uuid-of-existing-parent"}}
+    }
+
+
+class AdminLinkParentView(BaseModel):
+    """Minimal view returned by the link-parent endpoint."""
+
+    id: str
+    role: str
+    parentId: Optional[str] = None
+
+
+class AdminLinkParentResponseData(BaseModel):
+    user: AdminLinkParentView
+
+
+class AdminLinkParentResponse(BaseModel):
+    """Wrapped PUT /api/admin/users/{student_id}/parent response."""
+
+    status: int = 200
+    data: AdminLinkParentResponseData
 
 
 class AdminUpdateSubscriptionRequest(BaseModel):

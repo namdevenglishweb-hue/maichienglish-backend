@@ -52,8 +52,8 @@ api/
 │
 ├── admin/
 │   ├── __init__.py                  # ✅ Re-exports `router`
-│   ├── routes.py                    # ✅ POST /users, DELETE /users/{id}, POST /users/{id}/reset-password, PUT /subscriptions/{user_id} (all require_admin)
-│   └── schemas.py                   # ✅ AdminCreateUserRequest, AdminResetPasswordRequest, AdminUpdateSubscriptionRequest + response wrappers
+│   ├── routes.py                    # ✅ POST /users, DELETE /users/{id}, POST /users/{id}/reset-password, PUT /users/{student_id}/parent, PUT /subscriptions/{user_id} (all require_admin)
+│   └── schemas.py                   # ✅ AdminCreateUserRequest (includes parentId), AdminResetPasswordRequest, AdminLinkParentRequest, AdminUpdateSubscriptionRequest + response wrappers
 │
 ├── exams/
 │   ├── __init__.py                  # ⏳ Empty
@@ -83,7 +83,7 @@ services/
 ├── __init__.py                      # ✅ Empty
 ├── exceptions.py                    # ✅ ServiceError base + NotFoundError, AlreadyExistsError, ValidationError, PermissionDeniedError, InvalidCredentialsError, InsufficientCreditsError
 ├── auth_service.py                  # ⏳ Password reset code lifecycle (impl-time decision in B3.6). Login/token logic currently lives directly in api/auth/routes.py + utils/jwt_utils.py
-├── user_service.py                  # ✅ create_user (profile + subscription tx), authenticate, get_by_email, get_by_id, delete_user, admin_reset_password
+├── user_service.py                  # ✅ create_user (profile + subscription tx, accepts parent_id), authenticate, get_by_email/id, delete_user, admin_reset_password, link_parent
 ├── exam_service.py                  # ⏳ Exam CRUD, publish/unpublish (with question-count check), soft delete (set deleted_at), hard delete (CASCADE)
 ├── question_service.py              # ⏳ Question CRUD with per-type validation of question_data, soft/hard delete, Excel import parsing
 ├── attempt_service.py               # ⏳ Start attempt (enforce tier limits via COUNT), submit + auto-grading per question type, history queries
@@ -120,12 +120,18 @@ utils/
 ## Top-level Dependencies (FastAPI DI)
 
 ```
-dependencies.py                      # ✅ get_current_user (Bearer JWT validator), require_admin, require_teacher_or_admin, require_subscription_tier (factory)
+dependencies.py                      # ✅ get_current_user (Bearer JWT validator), require_admin, require_teacher_or_admin, require_parent, require_subscription_tier (factory)
 ```
 
 ## Database Migrations
 
-> The initial schema lives in [`schema.sql`](schema.sql). Apply it with [`scripts/init_schema.py`](scripts/init_schema.py) (recommended) or by pasting into the Supabase SQL Editor manually. If future schema changes accumulate, introduce a real migration tool (Alembic) under `migrations/` at that point — not before.
+> [`schema.sql`](schema.sql) is the **current-state snapshot** used by `scripts/init_schema.py --drop` for fresh installs (loses data).
+> [`migrations/`](migrations/) holds **incremental SQL** for existing databases that need upgrading without losing data. Run each one manually in the Supabase SQL Editor in numeric order. When the count grows, swap in a real migration tool (Alembic).
+
+```
+migrations/
+└── 0002_add_parent_role.sql         # ✅ Add `parent` to role CHECK + `profiles.parent_id` self-FK. Idempotent.
+```
 
 ```
 scripts/

@@ -11,6 +11,10 @@ from .schemas import (
     AdminCreateUserRequest,
     AdminCreateUserResponse,
     AdminCreateUserResponseData,
+    AdminLinkParentRequest,
+    AdminLinkParentResponse,
+    AdminLinkParentResponseData,
+    AdminLinkParentView,
     AdminResetPasswordRequest,
     AdminSubscriptionView,
     AdminUpdateSubscriptionRequest,
@@ -42,9 +46,14 @@ async def admin_create_user(request: AdminCreateUserRequest):
             role=request.role,
             phone=request.phone,
             tier=request.subscriptionTier,
+            parent_id=request.parentId,
         )
     except AlreadyExistsError as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except NotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValidationError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
     return AdminCreateUserResponse(
         status=201,
@@ -56,6 +65,7 @@ async def admin_create_user(request: AdminCreateUserRequest):
                 role=user["role"],
                 phone=user["phone"],
                 tier=user["tier"],
+                parentId=user.get("parent_id"),
                 createdAt=user["created_at"],
             )
         ),
@@ -84,6 +94,35 @@ async def admin_reset_password(user_id: str, request: AdminResetPasswordRequest)
             status_code=status.HTTP_404_NOT_FOUND, detail=str(e)
         )
     return None
+
+
+@router.put(
+    "/users/{student_id}/parent",
+    response_model=AdminLinkParentResponse,
+)
+async def admin_link_parent(student_id: str, request: AdminLinkParentRequest):
+    """Link or unlink a parent on a student profile (admin only).
+
+    - Target user must have `role='student'`.
+    - `parentId` (if non-null) must reference a profile with `role='parent'`.
+    - Pass `parentId: null` to unlink.
+    """
+    try:
+        result = await user_service.link_parent(student_id, request.parentId)
+    except NotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValidationError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    return AdminLinkParentResponse(
+        data=AdminLinkParentResponseData(
+            user=AdminLinkParentView(
+                id=result["id"],
+                role=result["role"],
+                parentId=result["parent_id"],
+            ),
+        ),
+    )
 
 
 @router.put(

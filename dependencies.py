@@ -44,6 +44,15 @@ async def require_teacher_or_admin(
     return current_user
 
 
+async def require_parent(current_user: dict = Depends(get_current_user)) -> dict:
+    if current_user.get("role") != "parent":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Parent access required",
+        )
+    return current_user
+
+
 def require_subscription_tier(required_tiers: list[str]) -> Callable:
     async def dependency(current_user: dict = Depends(get_current_user)) -> dict:
         tier = current_user.get("tier", "free")

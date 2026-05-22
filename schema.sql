@@ -18,7 +18,8 @@ CREATE TABLE public.profiles (
   full_name      text NOT NULL,
   phone          text,
   role           text NOT NULL DEFAULT 'student'
-                  CHECK (role IN ('student', 'teacher', 'admin')),
+                  CHECK (role IN ('student', 'teacher', 'admin', 'parent')),
+  parent_id      uuid REFERENCES public.profiles(id) ON DELETE SET NULL,  -- only set when role='student'
   created_at     timestamptz NOT NULL DEFAULT now()
 );
 
