@@ -33,3 +33,16 @@ class UserMeResponse(BaseModel):
 
     status: int = 200
     data: UserMeResponseData
+
+
+class UserProfileUpdate(BaseModel):
+    """Body for PUT /api/users/me. Only the user's own mutable fields."""
+
+    fullName: Optional[str] = Field(default=None, min_length=1, description="New display name")
+    phone: Optional[str] = Field(default=None, description="New phone number")
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {"fullName": "Nguyen Van A", "phone": "0901234567"}
+        }
+    }

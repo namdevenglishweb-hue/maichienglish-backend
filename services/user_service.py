@@ -222,6 +222,48 @@ class UserService:
             raise NotFoundError(f"User {user_id} not found")
         logger.info("Deleted user %s", user_id)
 
+    async def update_profile(
+        self,
+        user_id: str,
+        full_name: Optional[str] = None,
+        phone: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Update mutable profile fields the user is allowed to edit themselves.
+
+        Email + role + parent_id remain admin-managed and are not accepted here.
+        """
+        updates: dict[str, Any] = {}
+        if full_name is not None:
+            updates["full_name"] = full_name
+        if phone is not None:
+            updates["phone"] = phone
+
+        if not updates:
+            raise ValidationError("No fields to update")
+
+        set_parts = []
+        params: list[Any] = []
+        for k, v in updates.items():
+            params.append(v)
+            set_parts.append(f"{k} = ${len(params)}")
+        params.append(user_id)
+
+        async with self.db.acquire() as conn:
+            row = await conn.fetchrow(
+                f"""
+                UPDATE public.profiles
+                SET {', '.join(set_parts)}
+                WHERE id = ${len(params)}
+                RETURNING id
+                """,
+                *params,
+            )
+        if not row:
+            logger.warning("update_profile: user %s not found", user_id)
+            raise NotFoundError(f"User {user_id} not found")
+        logger.info("Updated profile %s (fields=%s)", user_id, list(updates))
+        return await self.get_by_id(user_id)
+
     async def admin_reset_password(self, user_id: str, new_password: str) -> None:
         new_hash = hash_password(new_password)
         async with self.db.acquire() as conn:

@@ -98,3 +98,58 @@ class VerifyResponse(BaseModel):
 
     status: int = 200
     data: VerifyResponseData
+
+
+class PasswordResetCodeRequest(BaseModel):
+    """Body for POST /api/auth/password/request-code."""
+
+    email: EmailStr = Field(..., description="Account email")
+
+    model_config = {
+        "json_schema_extra": {"example": {"email": "user@example.com"}}
+    }
+
+
+class PasswordResetCodeResponseData(BaseModel):
+    message: str = "Code sent"
+    expiresIn: int = Field(..., description="Code lifetime in seconds")
+    devCode: Optional[str] = Field(
+        default=None,
+        description="Reset code returned inline until B3.6c email delivery lands.",
+    )
+
+
+class PasswordResetCodeResponse(BaseModel):
+    """Wrapped POST /api/auth/password/request-code response."""
+
+    status: int = 200
+    data: PasswordResetCodeResponseData
+
+
+class PasswordResetRequest(BaseModel):
+    """Body for POST /api/auth/password/reset."""
+
+    email: EmailStr
+    code: str = Field(..., min_length=6, max_length=6, description="6-digit numeric code")
+    newPassword: str = Field(..., min_length=6, description="New password (>=6 chars)")
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "email": "user@example.com",
+                "code": "412903",
+                "newPassword": "newPassword123",
+            }
+        }
+    }
+
+
+class PasswordResetResponseData(BaseModel):
+    message: str = "Password reset successful"
+
+
+class PasswordResetResponse(BaseModel):
+    """Wrapped POST /api/auth/password/reset response."""
+
+    status: int = 200
+    data: PasswordResetResponseData

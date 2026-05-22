@@ -4,7 +4,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from config.settings import get_settings
 from dependencies import get_current_user
-from services.exceptions import InvalidCredentialsError
+from services.auth_service import auth_service
+from services.exceptions import InvalidCredentialsError, ValidationError
 from services.user_service import user_service
 from utils.jwt_utils import (
     TokenType,
@@ -17,6 +18,12 @@ from .schemas import (
     LoginRequest,
     LoginResponse,
     LoginResponseData,
+    PasswordResetCodeRequest,
+    PasswordResetCodeResponse,
+    PasswordResetCodeResponseData,
+    PasswordResetRequest,
+    PasswordResetResponse,
+    PasswordResetResponseData,
     RefreshRequest,
     RefreshResponse,
     RefreshResponseData,
@@ -113,6 +120,39 @@ async def refresh(request: RefreshRequest):
             ),
         ),
     )
+
+
+@router.post(
+    "/password/request-code", response_model=PasswordResetCodeResponse
+)
+async def request_password_reset_code(request: PasswordResetCodeRequest):
+    """Issue a 6-digit reset code (10-min expiry).
+
+    Always returns 200 to avoid email-enumeration. Until email delivery is
+    wired in (B3.6c), the code is returned inline as `devCode` so the
+    frontend can complete the reset flow end-to-end during dev.
+    """
+    result = await auth_service.request_password_reset_code(str(request.email))
+    return PasswordResetCodeResponse(
+        data=PasswordResetCodeResponseData(
+            expiresIn=result["expires_in_seconds"],
+            devCode=result["code"],
+        ),
+    )
+
+
+@router.post("/password/reset", response_model=PasswordResetResponse)
+async def reset_password(request: PasswordResetRequest):
+    """Replace password using a code obtained from /password/request-code."""
+    try:
+        await auth_service.reset_password(
+            email=str(request.email),
+            code=request.code,
+            new_password=request.newPassword,
+        )
+    except ValidationError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return PasswordResetResponse(data=PasswordResetResponseData())
 
 
 @router.post("/verify", response_model=VerifyResponse)

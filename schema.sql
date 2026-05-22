@@ -45,6 +45,24 @@ CREATE TABLE public.subscriptions (
 
 
 -- ------------------------------------------------------------
+-- password_reset_codes — short-lived 6-digit codes for self-service reset
+-- ------------------------------------------------------------
+CREATE TABLE public.password_reset_codes (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id     uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+  code_hash   text NOT NULL,
+  expires_at  timestamptz NOT NULL,
+  used_at     timestamptz,
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_password_reset_codes_user
+  ON public.password_reset_codes(user_id);
+CREATE INDEX idx_password_reset_codes_expires
+  ON public.password_reset_codes(expires_at);
+
+
+-- ------------------------------------------------------------
 -- exams — listening uses audio_url + max_audio_plays; reading uses passage
 -- ------------------------------------------------------------
 CREATE TABLE public.exams (

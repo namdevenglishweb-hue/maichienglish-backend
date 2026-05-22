@@ -42,13 +42,13 @@ api/
 │
 ├── auth/
 │   ├── __init__.py                  # ✅ Re-exports `router`
-│   ├── routes.py                    # ✅ POST /login, /refresh, /verify (password reset endpoints land in B3.6)
-│   └── schemas.py                   # ✅ LoginRequest, LoginResponse, RefreshRequest/Response, VerifyResponse
+│   ├── routes.py                    # ✅ POST /login, /refresh, /verify, /password/request-code, /password/reset
+│   └── schemas.py                   # ✅ LoginRequest, LoginResponse, RefreshRequest/Response, VerifyResponse, PasswordResetCodeRequest/Response (devCode field), PasswordResetRequest/Response
 │
 ├── users/
 │   ├── __init__.py                  # ✅ Re-exports `router`
-│   ├── routes.py                    # ✅ GET /api/users/me — current user's profile + subscription
-│   └── schemas.py                   # ✅ UserMeResponse, UserSubscriptionFull
+│   ├── routes.py                    # ✅ GET /api/users/me + PUT /api/users/me (self-edit fullName/phone)
+│   └── schemas.py                   # ✅ UserMeResponse, UserMeView, UserProfileUpdate, UserSubscriptionFull
 │
 ├── admin/
 │   ├── __init__.py                  # ✅ Re-exports `router`
@@ -87,8 +87,8 @@ api/
 services/
 ├── __init__.py                      # ✅ Empty
 ├── exceptions.py                    # ✅ ServiceError base + NotFoundError, AlreadyExistsError, ValidationError, PermissionDeniedError, InvalidCredentialsError, InsufficientCreditsError
-├── auth_service.py                  # ⏳ Password reset code lifecycle (impl-time decision in B3.6). Login/token logic currently lives directly in api/auth/routes.py + utils/jwt_utils.py
-├── user_service.py                  # ✅ create_user (profile + subscription tx, accepts parent_id), authenticate, get_by_email/id, delete_user, admin_reset_password, link_parent, list_children_of_parent, is_child_of
+├── auth_service.py                  # ✅ Password reset code lifecycle: request_password_reset_code (anti-enumeration silent 200 + invalidate previous codes), reset_password (bcrypt-compare candidates, mark used, replace password_hash in one tx). Login/token logic stays in api/auth/routes.py + utils/jwt_utils.py.
+├── user_service.py                  # ✅ create_user (profile + subscription tx, accepts parent_id), authenticate, get_by_email/id, update_profile (self-edit fullName/phone), delete_user, admin_reset_password, link_parent, list_children_of_parent, is_child_of
 ├── exam_service.py                  # ✅ Exam CRUD, publish (checks >=1 active question) / unpublish, soft delete (set deleted_at), hard delete (CASCADE)
 ├── question_service.py              # ✅ Question CRUD with Pydantic per-type validation of question_data (multiple_choice / fill_blank / matching), auto-assigned position, soft/hard delete. Excel import lands in B3.4b.
 ├── attempt_service.py               # ✅ Start (enforces tier limit via COUNT vs subscription.current_period_start), submit + auto-grade, history queries, record_audio_play (enforces exams.max_audio_plays). Custom AttemptLimitExceededError + AudioPlayLimitExceededError extend PermissionDeniedError.
@@ -135,7 +135,8 @@ dependencies.py                      # ✅ get_current_user (Bearer JWT validato
 
 ```
 migrations/
-└── 0002_add_parent_role.sql         # ✅ Add `parent` to role CHECK + `profiles.parent_id` self-FK. Idempotent.
+├── 0002_add_parent_role.sql         # ✅ Add `parent` to role CHECK + `profiles.parent_id` self-FK. Idempotent.
+└── 0003_add_password_reset_codes.sql # ✅ Create `password_reset_codes` table (bcrypt-hashed 6-digit codes, 10-min TTL). Idempotent.
 ```
 
 ```

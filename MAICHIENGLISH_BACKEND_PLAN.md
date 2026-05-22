@@ -228,7 +228,22 @@ CREATE TABLE public.subscriptions (
 );
 ```
 
-### 3.3 `exams` — exam definitions
+### 3.3 `password_reset_codes` — short-lived 6-digit codes
+
+Used by `POST /api/auth/password/request-code` and `POST /api/auth/password/reset`. The plaintext code is sent to the user (eventually by email — for now returned in the API response in dev); only its bcrypt hash is persisted. Default lifetime 10 minutes.
+
+```sql
+CREATE TABLE public.password_reset_codes (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id     uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+  code_hash   text NOT NULL,
+  expires_at  timestamptz NOT NULL,
+  used_at     timestamptz,
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+```
+
+### 3.4 `exams` — exam definitions
 
 `audio_url` + `max_audio_plays` apply to listening exams (one shared audio per exam, with a play-count limit enforced via `attempts.audio_play_count`). `passage` applies to reading exams.
 
@@ -253,7 +268,7 @@ CREATE TABLE public.exams (
 );
 ```
 
-### 3.4 `questions` — flexible per type via JSONB
+### 3.5 `questions` — flexible per type via JSONB
 
 `question_data` shape varies by `question_type`:
 
@@ -275,7 +290,7 @@ CREATE TABLE public.questions (
 );
 ```
 
-### 3.5 `attempts` — one row per exam attempt
+### 3.6 `attempts` — one row per exam attempt
 
 ```sql
 CREATE TABLE public.attempts (
@@ -292,7 +307,7 @@ CREATE TABLE public.attempts (
 );
 ```
 
-### 3.6 `answers` — one row per question per attempt
+### 3.7 `answers` — one row per question per attempt
 
 ```sql
 CREATE TABLE public.answers (
@@ -306,7 +321,7 @@ CREATE TABLE public.answers (
 );
 ```
 
-### 3.7 Storage buckets (Supabase Storage)
+### 3.8 Storage buckets (Supabase Storage)
 
 Create two buckets in the new Supabase project:
 
@@ -418,7 +433,9 @@ Verify an access token and return the decoded user/claims. Frontend uses this to
 ```
 
 #### POST /api/auth/password/request-code
-Request password reset code.
+Request a 6-digit password-reset code. Lifetime: 10 minutes.
+
+The response **always** returns `200` regardless of whether the email exists (anti-enumeration). Until an email provider is wired in (B3.6c), the code is returned inline as `devCode`; that field disappears once real email delivery is enabled.
 
 **Request:**
 ```json
@@ -433,20 +450,38 @@ Request password reset code.
   "status": 200,
   "data": {
     "message": "Code sent",
-    "expiresIn": 600
+    "expiresIn": 600,
+    "devCode": "412903"
   }
 }
 ```
 
 #### POST /api/auth/password/reset
-Reset password with code.
+Reset password with a code obtained via `/password/request-code`.
 
 **Request:**
 ```json
 {
   "email": "user@example.com",
-  "code": "123456",
+  "code": "412903",
   "newPassword": "newPassword123"
+}
+```
+
+**Response (200):**
+```json
+{
+  "status": 200,
+  "data": {
+    "message": "Password reset successful"
+  }
+}
+```
+
+**Error Response (400):**
+```json
+{
+  "detail": "Invalid or expired code"
 }
 ```
 
@@ -479,6 +514,21 @@ Get current user profile.
   }
 }
 ```
+
+#### PUT /api/users/me
+Update the current user's own profile fields. Only `fullName` and `phone` are editable here; email + role + subscription are admin-managed.
+
+**Headers:** `Authorization: Bearer <token>`
+
+**Request (any subset of fields):**
+```json
+{
+  "fullName": "Nguyen Van A",
+  "phone": "0901234567"
+}
+```
+
+**Response (200):** same shape as `GET /api/users/me`.
 
 ### 4.3 Admin Endpoints
 
