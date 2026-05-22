@@ -6,6 +6,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api.admin import router as admin_router
 from api.auth import router as auth_router
+from api.exams import router as exams_router
+from api.questions import exam_scoped_router as exam_questions_router
+from api.questions import question_router as questions_router
 from api.subscriptions import router as subscriptions_router
 from api.users import router as users_router
 from config.database import close_db_pool, get_db_pool, init_db_pool
@@ -43,6 +46,9 @@ app.include_router(auth_router)
 app.include_router(users_router)
 app.include_router(subscriptions_router)
 app.include_router(admin_router)
+app.include_router(exams_router)
+app.include_router(exam_questions_router)
+app.include_router(questions_router)
 
 
 @app.get("/health")

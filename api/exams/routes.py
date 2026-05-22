@@ -1,0 +1,183 @@
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, status
+
+from dependencies import get_current_user, require_admin
+from services.exam_service import exam_service
+from services.exceptions import NotFoundError, ValidationError
+from services.user_service import user_service
+
+from .schemas import (
+    ExamCreate,
+    ExamListResponse,
+    ExamListResponseData,
+    ExamResponse,
+    ExamResponseData,
+    ExamUpdate,
+    ExamView,
+)
+
+router = APIRouter(prefix="/api/exams", tags=["Exams"])
+
+
+def _to_view(exam: dict) -> ExamView:
+    return ExamView(
+        id=exam["id"],
+        title=exam["title"],
+        level=exam["level"],
+        skill=exam["skill"],
+        durationMinutes=exam["duration_minutes"],
+        description=exam["description"],
+        audioUrl=exam["audio_url"],
+        passage=exam["passage"],
+        maxAudioPlays=exam["max_audio_plays"],
+        isPublished=exam["is_published"],
+        createdBy=exam["created_by"],
+        createdAt=exam["created_at"],
+        updatedAt=exam["updated_at"],
+        deletedAt=exam["deleted_at"],
+    )
+
+
+def _is_privileged(role: Optional[str]) -> bool:
+    return role in ("admin", "teacher")
+
+
+@router.get("", response_model=ExamListResponse)
+async def list_exams(
+    level: Optional[str] = None,
+    skill: Optional[str] = None,
+    published: Optional[bool] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    """List exams. Students see only published exams; admins/teachers can filter freely."""
+    role = current_user.get("role")
+    if not _is_privileged(role):
+        # Force published filter for student / parent
+        published = True
+
+    exams = await exam_service.list_exams(
+        level=level, skill=skill, is_published=published
+    )
+    return ExamListResponse(
+        data=ExamListResponseData(exams=[_to_view(e) for e in exams]),
+    )
+
+
+@router.get("/{exam_id}", response_model=ExamResponse)
+async def get_exam(exam_id: str, current_user: dict = Depends(get_current_user)):
+    """Get a single exam by id. Non-privileged users only see published exams."""
+    exam = await exam_service.get_exam(exam_id)
+    if not exam:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Exam not found"
+        )
+    if not _is_privileged(current_user.get("role")) and not exam["is_published"]:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Exam not found"
+        )
+    return ExamResponse(data=ExamResponseData(exam=_to_view(exam)))
+
+
+@router.post(
+    "",
+    response_model=ExamResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_exam(
+    request: ExamCreate, admin: dict = Depends(require_admin)
+):
+    """Create a new exam (admin only)."""
+    admin_profile = await user_service.get_by_email(admin["sub"])
+    created_by = admin_profile["id"] if admin_profile else None
+    exam = await exam_service.create_exam(
+        title=request.title,
+        level=request.level,
+        skill=request.skill,
+        duration_minutes=request.duration_minutes,
+        description=request.description,
+        audio_url=request.audio_url,
+        passage=request.passage,
+        max_audio_plays=request.max_audio_plays,
+        created_by=created_by,
+    )
+    return ExamResponse(status=201, data=ExamResponseData(exam=_to_view(exam)))
+
+
+@router.put(
+    "/{exam_id}",
+    response_model=ExamResponse,
+    dependencies=[Depends(require_admin)],
+)
+async def update_exam(exam_id: str, request: ExamUpdate):
+    """Update an exam (admin only). Pass only the fields you want to change."""
+    updates = request.model_dump(exclude_unset=True)
+    if not updates:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="No fields to update"
+        )
+    try:
+        exam = await exam_service.update_exam(exam_id, **updates)
+    except NotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValidationError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return ExamResponse(data=ExamResponseData(exam=_to_view(exam)))
+
+
+@router.post(
+    "/{exam_id}/publish",
+    response_model=ExamResponse,
+    dependencies=[Depends(require_admin)],
+)
+async def publish_exam(exam_id: str):
+    """Publish an exam (admin only). Requires at least one active question."""
+    try:
+        exam = await exam_service.publish_exam(exam_id)
+    except NotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValidationError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return ExamResponse(data=ExamResponseData(exam=_to_view(exam)))
+
+
+@router.post(
+    "/{exam_id}/unpublish",
+    response_model=ExamResponse,
+    dependencies=[Depends(require_admin)],
+)
+async def unpublish_exam(exam_id: str):
+    """Unpublish an exam (admin only). Hides it from students without deleting."""
+    try:
+        exam = await exam_service.unpublish_exam(exam_id)
+    except NotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    return ExamResponse(data=ExamResponseData(exam=_to_view(exam)))
+
+
+@router.delete(
+    "/{exam_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(require_admin)],
+)
+async def soft_delete_exam(exam_id: str):
+    """Soft-delete an exam (admin only). Sets deleted_at; data preserved."""
+    try:
+        await exam_service.soft_delete_exam(exam_id)
+    except NotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    return None
+
+
+@router.delete(
+    "/{exam_id}/hard",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(require_admin)],
+)
+async def hard_delete_exam(exam_id: str):
+    """Hard-delete an exam (admin only). CASCADEs through questions, attempts, answers."""
+    try:
+        await exam_service.hard_delete_exam(exam_id)
+    except NotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    return None

@@ -11,7 +11,7 @@
 
 ```
 maichienglish-be/
-├── main.py                          # ✅ FastAPI app entry — lifespan inits DB pool, uses setup_logging(), mounts auth/users/subscriptions/admin routers, exposes /health and /db-ping
+├── main.py                          # ✅ FastAPI app entry — lifespan inits DB pool, uses setup_logging(), mounts auth/users/subscriptions/admin/exams/questions routers, exposes /health and /db-ping
 ├── requirements.txt                 # ✅ Pinned deps: fastapi, uvicorn, pydantic, pydantic-settings, email-validator, asyncpg, pyjwt, bcrypt
 ├── Dockerfile                       # ✅ Python 3.14-slim, non-root appuser, EXPOSE 8000, HEALTHCHECK on /health
 ├── render.yaml                      # ✅ Render web service: docker runtime, Singapore region, free plan, autoDeploy:false (deploy triggered by GHA after CI passes), healthCheckPath /health
@@ -56,14 +56,14 @@ api/
 │   └── schemas.py                   # ✅ AdminCreateUserRequest (includes parentId), AdminResetPasswordRequest, AdminLinkParentRequest, AdminUpdateSubscriptionRequest + response wrappers
 │
 ├── exams/
-│   ├── __init__.py                  # ⏳ Empty
-│   ├── routes.py                    # ⏳ GET / (list with level/skill filters), POST /, PUT /{id}, POST /{id}/publish, DELETE /{id} (soft), DELETE /{id}/hard (admin only, CASCADE)
-│   └── schemas.py                   # ⏳ ExamCreate, ExamUpdate, ExamResponse, ExamListResponse
+│   ├── __init__.py                  # ✅ Re-exports `router`
+│   ├── routes.py                    # ✅ GET / (filter level/skill/published), GET /{id}, POST /, PUT /{id}, POST /{id}/publish, POST /{id}/unpublish, DELETE /{id} (soft), DELETE /{id}/hard. Students forced to is_published=true.
+│   └── schemas.py                   # ✅ ExamCreate, ExamUpdate, ExamView, ExamResponse, ExamListResponse
 │
 ├── questions/
-│   ├── __init__.py                  # ⏳ Empty
-│   ├── routes.py                    # ⏳ GET /exams/{id}/questions, POST /exams/{id}/questions, PUT /{id}, DELETE /{id} (soft), DELETE /{id}/hard, POST /exams/{id}/questions/import (Excel)
-│   └── schemas.py                   # ⏳ QuestionCreate, QuestionUpdate, QuestionResponse, plus per-type discriminated unions for question_data
+│   ├── __init__.py                  # ✅ Re-exports both routers
+│   ├── routes.py                    # ✅ exam_scoped_router: GET/POST /api/exams/{id}/questions  |  question_router: GET/PUT/DELETE /api/questions/{id}, DELETE /api/questions/{id}/hard. Excel import deferred to B3.4b.
+│   └── schemas.py                   # ✅ QuestionCreate (server-side per-type validation), QuestionUpdate, QuestionView + wrappers
 │
 ├── attempts/
 │   ├── __init__.py                  # ⏳ Empty
@@ -84,8 +84,8 @@ services/
 ├── exceptions.py                    # ✅ ServiceError base + NotFoundError, AlreadyExistsError, ValidationError, PermissionDeniedError, InvalidCredentialsError, InsufficientCreditsError
 ├── auth_service.py                  # ⏳ Password reset code lifecycle (impl-time decision in B3.6). Login/token logic currently lives directly in api/auth/routes.py + utils/jwt_utils.py
 ├── user_service.py                  # ✅ create_user (profile + subscription tx, accepts parent_id), authenticate, get_by_email/id, delete_user, admin_reset_password, link_parent
-├── exam_service.py                  # ⏳ Exam CRUD, publish/unpublish (with question-count check), soft delete (set deleted_at), hard delete (CASCADE)
-├── question_service.py              # ⏳ Question CRUD with per-type validation of question_data, soft/hard delete, Excel import parsing
+├── exam_service.py                  # ✅ Exam CRUD, publish (checks >=1 active question) / unpublish, soft delete (set deleted_at), hard delete (CASCADE)
+├── question_service.py              # ✅ Question CRUD with Pydantic per-type validation of question_data (multiple_choice / fill_blank / matching), auto-assigned position, soft/hard delete. Excel import lands in B3.4b.
 ├── attempt_service.py               # ⏳ Start attempt (enforce tier limits via COUNT), submit + auto-grading per question type, history queries
 ├── subscription_service.py          # ✅ get_by_user_id, update_tier, list_plans helper. Attempt-limit + period-reset logic land in B3.5.
 └── subscription_plans.py            # ✅ PlanTier enum, SubscriptionPlan + PlanFeature dataclasses, SUBSCRIPTION_PLANS dict (Free / Basic / Pro / Ultra)
