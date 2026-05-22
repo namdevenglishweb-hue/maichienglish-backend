@@ -1,0 +1,70 @@
+"""Per-type question grading + correct-answer stripping.
+
+Used by attempt_service.submit (grading) and attempt_service.start
+(stripping correct answers from question_data before returning to a
+student who is taking the exam).
+"""
+from typing import Any
+
+
+def strip_correct(question_type: str, question_data: dict) -> dict:
+    """Return a shallow copy of question_data with answer fields removed.
+
+    Used when serving a question to a student who hasn't submitted yet.
+    """
+    stripped = dict(question_data)
+    if question_type == "multiple_choice":
+        stripped.pop("correct_index", None)
+    elif question_type == "fill_blank":
+        stripped.pop("correct_answers", None)
+        stripped.pop("case_sensitive", None)
+    elif question_type == "matching":
+        stripped.pop("correct_pairs", None)
+    return stripped
+
+
+def _grade_multiple_choice(student_answer: Any, qdata: dict) -> bool:
+    if not isinstance(student_answer, int):
+        return False
+    return student_answer == qdata.get("correct_index")
+
+
+def _grade_fill_blank(student_answer: Any, qdata: dict) -> bool:
+    if not isinstance(student_answer, str):
+        return False
+    correct = qdata.get("correct_answers") or []
+    case_sensitive = qdata.get("case_sensitive", False)
+    if case_sensitive:
+        return student_answer.strip() in [c.strip() for c in correct]
+    return student_answer.strip().lower() in [c.strip().lower() for c in correct]
+
+
+def _grade_matching(student_answer: Any, qdata: dict) -> bool:
+    if not isinstance(student_answer, list):
+        return False
+    correct = qdata.get("correct_pairs") or []
+    try:
+        student_set = {tuple(pair) for pair in student_answer if len(pair) == 2}
+        correct_set = {tuple(pair) for pair in correct if len(pair) == 2}
+    except (TypeError, ValueError):
+        return False
+    return student_set == correct_set
+
+
+def grade_question(
+    question_type: str, question_data: dict, student_answer: Any
+) -> bool:
+    """Return True if student_answer is correct.
+
+    `student_answer` may be None (skipped) — always False.
+    Unknown question_type — always False.
+    """
+    if student_answer is None:
+        return False
+    if question_type == "multiple_choice":
+        return _grade_multiple_choice(student_answer, question_data)
+    if question_type == "fill_blank":
+        return _grade_fill_blank(student_answer, question_data)
+    if question_type == "matching":
+        return _grade_matching(student_answer, question_data)
+    return False

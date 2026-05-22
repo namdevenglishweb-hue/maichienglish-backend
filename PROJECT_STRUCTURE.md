@@ -11,7 +11,7 @@
 
 ```
 maichienglish-be/
-├── main.py                          # ✅ FastAPI app entry — lifespan inits DB pool, uses setup_logging(), mounts auth/users/subscriptions/admin/exams/questions routers, exposes /health and /db-ping
+├── main.py                          # ✅ FastAPI app entry — lifespan inits DB pool, uses setup_logging(), mounts auth/users/subscriptions/admin/exams/questions/attempts/parents routers, exposes /health and /db-ping
 ├── requirements.txt                 # ✅ Pinned deps: fastapi, uvicorn, pydantic, pydantic-settings, email-validator, asyncpg, pyjwt, bcrypt
 ├── Dockerfile                       # ✅ Python 3.14-slim, non-root appuser, EXPOSE 8000, HEALTHCHECK on /health
 ├── render.yaml                      # ✅ Render web service: docker runtime, Singapore region, free plan, autoDeploy:false (deploy triggered by GHA after CI passes), healthCheckPath /health
@@ -66,9 +66,14 @@ api/
 │   └── schemas.py                   # ✅ QuestionCreate (server-side per-type validation), QuestionUpdate, QuestionView + wrappers
 │
 ├── attempts/
-│   ├── __init__.py                  # ⏳ Empty
-│   ├── routes.py                    # ⏳ POST / (start), POST /{id}/submit, GET /{id} (detail), GET /history
-│   └── schemas.py                   # ⏳ AttemptStartRequest/Response, AttemptSubmitRequest/Response, AttemptDetailResponse, AttemptHistoryItem
+│   ├── __init__.py                  # ✅ Re-exports `router`
+│   ├── routes.py                    # ✅ POST / (start, enforces tier limit), POST /{id}/submit (auto-grade), POST /{id}/audio-play (listening cap), GET /history, GET /{id} (detail; owner/staff/parent)
+│   └── schemas.py                   # ✅ AttemptStart/Submit Request+Response, AttemptDetailResponse, AttemptHistoryItem, AudioPlayResponse
+│
+├── parents/
+│   ├── __init__.py                  # ✅ Re-exports `router` (router-level require_parent)
+│   ├── routes.py                    # ✅ GET /api/parents/me/children, GET .../children/{student_id}/attempts, GET .../{attempt_id} — all gated to parent's linked children
+│   └── schemas.py                   # ✅ ChildView, ChildrenListResponse (attempt schemas reused from api/attempts)
 │
 └── subscriptions/
     ├── __init__.py                  # ✅ Re-exports `router`
@@ -83,10 +88,10 @@ services/
 ├── __init__.py                      # ✅ Empty
 ├── exceptions.py                    # ✅ ServiceError base + NotFoundError, AlreadyExistsError, ValidationError, PermissionDeniedError, InvalidCredentialsError, InsufficientCreditsError
 ├── auth_service.py                  # ⏳ Password reset code lifecycle (impl-time decision in B3.6). Login/token logic currently lives directly in api/auth/routes.py + utils/jwt_utils.py
-├── user_service.py                  # ✅ create_user (profile + subscription tx, accepts parent_id), authenticate, get_by_email/id, delete_user, admin_reset_password, link_parent
+├── user_service.py                  # ✅ create_user (profile + subscription tx, accepts parent_id), authenticate, get_by_email/id, delete_user, admin_reset_password, link_parent, list_children_of_parent, is_child_of
 ├── exam_service.py                  # ✅ Exam CRUD, publish (checks >=1 active question) / unpublish, soft delete (set deleted_at), hard delete (CASCADE)
 ├── question_service.py              # ✅ Question CRUD with Pydantic per-type validation of question_data (multiple_choice / fill_blank / matching), auto-assigned position, soft/hard delete. Excel import lands in B3.4b.
-├── attempt_service.py               # ⏳ Start attempt (enforce tier limits via COUNT), submit + auto-grading per question type, history queries
+├── attempt_service.py               # ✅ Start (enforces tier limit via COUNT vs subscription.current_period_start), submit + auto-grade, history queries, record_audio_play (enforces exams.max_audio_plays). Custom AttemptLimitExceededError + AudioPlayLimitExceededError extend PermissionDeniedError.
 ├── subscription_service.py          # ✅ get_by_user_id, update_tier, list_plans helper. Attempt-limit + period-reset logic land in B3.5.
 └── subscription_plans.py            # ✅ PlanTier enum, SubscriptionPlan + PlanFeature dataclasses, SUBSCRIPTION_PLANS dict (Free / Basic / Pro / Ultra)
 ```
@@ -113,7 +118,7 @@ utils/
 ├── __init__.py                      # ✅ Empty
 ├── jwt_utils.py                     # ✅ TokenType constants, create_access_token, create_refresh_token, decode_token (with type verification)
 ├── password_utils.py                # ✅ hash_password, verify_password (bcrypt cost 12)
-├── grading_utils.py                 # ⏳ Per-question-type grading (B3.5): multiple_choice (index match), fill_blank (string match w/ case_sensitive), matching (pair compare)
+├── grading_utils.py                 # ✅ grade_question (multiple_choice index match / fill_blank string-match w/ case_sensitive / matching set-of-pairs compare), strip_correct (removes answer fields before serving to students mid-attempt)
 └── excel_utils.py                   # ⏳ Excel-to-questions parser (B3.4)
 ```
 

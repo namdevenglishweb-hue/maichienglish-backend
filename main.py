@@ -5,8 +5,10 @@ from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.admin import router as admin_router
+from api.attempts import router as attempts_router
 from api.auth import router as auth_router
 from api.exams import router as exams_router
+from api.parents import router as parents_router
 from api.questions import exam_scoped_router as exam_questions_router
 from api.questions import question_router as questions_router
 from api.subscriptions import router as subscriptions_router
@@ -49,6 +51,8 @@ app.include_router(admin_router)
 app.include_router(exams_router)
 app.include_router(exam_questions_router)
 app.include_router(questions_router)
+app.include_router(attempts_router)
+app.include_router(parents_router)
 
 
 @app.get("/health")

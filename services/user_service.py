@@ -236,6 +236,42 @@ class UserService:
             raise NotFoundError(f"User {user_id} not found")
         logger.info("Admin reset password for user %s", user_id)
 
+    async def list_children_of_parent(self, parent_id: str) -> list[dict[str, Any]]:
+        """Return student profiles linked to the given parent via parent_id."""
+        async with self.db.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, email, full_name, phone, role, parent_id, created_at
+                FROM public.profiles
+                WHERE parent_id = $1 AND role = 'student'
+                ORDER BY created_at ASC
+                """,
+                parent_id,
+            )
+        return [
+            {
+                "id": str(r["id"]),
+                "email": r["email"],
+                "full_name": r["full_name"],
+                "phone": r["phone"],
+                "role": r["role"],
+                "parent_id": str(r["parent_id"]) if r["parent_id"] else None,
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            }
+            for r in rows
+        ]
+
+    async def is_child_of(self, student_id: str, parent_id: str) -> bool:
+        """True if `student_id` is a student whose parent_id equals `parent_id`."""
+        async with self.db.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT role, parent_id FROM public.profiles WHERE id = $1",
+                student_id,
+            )
+        if not row:
+            return False
+        return row["role"] == "student" and str(row["parent_id"]) == parent_id
+
     async def _get_by_email_with_subscription(
         self, email: str
     ) -> Optional[dict[str, Any]]:
