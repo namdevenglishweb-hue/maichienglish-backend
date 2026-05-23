@@ -29,7 +29,7 @@ maichienglish-be/
 ```
 config/
 ├── __init__.py                      # ✅ Empty package marker
-├── settings.py                      # ✅ Pydantic `Settings(BaseSettings)` — DATABASE_URL, DEBUG, CORS_ORIGINS, CORS_ORIGIN_REGEX, JWT_*; cached via @lru_cache
+├── settings.py                      # ✅ Pydantic `Settings(BaseSettings)` — app_name, port, DATABASE_URL, DEBUG, CORS_ORIGINS, CORS_ORIGIN_REGEX, JWT_*, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY; cached via @lru_cache; warns when JWT secret is still default
 ├── database.py                      # ✅ asyncpg pool lifecycle — init_db_pool / close_db_pool / get_db_pool
 └── logging.py                       # ✅ `setup_logging()` — stdout handler, common format, quiets httpx/uvicorn.access
 ```
@@ -53,7 +53,7 @@ api/
 ├── admin/
 │   ├── __init__.py                  # ✅ Re-exports `router`
 │   ├── routes.py                    # ✅ GET /users (paginated list, role filter), POST /users, DELETE /users/{id}, POST /users/{id}/reset-password, PUT /users/{student_id}/parent, PUT /subscriptions/{user_id} (all require_admin)
-│   └── schemas.py                   # ✅ AdminCreateUserRequest (includes parentId), AdminResetPasswordRequest, AdminLinkParentRequest, AdminUpdateSubscriptionRequest, AdminUserListResponse + PaginationView + response wrappers
+│   └── schemas.py                   # ✅ AdminCreateUserRequest (includes parentId), AdminResetPasswordRequest, AdminLinkParentRequest, AdminUpdateSubscriptionRequest, AdminUserListResponse, AdminUserSubscriptionView (nested in AdminUserView), PaginationView + response wrappers
 │
 ├── exams/
 │   ├── __init__.py                  # ✅ Re-exports `router`
@@ -92,7 +92,7 @@ services/
 ├── exam_service.py                  # ✅ Exam CRUD, publish (checks >=1 active question) / unpublish, soft delete (set deleted_at), hard delete (CASCADE)
 ├── question_service.py              # ✅ Question CRUD with Pydantic per-type validation of question_data (multiple_choice / fill_blank / matching), auto-assigned position, soft/hard delete. Excel import lands in B3.4b.
 ├── attempt_service.py               # ✅ Start (enforces tier limit via COUNT vs subscription.current_period_start), submit + auto-grade, history queries, record_audio_play (enforces exams.max_audio_plays). Custom AttemptLimitExceededError + AudioPlayLimitExceededError extend PermissionDeniedError.
-├── subscription_service.py          # ✅ get_by_user_id, update_tier, list_plans helper. Attempt-limit + period-reset logic land in B3.5.
+├── subscription_service.py          # ✅ get_by_user_id, update_tier (validates tier + logs), list_plans serializer. Attempt-limit enforcement lives in attempt_service; period-reset is not yet implemented (period boundary still equals subscriptions.current_period_start from creation).
 └── subscription_plans.py            # ✅ PlanTier enum, SubscriptionPlan + PlanFeature dataclasses, SUBSCRIPTION_PLANS dict (Free / Basic / Pro / Ultra)
 ```
 
@@ -119,7 +119,7 @@ utils/
 ├── jwt_utils.py                     # ✅ TokenType constants, create_access_token, create_refresh_token, decode_token (with type verification)
 ├── password_utils.py                # ✅ hash_password, verify_password (bcrypt cost 12)
 ├── grading_utils.py                 # ✅ grade_question (multiple_choice index match / fill_blank string-match w/ case_sensitive / matching set-of-pairs compare), strip_correct (removes answer fields before serving to students mid-attempt)
-└── excel_utils.py                   # ⏳ Excel-to-questions parser (B3.4)
+└── excel_utils.py                   # ⏳ Excel-to-questions parser (B3.4b — deferred, awaiting client confirmation on column format)
 ```
 
 ## Top-level Dependencies (FastAPI DI)
@@ -165,7 +165,7 @@ tests/
 ```
 .github/
 └── workflows/
-    └── backend.yml                  # ✅ smoke (install + import) → deploy (Render API call, needs RENDER_API_KEY + RENDER_SERVICE_ID secrets). Lint + pytest jobs to be added in B3.
+    └── backend.yml                  # ✅ smoke (install + import) → deploy (Render API call, needs RENDER_API_KEY + RENDER_SERVICE_ID secrets). Lint (ruff + mypy) + pytest jobs are deferred to B3.6b.
 ```
 
 ---
