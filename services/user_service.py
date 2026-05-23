@@ -116,6 +116,9 @@ class UserService:
             "role": row["role"],
             "parent_id": str(row["parent_id"]) if row["parent_id"] else None,
             "tier": tier,
+            "subscription_status": "active",
+            "credits_monthly": 0,
+            "credits_remaining": 0,
             "created_at": row["created_at"].isoformat(),
         }
 
@@ -314,7 +317,8 @@ class UserService:
                 f"""
                 SELECT p.id, p.email, p.full_name, p.phone, p.role, p.parent_id,
                        p.created_at,
-                       s.tier
+                       s.tier, s.status AS sub_status,
+                       s.credits_monthly, s.credits_remaining
                 FROM public.profiles p
                 LEFT JOIN public.subscriptions s ON s.user_id = p.id
                 {where}
@@ -333,6 +337,9 @@ class UserService:
                 "role": r["role"],
                 "parent_id": str(r["parent_id"]) if r["parent_id"] else None,
                 "tier": r["tier"] or "free",
+                "subscription_status": r["sub_status"],
+                "credits_monthly": r["credits_monthly"] or 0,
+                "credits_remaining": r["credits_remaining"] or 0,
                 "created_at": r["created_at"].isoformat() if r["created_at"] else None,
             }
             for r in rows

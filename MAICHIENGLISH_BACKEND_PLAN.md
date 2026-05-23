@@ -540,7 +540,7 @@ List users (admin only). Most recent first.
 - `page`: 1-based page number (default 1)
 - `limit`: page size (default 50, max 100)
 
-**Response (200):** uses the paginated-list envelope from §10.10 (`items` + `pagination`).
+**Response (200):** uses the paginated-list envelope from §10.10 (`items` + `pagination`). Subscription data is nested per the same convention used by `/api/auth/login` and `/api/users/me`.
 ```json
 {
   "status": 200,
@@ -552,7 +552,12 @@ List users (admin only). Most recent first.
         "fullName": "Nguyen Van B",
         "role": "student",
         "phone": "0909876543",
-        "tier": "basic",
+        "subscription": {
+          "tier": "basic",
+          "status": "active",
+          "creditsMonthly": 10000,
+          "creditsRemaining": 7500
+        },
         "parentId": "uuid-or-null",
         "createdAt": "2026-05-15T10:30:00Z"
       }

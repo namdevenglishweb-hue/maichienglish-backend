@@ -23,9 +23,28 @@ from .schemas import (
     AdminUpdateSubscriptionResponseData,
     AdminUserListResponse,
     AdminUserListResponseData,
+    AdminUserSubscriptionView,
     AdminUserView,
     PaginationView,
 )
+
+
+def _user_to_admin_view(u: dict) -> AdminUserView:
+    return AdminUserView(
+        id=u["id"],
+        email=u["email"],
+        fullName=u["full_name"],
+        role=u["role"],
+        phone=u["phone"],
+        subscription=AdminUserSubscriptionView(
+            tier=u["tier"],
+            status=u.get("subscription_status"),
+            creditsMonthly=u.get("credits_monthly", 0),
+            creditsRemaining=u.get("credits_remaining", 0),
+        ),
+        parentId=u.get("parent_id"),
+        createdAt=u.get("created_at"),
+    )
 
 logger = logging.getLogger(__name__)
 router = APIRouter(
@@ -57,19 +76,7 @@ async def admin_list_users(
 
     return AdminUserListResponse(
         data=AdminUserListResponseData(
-            items=[
-                AdminUserView(
-                    id=u["id"],
-                    email=u["email"],
-                    fullName=u["full_name"],
-                    role=u["role"],
-                    phone=u["phone"],
-                    tier=u["tier"],
-                    parentId=u["parent_id"],
-                    createdAt=u["created_at"],
-                )
-                for u in users
-            ],
+            items=[_user_to_admin_view(u) for u in users],
             pagination=PaginationView(
                 page=page, limit=limit, total=total, totalPages=total_pages
             ),
@@ -103,18 +110,7 @@ async def admin_create_user(request: AdminCreateUserRequest):
 
     return AdminCreateUserResponse(
         status=201,
-        data=AdminCreateUserResponseData(
-            user=AdminUserView(
-                id=user["id"],
-                email=user["email"],
-                fullName=user["full_name"],
-                role=user["role"],
-                phone=user["phone"],
-                tier=user["tier"],
-                parentId=user.get("parent_id"),
-                createdAt=user["created_at"],
-            )
-        ),
+        data=AdminCreateUserResponseData(user=_user_to_admin_view(user)),
     )
 
 

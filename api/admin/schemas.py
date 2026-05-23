@@ -36,6 +36,15 @@ class AdminCreateUserRequest(BaseModel):
     }
 
 
+class AdminUserSubscriptionView(BaseModel):
+    """Subscription summary nested inside admin-facing user payloads."""
+
+    tier: str = Field(..., description="free / basic / pro / ultra")
+    status: Optional[str] = Field(default=None, description="active / canceled / expired")
+    creditsMonthly: int = Field(default=0, description="Monthly credit allowance")
+    creditsRemaining: int = Field(default=0, description="Credits left in the current period")
+
+
 class AdminUserView(BaseModel):
     """User payload returned by admin endpoints."""
 
@@ -44,7 +53,7 @@ class AdminUserView(BaseModel):
     fullName: str
     role: str
     phone: Optional[str] = None
-    tier: str
+    subscription: AdminUserSubscriptionView
     parentId: Optional[str] = None
     createdAt: Optional[str] = None
 
