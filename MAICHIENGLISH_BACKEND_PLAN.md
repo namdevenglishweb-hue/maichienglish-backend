@@ -532,6 +532,41 @@ Update the current user's own profile fields. Only `fullName` and `phone` are ed
 
 ### 4.3 Admin Endpoints
 
+#### GET /api/admin/users
+List users (admin only). Most recent first.
+
+**Query Params:**
+- `role`: optional filter — `student` / `teacher` / `admin` / `parent`
+- `page`: 1-based page number (default 1)
+- `limit`: page size (default 50, max 100)
+
+**Response (200):**
+```json
+{
+  "status": 200,
+  "data": {
+    "users": [
+      {
+        "id": "uuid",
+        "email": "student@example.com",
+        "fullName": "Nguyen Van B",
+        "role": "student",
+        "phone": "0909876543",
+        "tier": "basic",
+        "parentId": "uuid-or-null",
+        "createdAt": "2026-05-15T10:30:00Z"
+      }
+    ],
+    "pagination": {
+      "page": 1,
+      "limit": 50,
+      "total": 134,
+      "totalPages": 3
+    }
+  }
+}
+```
+
 #### POST /api/admin/users
 Create new user (admin only). `role` may be `student`, `teacher`, `admin`, or `parent`. `parentId` is optional and only honored when `role === "student"`; it must reference an existing profile whose role is `parent`.
 

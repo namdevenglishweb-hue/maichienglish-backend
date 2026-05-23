@@ -52,8 +52,8 @@ api/
 │
 ├── admin/
 │   ├── __init__.py                  # ✅ Re-exports `router`
-│   ├── routes.py                    # ✅ POST /users, DELETE /users/{id}, POST /users/{id}/reset-password, PUT /users/{student_id}/parent, PUT /subscriptions/{user_id} (all require_admin)
-│   └── schemas.py                   # ✅ AdminCreateUserRequest (includes parentId), AdminResetPasswordRequest, AdminLinkParentRequest, AdminUpdateSubscriptionRequest + response wrappers
+│   ├── routes.py                    # ✅ GET /users (paginated list, role filter), POST /users, DELETE /users/{id}, POST /users/{id}/reset-password, PUT /users/{student_id}/parent, PUT /subscriptions/{user_id} (all require_admin)
+│   └── schemas.py                   # ✅ AdminCreateUserRequest (includes parentId), AdminResetPasswordRequest, AdminLinkParentRequest, AdminUpdateSubscriptionRequest, AdminUserListResponse + PaginationView + response wrappers
 │
 ├── exams/
 │   ├── __init__.py                  # ✅ Re-exports `router`
@@ -88,7 +88,7 @@ services/
 ├── __init__.py                      # ✅ Empty
 ├── exceptions.py                    # ✅ ServiceError base + NotFoundError, AlreadyExistsError, ValidationError, PermissionDeniedError, InvalidCredentialsError, InsufficientCreditsError
 ├── auth_service.py                  # ✅ Password reset code lifecycle: request_password_reset_code (anti-enumeration silent 200 + invalidate previous codes), reset_password (bcrypt-compare candidates, mark used, replace password_hash in one tx). Login/token logic stays in api/auth/routes.py + utils/jwt_utils.py.
-├── user_service.py                  # ✅ create_user (profile + subscription tx, accepts parent_id), authenticate, get_by_email/id, update_profile (self-edit fullName/phone), delete_user, admin_reset_password, link_parent, list_children_of_parent, is_child_of
+├── user_service.py                  # ✅ create_user (profile + subscription tx, accepts parent_id), authenticate, get_by_email/id, list_users (filter+paginate), update_profile (self-edit fullName/phone), delete_user, admin_reset_password, link_parent, list_children_of_parent, is_child_of
 ├── exam_service.py                  # ✅ Exam CRUD, publish (checks >=1 active question) / unpublish, soft delete (set deleted_at), hard delete (CASCADE)
 ├── question_service.py              # ✅ Question CRUD with Pydantic per-type validation of question_data (multiple_choice / fill_blank / matching), auto-assigned position, soft/hard delete. Excel import lands in B3.4b.
 ├── attempt_service.py               # ✅ Start (enforces tier limit via COUNT vs subscription.current_period_start), submit + auto-grade, history queries, record_audio_play (enforces exams.max_audio_plays). Custom AttemptLimitExceededError + AudioPlayLimitExceededError extend PermissionDeniedError.

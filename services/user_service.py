@@ -278,6 +278,57 @@ class UserService:
             raise NotFoundError(f"User {user_id} not found")
         logger.info("Admin reset password for user %s", user_id)
 
+    async def list_users(
+        self,
+        role: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Return (users, total_count). Admin-facing listing with role filter + pagination."""
+        where = ""
+        params: list[Any] = []
+        if role is not None:
+            params.append(role)
+            where = f"WHERE p.role = ${len(params)}"
+
+        # Total first (no LIMIT/OFFSET).
+        async with self.db.acquire() as conn:
+            total = await conn.fetchval(
+                f"SELECT COUNT(*) FROM public.profiles p {where}",
+                *params,
+            )
+
+            params.append(limit)
+            params.append(offset)
+            rows = await conn.fetch(
+                f"""
+                SELECT p.id, p.email, p.full_name, p.phone, p.role, p.parent_id,
+                       p.created_at,
+                       s.tier
+                FROM public.profiles p
+                LEFT JOIN public.subscriptions s ON s.user_id = p.id
+                {where}
+                ORDER BY p.created_at DESC
+                LIMIT ${len(params) - 1} OFFSET ${len(params)}
+                """,
+                *params,
+            )
+
+        users = [
+            {
+                "id": str(r["id"]),
+                "email": r["email"],
+                "full_name": r["full_name"],
+                "phone": r["phone"],
+                "role": r["role"],
+                "parent_id": str(r["parent_id"]) if r["parent_id"] else None,
+                "tier": r["tier"] or "free",
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            }
+            for r in rows
+        ]
+        return users, int(total or 0)
+
     async def list_children_of_parent(self, parent_id: str) -> list[dict[str, Any]]:
         """Return student profiles linked to the given parent via parent_id."""
         async with self.db.acquire() as conn:

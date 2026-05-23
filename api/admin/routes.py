@@ -1,6 +1,7 @@
 import logging
+from typing import Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from dependencies import require_admin
 from services.exceptions import AlreadyExistsError, NotFoundError, ValidationError
@@ -20,7 +21,10 @@ from .schemas import (
     AdminUpdateSubscriptionRequest,
     AdminUpdateSubscriptionResponse,
     AdminUpdateSubscriptionResponseData,
+    AdminUserListResponse,
+    AdminUserListResponseData,
     AdminUserView,
+    PaginationView,
 )
 
 logger = logging.getLogger(__name__)
@@ -29,6 +33,48 @@ router = APIRouter(
     tags=["Admin"],
     dependencies=[Depends(require_admin)],
 )
+
+
+@router.get("/users", response_model=AdminUserListResponse)
+async def admin_list_users(
+    role: Optional[Literal["student", "teacher", "admin", "parent"]] = Query(
+        default=None, description="Filter by role"
+    ),
+    page: int = Query(default=1, ge=1, description="1-based page number"),
+    limit: int = Query(
+        default=50, ge=1, le=100, description="Page size (max 100)"
+    ),
+):
+    """List users (admin only). Most recent first.
+
+    Supports optional `role` filter + page-based pagination.
+    """
+    offset = (page - 1) * limit
+    users, total = await user_service.list_users(
+        role=role, limit=limit, offset=offset
+    )
+    total_pages = (total + limit - 1) // limit if limit else 0
+
+    return AdminUserListResponse(
+        data=AdminUserListResponseData(
+            users=[
+                AdminUserView(
+                    id=u["id"],
+                    email=u["email"],
+                    fullName=u["full_name"],
+                    role=u["role"],
+                    phone=u["phone"],
+                    tier=u["tier"],
+                    parentId=u["parent_id"],
+                    createdAt=u["created_at"],
+                )
+                for u in users
+            ],
+            pagination=PaginationView(
+                page=page, limit=limit, total=total, totalPages=total_pages
+            ),
+        ),
+    )
 
 
 @router.post(

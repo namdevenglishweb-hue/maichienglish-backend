@@ -60,6 +60,27 @@ class AdminCreateUserResponse(BaseModel):
     data: AdminCreateUserResponseData
 
 
+class PaginationView(BaseModel):
+    """Pagination metadata per §10.10."""
+
+    page: int = Field(..., ge=1)
+    limit: int = Field(..., ge=1)
+    total: int = Field(..., ge=0)
+    totalPages: int = Field(..., ge=0)
+
+
+class AdminUserListResponseData(BaseModel):
+    users: list[AdminUserView]
+    pagination: PaginationView
+
+
+class AdminUserListResponse(BaseModel):
+    """Wrapped GET /api/admin/users response."""
+
+    status: int = 200
+    data: AdminUserListResponseData
+
+
 class AdminResetPasswordRequest(BaseModel):
     """Body for POST /api/admin/users/{user_id}/reset-password."""
 
