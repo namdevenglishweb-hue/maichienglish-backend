@@ -175,7 +175,7 @@ async def get_history(current_user: dict = Depends(get_current_user)):
     rows = await attempt_service.list_history_for_user(user["id"])
     return AttemptHistoryResponse(
         data=AttemptHistoryData(
-            attempts=[
+            items=[
                 AttemptHistoryItem(
                     id=r["id"],
                     examId=r["exam_id"],

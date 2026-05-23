@@ -85,7 +85,9 @@ class ExamResponse(BaseModel):
 
 
 class ExamListResponseData(BaseModel):
-    exams: list[ExamView]
+    """List payload — `items` per §10.10 list convention."""
+
+    items: list[ExamView]
 
 
 class ExamListResponse(BaseModel):

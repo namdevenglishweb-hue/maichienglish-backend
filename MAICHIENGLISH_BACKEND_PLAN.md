@@ -33,7 +33,7 @@ This document outlines the backend portion of the Mai Chi English system: a **Fa
 - **Backend**: FastAPI on Python 3.14
 - **Database**: PostgreSQL 17 (new Supabase project)
 - **Auth**: Custom JWT tokens (access + refresh)
-- **Roles**: `student`, `teacher`, `admin` (Ultra-equivalent)
+- **Roles**: `student`, `teacher`, `admin` (Ultra-equivalent), `parent`
 - **Subscriptions**: Free, Basic, Pro, Ultra (Admin)
 
 ---
@@ -172,8 +172,8 @@ maichienglish-be/
 - [x] CRUD for exams
 - [x] Publish/unpublish toggle
 - [x] Question CRUD (3 types: multiple_choice, fill_blank, matching)
-- [x] Excel import for questions
-- [x] Audio file management
+- [ ] Excel import for questions (deferred to B3.4b — column format pending client confirmation)
+- [x] Audio file management (storage buckets created, audio_url field on exams, audio-play counter enforcing `max_audio_plays`)
 
 #### Attempt Management
 - [x] Start exam attempt
@@ -633,36 +633,53 @@ List exams (filtered by role: students see published only).
 **Query Params:**
 - `level`: Filter by level (primary, secondary, KET, PET, IELTS)
 - `skill`: Filter by skill (listening, reading)
-- `published`: true/false (admin only)
+- `published`: true/false (admin / teacher only)
+
+**Response (200):** uses the list envelope from §10.10 (`items`).
+
+#### GET /api/exams/{exam_id}
+Get a single exam by id. Non-privileged users (student / parent) only see published exams; any attempt to read an unpublished exam returns 404.
 
 #### POST /api/exams (admin only)
-Create new exam.
+Create new exam. Returns 201 with the created exam wrapped under `data.exam`.
 
 #### PUT /api/exams/{exam_id} (admin only)
-Update exam.
+Update exam. Partial — pass only the fields you want to change.
 
 #### POST /api/exams/{exam_id}/publish (admin only)
-Publish exam (requires at least 1 question).
+Publish exam (requires at least 1 active question; otherwise 400).
+
+#### POST /api/exams/{exam_id}/unpublish (admin only)
+Unpublish exam. Hides it from students without deleting.
 
 #### DELETE /api/exams/{exam_id} (admin only)
-Delete exam.
+Soft-delete an exam: sets `deleted_at`, also forces `is_published=false`. Data preserved.
+
+#### DELETE /api/exams/{exam_id}/hard (admin only)
+Hard-delete an exam. Runs a real `DELETE` row — `CASCADE`s through questions, attempts, and answers. Use only for broken/erroneous content.
 
 ### 4.5 Question Endpoints
 
 #### GET /api/exams/{exam_id}/questions
-Get questions for an exam.
+List questions for an exam, ordered by `position`. Non-privileged users only see questions of published exams. Response uses the list envelope from §10.10 (`items`).
 
 #### POST /api/exams/{exam_id}/questions (admin only)
-Add question to exam.
+Add a question. `question_data` is validated server-side per `question_type` (multiple_choice / fill_blank / matching). If `position` is omitted, the server assigns `MAX(position)+1` within the exam.
+
+#### GET /api/questions/{question_id}
+Get a single question by id. Non-privileged users only see questions of published exams.
 
 #### PUT /api/questions/{question_id} (admin only)
-Update question.
+Update a question. Changing `question_type` requires also supplying a matching `question_data`.
 
 #### DELETE /api/questions/{question_id} (admin only)
-Delete question.
+Soft-delete a question (sets `deleted_at`).
+
+#### DELETE /api/questions/{question_id}/hard (admin only)
+Hard-delete a question. `CASCADE`s through answers.
 
 #### POST /api/exams/{exam_id}/questions/import (admin only)
-Import questions from Excel.
+Import questions from Excel. ⏳ **Deferred to B3.4b** — column format pending client confirmation.
 
 ### 4.6 Attempt Endpoints
 
@@ -717,11 +734,31 @@ Submit answers and get score.
 }
 ```
 
+#### POST /api/attempts/{attempt_id}/audio-play
+Increment the listening-audio play counter on an in-progress attempt. Only valid for listening exams and before submit. Rejects once `audio_play_count >= exams.max_audio_plays`.
+
+**Headers:** `Authorization: Bearer <token>` (owner only)
+
+**Response (200):**
+```json
+{
+  "status": 200,
+  "data": {
+    "audioPlayCount": 2,
+    "maxAudioPlays": 3,
+    "remainingPlays": 1
+  }
+}
+```
+
+**Error Response (403):** `"Not the owner of this attempt"` or `"Audio play limit reached (N)"`.
+**Error Response (400):** `"Attempt already submitted"` or `"Audio playback only applies to listening exams"`.
+
 #### GET /api/attempts/{attempt_id}
-Get attempt details with answers.
+Get attempt details with per-question breakdown. Visible to owner, admin/teacher, or the parent linked to the owner. While the attempt is still in progress (no `submitted_at`), correct-answer fields inside `question_data` are stripped.
 
 #### GET /api/attempts/history
-Get student's attempt history.
+Get the current user's attempt history (most recent first, capped at 100). Response uses the list envelope from §10.10 (`items`).
 
 ### 4.7 Subscription Endpoints
 
@@ -733,6 +770,37 @@ Get available plans and features.
 
 #### PUT /api/admin/subscriptions/{user_id} (admin only)
 Update user subscription tier.
+
+### 4.8 Parent Endpoints
+
+All endpoints under `/api/parents/me/...` require `role=parent` and only operate on students linked to the authenticated parent via `profiles.parent_id`. Accessing another parent's children returns 403.
+
+#### GET /api/parents/me/children
+List students linked to the current parent.
+
+**Response (200):**
+```json
+{
+  "status": 200,
+  "data": {
+    "items": [
+      {
+        "id": "uuid",
+        "email": "student@example.com",
+        "fullName": "Nguyen Van B",
+        "phone": "0909876543",
+        "createdAt": "2026-05-15T10:30:00Z"
+      }
+    ]
+  }
+}
+```
+
+#### GET /api/parents/me/children/{student_id}/attempts
+List a linked child's attempt history. Same response shape as `GET /api/attempts/history`.
+
+#### GET /api/parents/me/children/{student_id}/attempts/{attempt_id}
+Get a specific attempt for a linked child. Same response shape as `GET /api/attempts/{attempt_id}`.
 
 ---
 
@@ -1880,14 +1948,15 @@ async def get_exam_by_id(self, exam_id: str) -> Optional[dict]:
 
 ### 10.10 API Response Format
 
-All API responses should follow this consistent format:
+All API responses follow these envelopes:
 
 ```python
-# Success response
+# Success response — single resource or action result
 {
     "status": 200,
     "data": {
-        # Response data here
+        # Either a single named key (e.g. {"user": {...}}, {"exam": {...}})
+        # or flat fields for action results (e.g. {"score": ..., "submittedAt": ...}).
     }
 }
 
@@ -1896,7 +1965,16 @@ All API responses should follow this consistent format:
     "detail": "Error message here"
 }
 
-# List response with pagination
+# List response — ALWAYS uses `items` (regardless of pagination).
+# This lets the frontend write a generic parseList<T>() helper.
+{
+    "status": 200,
+    "data": {
+        "items": [...]
+    }
+}
+
+# Paginated list response — same `items`, plus a `pagination` sibling
 {
     "status": 200,
     "data": {

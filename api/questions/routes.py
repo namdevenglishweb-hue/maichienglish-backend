@@ -58,7 +58,7 @@ async def list_questions(
 
     questions = await question_service.list_questions_by_exam(exam_id)
     return QuestionListResponse(
-        data=QuestionListResponseData(questions=[_to_view(q) for q in questions]),
+        data=QuestionListResponseData(items=[_to_view(q) for q in questions]),
     )
 
 

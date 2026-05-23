@@ -94,7 +94,9 @@ class QuestionResponse(BaseModel):
 
 
 class QuestionListResponseData(BaseModel):
-    questions: list[QuestionView]
+    """List payload — `items` per §10.10 list convention."""
+
+    items: list[QuestionView]
 
 
 class QuestionListResponse(BaseModel):

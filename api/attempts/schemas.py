@@ -154,7 +154,9 @@ class AttemptHistoryItem(BaseModel):
 
 
 class AttemptHistoryData(BaseModel):
-    attempts: list[AttemptHistoryItem]
+    """List payload — `items` per §10.10 list convention."""
+
+    items: list[AttemptHistoryItem]
 
 
 class AttemptHistoryResponse(BaseModel):

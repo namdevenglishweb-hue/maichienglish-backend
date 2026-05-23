@@ -41,7 +41,9 @@ class PlanView(BaseModel):
 
 
 class PlansResponseData(BaseModel):
-    plans: list[PlanView]
+    """List payload — `items` per §10.10 list convention."""
+
+    items: list[PlanView]
 
 
 class PlansResponse(BaseModel):

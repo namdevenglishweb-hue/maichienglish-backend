@@ -60,7 +60,7 @@ async def list_exams(
         level=level, skill=skill, is_published=published
     )
     return ExamListResponse(
-        data=ExamListResponseData(exams=[_to_view(e) for e in exams]),
+        data=ExamListResponseData(items=[_to_view(e) for e in exams]),
     )
 
 

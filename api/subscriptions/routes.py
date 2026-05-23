@@ -56,4 +56,4 @@ async def get_plans():
     Public endpoint — no authentication required.
     """
     plans = [PlanView(**p) for p in list_plans()]
-    return PlansResponse(data=PlansResponseData(plans=plans))
+    return PlansResponse(data=PlansResponseData(items=plans))

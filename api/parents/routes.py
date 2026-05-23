@@ -47,7 +47,7 @@ async def list_my_children(current_parent: dict = Depends(require_parent)):
     children = await user_service.list_children_of_parent(parent["id"])
     return ChildrenListResponse(
         data=ChildrenListData(
-            children=[
+            items=[
                 ChildView(
                     id=c["id"],
                     email=c["email"],
@@ -74,7 +74,7 @@ async def list_child_attempts(
     rows = await attempt_service.list_history_for_user(student_id)
     return AttemptHistoryResponse(
         data=AttemptHistoryData(
-            attempts=[
+            items=[
                 AttemptHistoryItem(
                     id=r["id"],
                     examId=r["exam_id"],

@@ -102,11 +102,11 @@ services/
 models/
 ├── __init__.py                      # ⏳ Empty
 ├── user.py                          # ⏳ Profile model (matches §3.1 profiles table)
-├── exam.py                          # ⏳ Exam model with deleted_at (matches §3.3)
-├── question.py                      # ⏳ Question model with question_data JSONB + deleted_at (matches §3.4)
-├── attempt.py                       # ⏳ Attempt model (matches §3.5)
-├── answer.py                        # ⏳ Answer model (matches §3.6)
-└── subscription.py                  # ⏳ Subscription model (matches §3.2)
+├── subscription.py                  # ⏳ Subscription model (matches §3.2)
+├── exam.py                          # ⏳ Exam model with deleted_at (matches §3.4)
+├── question.py                      # ⏳ Question model with question_data JSONB + deleted_at (matches §3.5)
+├── attempt.py                       # ⏳ Attempt model (matches §3.6)
+└── answer.py                        # ⏳ Answer model (matches §3.7)
 ```
 
 > Note: if the implementation uses raw asyncpg with dict rows instead of SQLAlchemy ORM, this folder may stay empty or be removed. Decide at implementation time.

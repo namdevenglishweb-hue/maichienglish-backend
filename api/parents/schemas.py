@@ -14,7 +14,9 @@ class ChildView(BaseModel):
 
 
 class ChildrenListData(BaseModel):
-    children: list[ChildView]
+    """List payload — `items` per §10.10 list convention."""
+
+    items: list[ChildView]
 
 
 class ChildrenListResponse(BaseModel):
