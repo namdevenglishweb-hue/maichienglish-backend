@@ -284,7 +284,17 @@ class UserService:
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[dict[str, Any]], int]:
-        """Return (users, total_count). Admin-facing listing with role filter + pagination."""
+        """List user profiles with subscription tier, recent first.
+
+        Args:
+            role: Optional role filter (student / teacher / admin / parent).
+            limit: Max rows to return.
+            offset: Rows to skip (for pagination).
+
+        Returns:
+            A tuple `(users, total_count)` where `users` is the current page
+            and `total_count` is the unpaginated row count for the same filter.
+        """
         where = ""
         params: list[Any] = []
         if role is not None:

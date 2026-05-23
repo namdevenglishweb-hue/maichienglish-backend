@@ -540,12 +540,12 @@ List users (admin only). Most recent first.
 - `page`: 1-based page number (default 1)
 - `limit`: page size (default 50, max 100)
 
-**Response (200):**
+**Response (200):** uses the paginated-list envelope from §10.10 (`items` + `pagination`).
 ```json
 {
   "status": 200,
   "data": {
-    "users": [
+    "items": [
       {
         "id": "uuid",
         "email": "student@example.com",

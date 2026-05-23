@@ -57,7 +57,7 @@ async def admin_list_users(
 
     return AdminUserListResponse(
         data=AdminUserListResponseData(
-            users=[
+            items=[
                 AdminUserView(
                     id=u["id"],
                     email=u["email"],

@@ -63,14 +63,16 @@ class AdminCreateUserResponse(BaseModel):
 class PaginationView(BaseModel):
     """Pagination metadata per §10.10."""
 
-    page: int = Field(..., ge=1)
-    limit: int = Field(..., ge=1)
-    total: int = Field(..., ge=0)
-    totalPages: int = Field(..., ge=0)
+    page: int = Field(..., ge=1, description="1-based current page number")
+    limit: int = Field(..., ge=1, description="Page size used to produce this slice")
+    total: int = Field(..., ge=0, description="Total matching rows across all pages")
+    totalPages: int = Field(..., ge=0, description="Total pages = ceil(total / limit)")
 
 
 class AdminUserListResponseData(BaseModel):
-    users: list[AdminUserView]
+    """Paginated list payload — `items` per §10.10."""
+
+    items: list[AdminUserView]
     pagination: PaginationView
 
 
