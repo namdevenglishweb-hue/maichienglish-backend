@@ -13,20 +13,6 @@ class AttemptStartRequest(BaseModel):
     }
 
 
-class AttemptExamView(BaseModel):
-    """Exam metadata returned at attempt start."""
-
-    id: str
-    title: str
-    level: str
-    skill: str
-    durationMinutes: int
-    description: Optional[str] = None
-    audioUrl: Optional[str] = None
-    passage: Optional[str] = None
-    maxAudioPlays: int
-
-
 class AttemptQuestionView(BaseModel):
     """A question as shown to a student during an attempt (correct answers stripped)."""
 
@@ -35,6 +21,31 @@ class AttemptQuestionView(BaseModel):
     questionType: str
     questionData: dict[str, Any]
     points: int
+
+
+class AttemptSectionView(BaseModel):
+    """A section as shown to a student during an attempt."""
+
+    id: str
+    position: int
+    partLabel: Optional[str] = None
+    instructions: Optional[str] = None
+    materials: list[dict[str, Any]] = Field(default_factory=list)
+    audioUrl: Optional[str] = None
+    maxAudioPlays: Optional[int] = None
+    questions: list[AttemptQuestionView] = Field(default_factory=list)
+
+
+class AttemptExamView(BaseModel):
+    """Exam metadata + nested sections returned at attempt start."""
+
+    id: str
+    title: str
+    level: str
+    skill: str
+    durationMinutes: int
+    description: Optional[str] = None
+    sections: list[AttemptSectionView] = Field(default_factory=list)
 
 
 class AttemptView(BaseModel):
@@ -47,7 +58,6 @@ class AttemptView(BaseModel):
     totalPoints: Optional[float] = None
     percentage: Optional[float] = None
     timeSpentSeconds: Optional[int] = None
-    audioPlayCount: int
     startedAt: Optional[str] = None
     submittedAt: Optional[str] = None
 
@@ -55,14 +65,13 @@ class AttemptView(BaseModel):
 class AttemptStartResponseData(BaseModel):
     attemptId: str
     exam: AttemptExamView
-    questions: list[AttemptQuestionView]
     startedAt: Optional[str] = None
 
 
 class AttemptStartResponse(BaseModel):
     """Wrapped POST /api/attempts response."""
 
-    status: int = 200
+    status: int = 201
     data: AttemptStartResponseData
 
 
@@ -110,6 +119,9 @@ class AnswerView(BaseModel):
 
     answerId: str
     questionId: str
+    sectionId: str
+    sectionPosition: int
+    sectionPartLabel: Optional[str] = None
     position: int
     questionType: str
     questionData: dict[str, Any]
@@ -168,12 +180,12 @@ class AttemptHistoryResponse(BaseModel):
 
 class AudioPlayResponseData(BaseModel):
     audioPlayCount: int
-    maxAudioPlays: int
-    remainingPlays: int
+    maxAudioPlays: Optional[int] = None
+    remainingPlays: Optional[int] = None
 
 
 class AudioPlayResponse(BaseModel):
-    """Wrapped POST /api/attempts/{id}/audio-play response."""
+    """Wrapped POST /api/attempts/{id}/sections/{sid}/audio-play response."""
 
     status: int = 200
     data: AudioPlayResponseData

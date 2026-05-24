@@ -1,18 +1,23 @@
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from dependencies import get_current_user, require_admin
 from services.exam_service import exam_service
 from services.exceptions import NotFoundError, ValidationError
+from services.question_service import question_service
+from services.section_service import section_service
 from services.user_service import user_service
+from utils.grading_utils import strip_correct
 
 from .schemas import (
     ExamCreate,
     ExamListResponse,
     ExamListResponseData,
+    ExamQuestionPreview,
     ExamResponse,
     ExamResponseData,
+    ExamSectionPreview,
     ExamUpdate,
     ExamView,
 )
@@ -28,9 +33,6 @@ def _to_view(exam: dict) -> ExamView:
         skill=exam["skill"],
         durationMinutes=exam["duration_minutes"],
         description=exam["description"],
-        audioUrl=exam["audio_url"],
-        passage=exam["passage"],
-        maxAudioPlays=exam["max_audio_plays"],
         isPublished=exam["is_published"],
         createdBy=exam["created_by"],
         createdAt=exam["created_at"],
@@ -43,6 +45,44 @@ def _is_privileged(role: Optional[str]) -> bool:
     return role in ("admin", "teacher")
 
 
+async def _build_sections_payload(
+    exam_id: str, is_priv: bool
+) -> list[ExamSectionPreview]:
+    """Build `sections[]` with embedded `questions[]` for ?include=sections.
+
+    Strips correct-answer fields from each question_data when `is_priv` is
+    False, so the same builder serves both admin and student callers.
+    """
+    sections = await section_service.list_sections_by_exam(exam_id)
+    out: list[ExamSectionPreview] = []
+    for s in sections:
+        questions = await question_service.list_questions_by_section(s["id"])
+        out.append(
+            ExamSectionPreview(
+                id=s["id"],
+                position=s["position"],
+                partLabel=s["part_label"],
+                instructions=s["instructions"],
+                materials=s["materials"],
+                audioUrl=s["audio_url"],
+                maxAudioPlays=s["max_audio_plays"],
+                questions=[
+                    ExamQuestionPreview(
+                        id=q["id"],
+                        position=q["position"],
+                        questionType=q["question_type"],
+                        questionData=q["question_data"]
+                        if is_priv
+                        else strip_correct(q["question_type"], q["question_data"]),
+                        points=q["points"],
+                    )
+                    for q in questions
+                ],
+            )
+        )
+    return out
+
+
 @router.get("", response_model=ExamListResponse)
 async def list_exams(
     level: Optional[str] = None,
@@ -53,7 +93,6 @@ async def list_exams(
     """List exams. Students see only published exams; admins/teachers can filter freely."""
     role = current_user.get("role")
     if not _is_privileged(role):
-        # Force published filter for student / parent
         published = True
 
     exams = await exam_service.list_exams(
@@ -65,18 +104,38 @@ async def list_exams(
 
 
 @router.get("/{exam_id}", response_model=ExamResponse)
-async def get_exam(exam_id: str, current_user: dict = Depends(get_current_user)):
-    """Get a single exam by id. Non-privileged users only see published exams."""
+async def get_exam(
+    exam_id: str,
+    include: Optional[str] = Query(
+        default=None,
+        description="Comma-separated includes. Pass `sections` to nest the section→question tree.",
+    ),
+    current_user: dict = Depends(get_current_user),
+):
+    """Get a single exam by id. Non-privileged users only see published exams.
+
+    Use `?include=sections` to embed `sections[] → questions[]` under
+    `data.exam.sections`. For non-privileged users, correct-answer fields are
+    stripped from each question.
+    """
     exam = await exam_service.get_exam(exam_id)
     if not exam:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Exam not found"
         )
-    if not _is_privileged(current_user.get("role")) and not exam["is_published"]:
+    is_priv = _is_privileged(current_user.get("role"))
+    if not is_priv and not exam["is_published"]:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Exam not found"
         )
-    return ExamResponse(data=ExamResponseData(exam=_to_view(exam)))
+
+    view = _to_view(exam)
+
+    includes = {p.strip() for p in (include or "").split(",") if p.strip()}
+    if "sections" in includes:
+        view.sections = await _build_sections_payload(exam_id, is_priv)
+
+    return ExamResponse(data=ExamResponseData(exam=view))
 
 
 @router.post(
@@ -87,7 +146,7 @@ async def get_exam(exam_id: str, current_user: dict = Depends(get_current_user))
 async def create_exam(
     request: ExamCreate, admin: dict = Depends(require_admin)
 ):
-    """Create a new exam (admin only)."""
+    """Create a new exam (admin only). Add sections separately via §4.5."""
     admin_profile = await user_service.get_by_email(admin["sub"])
     created_by = admin_profile["id"] if admin_profile else None
     exam = await exam_service.create_exam(
@@ -96,9 +155,6 @@ async def create_exam(
         skill=request.skill,
         duration_minutes=request.duration_minutes,
         description=request.description,
-        audio_url=request.audio_url,
-        passage=request.passage,
-        max_audio_plays=request.max_audio_plays,
         created_by=created_by,
     )
     return ExamResponse(status=201, data=ExamResponseData(exam=_to_view(exam)))
@@ -131,7 +187,7 @@ async def update_exam(exam_id: str, request: ExamUpdate):
     dependencies=[Depends(require_admin)],
 )
 async def publish_exam(exam_id: str):
-    """Publish an exam (admin only). Requires at least one active question."""
+    """Publish an exam (admin only). Requires ≥1 section with ≥1 active question."""
     try:
         exam = await exam_service.publish_exam(exam_id)
     except NotFoundError as e:
@@ -175,7 +231,7 @@ async def soft_delete_exam(exam_id: str):
     dependencies=[Depends(require_admin)],
 )
 async def hard_delete_exam(exam_id: str):
-    """Hard-delete an exam (admin only). CASCADEs through questions, attempts, answers."""
+    """Hard-delete an exam (admin only). CASCADEs through sections/questions/attempts/answers."""
     try:
         await exam_service.hard_delete_exam(exam_id)
     except NotFoundError as e:

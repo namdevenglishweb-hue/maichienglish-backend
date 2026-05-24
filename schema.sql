@@ -63,7 +63,7 @@ CREATE INDEX idx_password_reset_codes_expires
 
 
 -- ------------------------------------------------------------
--- exams — listening uses audio_url + max_audio_plays; reading uses passage
+-- exams — top-level definition; passage/audio live on sections (§3.5)
 -- ------------------------------------------------------------
 CREATE TABLE public.exams (
   id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -74,9 +74,6 @@ CREATE TABLE public.exams (
                       CHECK (skill IN ('listening', 'reading')),
   duration_minutes  int  NOT NULL DEFAULT 45 CHECK (duration_minutes > 0),
   description       text,
-  audio_url         text,
-  passage           text,
-  max_audio_plays   int  NOT NULL DEFAULT 3,
   is_published      boolean NOT NULL DEFAULT false,
   created_by        uuid REFERENCES public.profiles(id) ON DELETE SET NULL,
   created_at        timestamptz NOT NULL DEFAULT now(),
@@ -86,23 +83,55 @@ CREATE TABLE public.exams (
 
 
 -- ------------------------------------------------------------
--- questions — three types: multiple_choice, fill_blank, matching
+-- sections — one row per "Part" of an exam (KET/PET style).
+--   `materials` is a JSONB list of passages: [{type:"text", label?, content}].
+--   Gap markers in content use {{gap:N}} where N = questions.position.
+--   audio_url + max_audio_plays apply only to listening sections.
+-- ------------------------------------------------------------
+CREATE TABLE public.sections (
+  id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  exam_id           uuid NOT NULL REFERENCES public.exams(id) ON DELETE CASCADE,
+  position          int  NOT NULL,
+  part_label        text,
+  instructions      text,
+  materials         jsonb NOT NULL DEFAULT '[]'::jsonb,
+  audio_url         text,
+  max_audio_plays   int,
+  created_at        timestamptz NOT NULL DEFAULT now(),
+  updated_at        timestamptz NOT NULL DEFAULT now(),
+  deleted_at        timestamptz,
+  UNIQUE (exam_id, position)
+);
+
+CREATE INDEX idx_sections_exam
+  ON public.sections(exam_id)
+  WHERE deleted_at IS NULL;
+
+
+-- ------------------------------------------------------------
+-- questions — three types: multiple_choice, fill_blank, matching.
+--   Scoped to a section. `position` is per-section and referenced by
+--   {{gap:N}} markers inside sections.materials content.
+--   multiple_choice options support text and/or image_url
+--   (shared-options pattern is denormalized per question — see plan §3.5).
 -- ------------------------------------------------------------
 CREATE TABLE public.questions (
   id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  exam_id        uuid NOT NULL REFERENCES public.exams(id) ON DELETE CASCADE,
+  section_id     uuid NOT NULL REFERENCES public.sections(id) ON DELETE CASCADE,
   position       int  NOT NULL,
   question_type  text NOT NULL
                   CHECK (question_type IN ('multiple_choice', 'fill_blank', 'matching')),
   question_data  jsonb NOT NULL,
   points         int  NOT NULL DEFAULT 1,
   created_at     timestamptz NOT NULL DEFAULT now(),
-  deleted_at     timestamptz
+  deleted_at     timestamptz,
+  UNIQUE (section_id, position)
 );
 
 
 -- ------------------------------------------------------------
--- attempts — one row per exam attempt; tracks listening audio replays
+-- attempts — one row per exam attempt. Per-section state (audio plays,
+-- resume) lives on attempt_section_state.
 -- ------------------------------------------------------------
 CREATE TABLE public.attempts (
   id                   uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -112,10 +141,28 @@ CREATE TABLE public.attempts (
   total_points         numeric(6,2),
   percentage           numeric(5,2),
   time_spent_seconds   int,
-  audio_play_count     int NOT NULL DEFAULT 0,
   started_at           timestamptz NOT NULL DEFAULT now(),
   submitted_at         timestamptz
 );
+
+
+-- ------------------------------------------------------------
+-- attempt_section_state — per-section progress for an attempt.
+--   Tracks audio replay counts (vs sections.max_audio_plays) and lets
+--   students resume one section at a time.
+-- ------------------------------------------------------------
+CREATE TABLE public.attempt_section_state (
+  id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  attempt_id        uuid NOT NULL REFERENCES public.attempts(id) ON DELETE CASCADE,
+  section_id        uuid NOT NULL REFERENCES public.sections(id) ON DELETE CASCADE,
+  audio_play_count  int  NOT NULL DEFAULT 0,
+  started_at        timestamptz,
+  submitted_at      timestamptz,
+  UNIQUE (attempt_id, section_id)
+);
+
+CREATE INDEX idx_attempt_section_state_attempt
+  ON public.attempt_section_state(attempt_id);
 
 
 -- ------------------------------------------------------------
@@ -130,3 +177,20 @@ CREATE TABLE public.answers (
   points_earned   int NOT NULL DEFAULT 0,
   created_at      timestamptz NOT NULL DEFAULT now()
 );
+
+
+-- ------------------------------------------------------------
+-- Row-level security. Defense-in-depth per DEPLOYMENT.md §3.1 / §8 —
+-- the backend connects via the service-role key (which bypasses RLS),
+-- but enabling RLS blocks bare anon/authenticated key holders from
+-- ever reading these tables directly if a key ever leaks. Idempotent.
+-- ------------------------------------------------------------
+ALTER TABLE public.profiles              ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.subscriptions         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.password_reset_codes  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.exams                 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.sections              ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.questions             ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.attempts              ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.attempt_section_state ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.answers               ENABLE ROW LEVEL SECURITY;

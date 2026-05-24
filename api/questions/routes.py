@@ -4,6 +4,7 @@ from dependencies import get_current_user, require_admin
 from services.exam_service import exam_service
 from services.exceptions import NotFoundError, ValidationError
 from services.question_service import question_service
+from services.section_service import section_service
 
 from .schemas import (
     QuestionCreate,
@@ -15,16 +16,17 @@ from .schemas import (
     QuestionView,
 )
 
-# Mounted under two different paths because question reads/lists are
-# scoped to an exam, but updates/deletes target a question id directly.
-exam_scoped_router = APIRouter(prefix="/api/exams", tags=["Questions"])
+# Mounted under two prefixes:
+#   section_scoped_router: list/create scoped to a section
+#   question_router:       id-scoped read/update/delete
+section_scoped_router = APIRouter(prefix="/api/sections", tags=["Questions"])
 question_router = APIRouter(prefix="/api/questions", tags=["Questions"])
 
 
 def _to_view(q: dict) -> QuestionView:
     return QuestionView(
         id=q["id"],
-        examId=q["exam_id"],
+        sectionId=q["section_id"],
         position=q["position"],
         questionType=q["question_type"],
         questionData=q["question_data"],
@@ -38,41 +40,43 @@ def _is_privileged(role: str | None) -> bool:
     return role in ("admin", "teacher")
 
 
-@exam_scoped_router.get(
-    "/{exam_id}/questions",
-    response_model=QuestionListResponse,
+@section_scoped_router.get(
+    "/{section_id}/questions", response_model=QuestionListResponse,
 )
 async def list_questions(
-    exam_id: str, current_user: dict = Depends(get_current_user)
+    section_id: str, current_user: dict = Depends(get_current_user)
 ):
-    """List questions for an exam. Non-privileged users only see questions of published exams."""
-    exam = await exam_service.get_exam(exam_id)
-    if not exam:
+    """List questions of a section. Non-privileged users only see questions of published exams."""
+    section = await section_service.get_section(section_id)
+    if not section:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Exam not found"
-        )
-    if not _is_privileged(current_user.get("role")) and not exam["is_published"]:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Exam not found"
+            status_code=status.HTTP_404_NOT_FOUND, detail="Section not found"
         )
 
-    questions = await question_service.list_questions_by_exam(exam_id)
+    if not _is_privileged(current_user.get("role")):
+        exam = await exam_service.get_exam(section["exam_id"])
+        if not exam or not exam["is_published"]:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Section not found"
+            )
+
+    questions = await question_service.list_questions_by_section(section_id)
     return QuestionListResponse(
         data=QuestionListResponseData(items=[_to_view(q) for q in questions]),
     )
 
 
-@exam_scoped_router.post(
-    "/{exam_id}/questions",
+@section_scoped_router.post(
+    "/{section_id}/questions",
     response_model=QuestionResponse,
     status_code=status.HTTP_201_CREATED,
     dependencies=[Depends(require_admin)],
 )
-async def create_question(exam_id: str, request: QuestionCreate):
-    """Add a question to an exam (admin only). Position auto-assigned if omitted."""
+async def create_question(section_id: str, request: QuestionCreate):
+    """Add a question to a section (admin only). Position auto-assigned if omitted."""
     try:
         question = await question_service.create_question(
-            exam_id=exam_id,
+            section_id=section_id,
             question_type=request.question_type,
             question_data=request.question_data,
             points=request.points,
@@ -98,7 +102,8 @@ async def get_question(
             status_code=status.HTTP_404_NOT_FOUND, detail="Question not found"
         )
     if not _is_privileged(current_user.get("role")):
-        exam = await exam_service.get_exam(question["exam_id"])
+        exam_id = await question_service.get_exam_id_for_question(question_id)
+        exam = await exam_service.get_exam(exam_id) if exam_id else None
         if not exam or not exam["is_published"]:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Question not found"
@@ -155,5 +160,4 @@ async def hard_delete_question(question_id: str):
     return None
 
 
-# Combined export so main.py can mount both with one include_router pair.
-__all__ = ["exam_scoped_router", "question_router"]
+__all__ = ["section_scoped_router", "question_router"]

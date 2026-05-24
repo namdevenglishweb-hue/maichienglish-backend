@@ -20,12 +20,16 @@ from config.settings import get_settings  # noqa: E402
 
 SCHEMA_FILE = PROJECT_ROOT / "schema.sql"
 
-# Drop order matters: children before parents.
+# DROP ... CASCADE handles FK dependencies, but every table must be listed
+# so nothing survives a reset (otherwise the next CREATE TABLE collides).
 PUBLIC_TABLES = [
     "answers",
+    "attempt_section_state",
     "attempts",
     "questions",
+    "sections",
     "exams",
+    "password_reset_codes",
     "subscriptions",
     "profiles",
 ]

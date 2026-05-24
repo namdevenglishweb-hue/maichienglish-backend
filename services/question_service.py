@@ -2,7 +2,12 @@ import json
 import logging
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field, ValidationError as PydanticValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    ValidationError as PydanticValidationError,
+    model_validator,
+)
 
 from services.exceptions import NotFoundError, ValidationError
 
@@ -10,13 +15,30 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Per-type question_data validators (kept in this module so other layers
-# don't need to know the JSONB shape — see plan §3.4).
+# Per-type question_data validators. Source of truth: plan §3.6.
 # ---------------------------------------------------------------------------
 
 
+class _MCOption(BaseModel):
+    """A single multiple_choice option.
+
+    Each option must have at least one of `text` or `image_url`. Picture MC
+    (Listening Part 1) uses image_url; regular MC uses text.
+    """
+
+    text: Optional[str] = None
+    image_url: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _at_least_one(self):
+        if not self.text and not self.image_url:
+            raise ValueError("option must have at least one of `text` or `image_url`")
+        return self
+
+
 class _MultipleChoiceData(BaseModel):
-    options: list[str] = Field(..., min_length=2)
+    stem: Optional[str] = None
+    options: list[_MCOption] = Field(..., min_length=2)
     correct_index: int = Field(..., ge=0)
 
     @model_validator(mode="after")
@@ -63,7 +85,7 @@ def _validate_question_data(question_type: str, data: dict) -> dict:
     if cls is None:
         raise ValidationError(f"Unknown question_type '{question_type}'")
     try:
-        return cls(**data).model_dump()
+        return cls(**data).model_dump(exclude_none=True)
     except PydanticValidationError as e:
         raise ValidationError(
             f"Invalid question_data for {question_type}: {e.errors()}"
@@ -82,7 +104,7 @@ def _coerce_question_data(raw) -> dict:
 def _row_to_question(row) -> dict[str, Any]:
     return {
         "id": str(row["id"]),
-        "exam_id": str(row["exam_id"]),
+        "section_id": str(row["section_id"]),
         "position": row["position"],
         "question_type": row["question_type"],
         "question_data": _coerce_question_data(row["question_data"]),
@@ -92,7 +114,7 @@ def _row_to_question(row) -> dict[str, Any]:
     }
 
 
-_SELECT_COLS = "id, exam_id, position, question_type, question_data, points, created_at, deleted_at"
+_SELECT_COLS = "id, section_id, position, question_type, question_data, points, created_at, deleted_at"
 
 
 class QuestionService:
@@ -108,7 +130,7 @@ class QuestionService:
 
     async def create_question(
         self,
-        exam_id: str,
+        section_id: str,
         question_type: str,
         question_data: dict,
         points: int = 1,
@@ -118,54 +140,56 @@ class QuestionService:
 
         async with self.db.acquire() as conn:
             async with conn.transaction():
-                exam = await conn.fetchrow(
-                    "SELECT id FROM public.exams WHERE id = $1 AND deleted_at IS NULL",
-                    exam_id,
+                section = await conn.fetchrow(
+                    "SELECT id FROM public.sections WHERE id = $1 AND deleted_at IS NULL",
+                    section_id,
                 )
-                if not exam:
-                    logger.warning("create_question: exam %s not found", exam_id)
-                    raise NotFoundError(f"Exam {exam_id} not found")
+                if not section:
+                    logger.warning("create_question: section %s not found", section_id)
+                    raise NotFoundError(f"Section {section_id} not found")
 
                 if position is None:
                     max_pos = await conn.fetchval(
                         """
                         SELECT COALESCE(MAX(position), 0)
                         FROM public.questions
-                        WHERE exam_id = $1 AND deleted_at IS NULL
+                        WHERE section_id = $1 AND deleted_at IS NULL
                         """,
-                        exam_id,
+                        section_id,
                     )
                     position = max_pos + 1
 
                 row = await conn.fetchrow(
                     f"""
                     INSERT INTO public.questions
-                        (exam_id, position, question_type, question_data, points)
+                        (section_id, position, question_type, question_data, points)
                     VALUES ($1, $2, $3, $4::jsonb, $5)
                     RETURNING {_SELECT_COLS}
                     """,
-                    exam_id,
+                    section_id,
                     position,
                     question_type,
                     json.dumps(validated_data),
                     points,
                 )
         logger.info(
-            "Created question %s (exam=%s, type=%s, position=%d)",
-            row["id"], exam_id, question_type, position,
+            "Created question %s (section=%s, type=%s, position=%d)",
+            row["id"], section_id, question_type, position,
         )
         return _row_to_question(row)
 
-    async def list_questions_by_exam(self, exam_id: str) -> list[dict[str, Any]]:
+    async def list_questions_by_section(
+        self, section_id: str
+    ) -> list[dict[str, Any]]:
         async with self.db.acquire() as conn:
             rows = await conn.fetch(
                 f"""
                 SELECT {_SELECT_COLS}
                 FROM public.questions
-                WHERE exam_id = $1 AND deleted_at IS NULL
+                WHERE section_id = $1 AND deleted_at IS NULL
                 ORDER BY position ASC, created_at ASC
                 """,
-                exam_id,
+                section_id,
             )
         return [_row_to_question(r) for r in rows]
 
@@ -181,11 +205,28 @@ class QuestionService:
             )
         return _row_to_question(row) if row else None
 
+    async def get_exam_id_for_question(self, question_id: str) -> Optional[str]:
+        """Resolve the owning exam_id by walking question → section → exam.
+
+        Used by api/questions/routes.py to enforce published-only visibility
+        without forcing callers to know the section layer exists.
+        """
+        async with self.db.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT s.exam_id
+                FROM public.questions q
+                JOIN public.sections s ON s.id = q.section_id
+                WHERE q.id = $1 AND q.deleted_at IS NULL
+                """,
+                question_id,
+            )
+        return str(row["exam_id"]) if row else None
+
     async def update_question(self, question_id: str, **fields) -> dict[str, Any]:
         if not fields:
             raise ValidationError("No fields to update")
 
-        # Pull current row to merge type changes consistently
         current = await self.get_question(question_id)
         if not current:
             logger.warning("update_question: question %s not found", question_id)

@@ -30,15 +30,22 @@ def _row_to_attempt(row) -> dict[str, Any]:
         "total_points": float(row["total_points"]) if row["total_points"] is not None else None,
         "percentage": float(row["percentage"]) if row["percentage"] is not None else None,
         "time_spent_seconds": row["time_spent_seconds"],
-        "audio_play_count": row["audio_play_count"],
         "started_at": row["started_at"].isoformat() if row["started_at"] else None,
         "submitted_at": row["submitted_at"].isoformat() if row["submitted_at"] else None,
     }
 
 
+# Unqualified column list — for INSERT/UPDATE RETURNING (no table alias).
 _ATTEMPT_COLS = """
     id, user_id, exam_id, score, total_points, percentage,
-    time_spent_seconds, audio_play_count, started_at, submitted_at
+    time_spent_seconds, started_at, submitted_at
+"""
+
+# Same columns aliased with `a.` — required for SELECTs that JOIN exams,
+# otherwise `id` is ambiguous against `e.id`.
+_ATTEMPT_COLS_A = """
+    a.id, a.user_id, a.exam_id, a.score, a.total_points, a.percentage,
+    a.time_spent_seconds, a.started_at, a.submitted_at
 """
 
 
@@ -62,7 +69,9 @@ class AttemptService:
         return self._db_pool
 
     async def start_attempt(self, user_id: str, exam_id: str) -> dict[str, Any]:
-        """Create a new attempt + return exam + questions (correct stripped).
+        """Create a new attempt + return exam nested as sections → questions.
+
+        Correct-answer fields are stripped from every question_data.
 
         Raises:
             NotFoundError: exam doesn't exist or isn't published.
@@ -73,8 +82,7 @@ class AttemptService:
                 exam = await conn.fetchrow(
                     """
                     SELECT id, title, level, skill, duration_minutes,
-                           description, audio_url, passage, max_audio_plays,
-                           is_published
+                           description, is_published
                     FROM public.exams
                     WHERE id = $1 AND deleted_at IS NULL
                     """,
@@ -96,32 +104,65 @@ class AttemptService:
                     exam_id,
                 )
 
-                qrows = await conn.fetch(
+                section_rows = await conn.fetch(
                     """
-                    SELECT id, position, question_type, question_data, points
-                    FROM public.questions
+                    SELECT id, position, part_label, instructions, materials,
+                           audio_url, max_audio_plays
+                    FROM public.sections
                     WHERE exam_id = $1 AND deleted_at IS NULL
                     ORDER BY position ASC, created_at ASC
                     """,
                     exam_id,
                 )
+                section_ids = [r["id"] for r in section_rows]
+                if section_ids:
+                    qrows = await conn.fetch(
+                        """
+                        SELECT id, section_id, position, question_type,
+                               question_data, points
+                        FROM public.questions
+                        WHERE section_id = ANY($1::uuid[]) AND deleted_at IS NULL
+                        ORDER BY position ASC, created_at ASC
+                        """,
+                        section_ids,
+                    )
+                else:
+                    qrows = []
 
-        questions = [
+        # Group questions under their section, strip correct fields.
+        q_by_section: dict[str, list[dict[str, Any]]] = {}
+        for q in qrows:
+            sid = str(q["section_id"])
+            q_by_section.setdefault(sid, []).append(
+                {
+                    "id": str(q["id"]),
+                    "position": q["position"],
+                    "questionType": q["question_type"],
+                    "questionData": strip_correct(
+                        q["question_type"], _coerce_jsonb(q["question_data"])
+                    ),
+                    "points": q["points"],
+                }
+            )
+
+        sections_payload = [
             {
-                "id": str(q["id"]),
-                "position": q["position"],
-                "question_type": q["question_type"],
-                "question_data": strip_correct(
-                    q["question_type"], _coerce_jsonb(q["question_data"])
-                ),
-                "points": q["points"],
+                "id": str(s["id"]),
+                "position": s["position"],
+                "partLabel": s["part_label"],
+                "instructions": s["instructions"],
+                "materials": _coerce_jsonb(s["materials"]) or [],
+                "audioUrl": s["audio_url"],
+                "maxAudioPlays": s["max_audio_plays"],
+                "questions": q_by_section.get(str(s["id"]), []),
             }
-            for q in qrows
+            for s in section_rows
         ]
 
+        total_questions = sum(len(s["questions"]) for s in sections_payload)
         logger.info(
-            "Started attempt %s for user %s on exam %s (%d questions)",
-            row["id"], user_id, exam_id, len(questions),
+            "Started attempt %s for user %s on exam %s (%d sections, %d questions)",
+            row["id"], user_id, exam_id, len(sections_payload), total_questions,
         )
         return {
             "attempt": _row_to_attempt(row),
@@ -132,11 +173,8 @@ class AttemptService:
                 "skill": exam["skill"],
                 "durationMinutes": exam["duration_minutes"],
                 "description": exam["description"],
-                "audioUrl": exam["audio_url"],
-                "passage": exam["passage"],
-                "maxAudioPlays": exam["max_audio_plays"],
+                "sections": sections_payload,
             },
-            "questions": questions,
         }
 
     async def _enforce_tier_limit(self, conn, user_id: str) -> None:
@@ -149,17 +187,16 @@ class AttemptService:
             user_id,
         )
         if not sub:
-            # No subscription row (shouldn't happen — defensive). Skip enforcement.
             return
 
         try:
             tier_enum = PlanTier(sub["tier"])
         except ValueError:
-            return  # unknown tier — skip enforcement
+            return
 
         plan = SUBSCRIPTION_PLANS.get(tier_enum)
         if not plan or plan.attempts_monthly < 0:
-            return  # unlimited
+            return
 
         used = await conn.fetchval(
             """
@@ -185,27 +222,14 @@ class AttemptService:
         answers: list[dict[str, Any]],
         time_spent_seconds: Optional[int] = None,
     ) -> dict[str, Any]:
-        """Grade + persist answers, finalize the attempt.
-
-        Args:
-            attempt_id: attempt row UUID.
-            user_id: must equal attempts.user_id (owner check).
-            answers: list of {"questionId": "...", "studentAnswer": ...}.
-            time_spent_seconds: optional duration in seconds.
-
-        Raises:
-            NotFoundError: attempt doesn't exist.
-            PermissionDeniedError: user is not the owner.
-            ValidationError: attempt already submitted.
-        """
+        """Grade + persist answers across all sections, finalize the attempt."""
         async with self.db.acquire() as conn:
             async with conn.transaction():
                 attempt = await conn.fetchrow(
                     f"""
-                    SELECT {_ATTEMPT_COLS}, e.title AS exam_title
-                    FROM public.attempts a
-                    JOIN public.exams e ON e.id = a.exam_id
-                    WHERE a.id = $1
+                    SELECT {_ATTEMPT_COLS}
+                    FROM public.attempts
+                    WHERE id = $1
                     """,
                     attempt_id,
                 )
@@ -221,14 +245,16 @@ class AttemptService:
                 if attempt["submitted_at"] is not None:
                     raise ValidationError("Attempt already submitted")
 
-                # Index answers by question_id for O(1) lookup
                 answers_by_qid = {a["questionId"]: a["studentAnswer"] for a in answers}
 
                 qrows = await conn.fetch(
                     """
-                    SELECT id, question_type, question_data, points
-                    FROM public.questions
-                    WHERE exam_id = $1 AND deleted_at IS NULL
+                    SELECT q.id, q.question_type, q.question_data, q.points
+                    FROM public.questions q
+                    JOIN public.sections s ON s.id = q.section_id
+                    WHERE s.exam_id = $1
+                      AND s.deleted_at IS NULL
+                      AND q.deleted_at IS NULL
                     """,
                     attempt["exam_id"],
                 )
@@ -252,7 +278,6 @@ class AttemptService:
                         (q["id"], student_answer, is_correct, points_earned)
                     )
 
-                # Bulk insert answers
                 for q_uuid, sa, ic, pe in answer_inserts:
                     await conn.execute(
                         """
@@ -292,11 +317,11 @@ class AttemptService:
     async def get_attempt_with_answers(
         self, attempt_id: str
     ) -> Optional[dict[str, Any]]:
-        """Return attempt + per-answer breakdown joined with question metadata."""
+        """Return attempt + per-answer breakdown joined with question + section metadata."""
         async with self.db.acquire() as conn:
             attempt = await conn.fetchrow(
                 f"""
-                SELECT {_ATTEMPT_COLS},
+                SELECT {_ATTEMPT_COLS_A},
                        e.title AS exam_title, e.level AS exam_level, e.skill AS exam_skill
                 FROM public.attempts a
                 JOIN public.exams e ON e.id = a.exam_id
@@ -311,11 +336,13 @@ class AttemptService:
                 """
                 SELECT a.id AS answer_id, a.student_answer, a.is_correct, a.points_earned,
                        q.id AS question_id, q.position, q.question_type, q.question_data,
-                       q.points
+                       q.points, q.section_id, s.position AS section_position,
+                       s.part_label AS section_part_label
                 FROM public.answers a
                 JOIN public.questions q ON q.id = a.question_id
+                JOIN public.sections s ON s.id = q.section_id
                 WHERE a.attempt_id = $1
-                ORDER BY q.position ASC
+                ORDER BY s.position ASC, q.position ASC
                 """,
                 attempt_id,
             )
@@ -324,13 +351,15 @@ class AttemptService:
         per_answer = []
         for ar in answer_rows:
             qdata = _coerce_jsonb(ar["question_data"])
-            # If still in progress, hide correct answers
             if not is_submitted:
                 qdata = strip_correct(ar["question_type"], qdata)
             per_answer.append(
                 {
                     "answer_id": str(ar["answer_id"]),
                     "question_id": str(ar["question_id"]),
+                    "section_id": str(ar["section_id"]),
+                    "section_position": ar["section_position"],
+                    "section_part_label": ar["section_part_label"],
                     "position": ar["position"],
                     "question_type": ar["question_type"],
                     "question_data": qdata,
@@ -356,7 +385,7 @@ class AttemptService:
         async with self.db.acquire() as conn:
             rows = await conn.fetch(
                 f"""
-                SELECT {_ATTEMPT_COLS},
+                SELECT {_ATTEMPT_COLS_A},
                        e.title AS exam_title, e.level AS exam_level, e.skill AS exam_skill
                 FROM public.attempts a
                 JOIN public.exams e ON e.id = a.exam_id
@@ -378,64 +407,87 @@ class AttemptService:
         ]
 
     async def record_audio_play(
-        self, attempt_id: str, user_id: str
+        self, attempt_id: str, section_id: str, user_id: str
     ) -> dict[str, Any]:
-        """Increment audio_play_count; reject if it would exceed exam.max_audio_plays.
+        """Increment per-section audio_play_count; reject if it would exceed
+        the section's max_audio_plays. Upserts attempt_section_state on first call.
 
         Raises:
-            NotFoundError: attempt doesn't exist.
+            NotFoundError: attempt or section doesn't exist, or section
+                doesn't belong to this attempt's exam.
             PermissionDeniedError: user is not the owner.
-            ValidationError: attempt already submitted, or exam is not a listening exam.
+            ValidationError: attempt already submitted, or section has no
+                audio configured.
             AudioPlayLimitExceededError: cap reached.
         """
         async with self.db.acquire() as conn:
             async with conn.transaction():
-                row = await conn.fetchrow(
+                attempt = await conn.fetchrow(
                     """
-                    SELECT a.id, a.user_id, a.submitted_at, a.audio_play_count,
-                           e.skill, e.max_audio_plays
-                    FROM public.attempts a
-                    JOIN public.exams e ON e.id = a.exam_id
-                    WHERE a.id = $1
+                    SELECT id, user_id, exam_id, submitted_at
+                    FROM public.attempts
+                    WHERE id = $1
                     """,
                     attempt_id,
                 )
-                if not row:
+                if not attempt:
                     raise NotFoundError(f"Attempt {attempt_id} not found")
-                if str(row["user_id"]) != user_id:
+                if str(attempt["user_id"]) != user_id:
                     raise PermissionDeniedError("Not the owner of this attempt")
-                if row["submitted_at"] is not None:
+                if attempt["submitted_at"] is not None:
                     raise ValidationError("Attempt already submitted")
-                if row["skill"] != "listening":
-                    raise ValidationError("Audio playback only applies to listening exams")
-                if row["audio_play_count"] >= row["max_audio_plays"]:
-                    logger.warning(
-                        "record_audio_play: cap reached for attempt %s (count=%d, max=%d)",
-                        attempt_id, row["audio_play_count"], row["max_audio_plays"],
-                    )
-                    raise AudioPlayLimitExceededError(
-                        f"Audio play limit reached ({row['max_audio_plays']})"
-                    )
 
-                updated = await conn.fetchrow(
+                section = await conn.fetchrow(
                     """
-                    UPDATE public.attempts
-                    SET audio_play_count = audio_play_count + 1
-                    WHERE id = $1
+                    SELECT id, exam_id, audio_url, max_audio_plays
+                    FROM public.sections
+                    WHERE id = $1 AND deleted_at IS NULL
+                    """,
+                    section_id,
+                )
+                if not section:
+                    raise NotFoundError(f"Section {section_id} not found")
+                if str(section["exam_id"]) != str(attempt["exam_id"]):
+                    raise NotFoundError(
+                        f"Section {section_id} not part of this attempt"
+                    )
+                if not section["audio_url"]:
+                    raise ValidationError("Section has no audio")
+
+                max_plays = section["max_audio_plays"]
+                # Upsert state row, returning the (post-increment) count.
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO public.attempt_section_state
+                        (attempt_id, section_id, audio_play_count, started_at)
+                    VALUES ($1, $2, 1, now())
+                    ON CONFLICT (attempt_id, section_id)
+                    DO UPDATE SET
+                        audio_play_count = public.attempt_section_state.audio_play_count + 1,
+                        started_at = COALESCE(public.attempt_section_state.started_at, now())
                     RETURNING audio_play_count
                     """,
                     attempt_id,
+                    section_id,
                 )
+                new_count = row["audio_play_count"]
+                if max_plays is not None and new_count > max_plays:
+                    logger.warning(
+                        "record_audio_play: cap reached (attempt=%s, section=%s, %d>%d)",
+                        attempt_id, section_id, new_count, max_plays,
+                    )
+                    raise AudioPlayLimitExceededError(
+                        f"Audio play limit reached ({max_plays})"
+                    )
 
-        new_count = updated["audio_play_count"]
-        remaining = row["max_audio_plays"] - new_count
+        remaining = (max_plays - new_count) if max_plays is not None else None
         logger.info(
-            "record_audio_play: attempt %s now at %d/%d plays",
-            attempt_id, new_count, row["max_audio_plays"],
+            "record_audio_play: attempt %s section %s at %d/%s plays",
+            attempt_id, section_id, new_count, max_plays,
         )
         return {
             "audioPlayCount": new_count,
-            "maxAudioPlays": row["max_audio_plays"],
+            "maxAudioPlays": max_plays,
             "remainingPlays": remaining,
         }
 

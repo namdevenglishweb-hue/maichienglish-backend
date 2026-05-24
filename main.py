@@ -9,8 +9,10 @@ from api.attempts import router as attempts_router
 from api.auth import router as auth_router
 from api.exams import router as exams_router
 from api.parents import router as parents_router
-from api.questions import exam_scoped_router as exam_questions_router
 from api.questions import question_router as questions_router
+from api.questions import section_scoped_router as section_questions_router
+from api.sections import exam_scoped_router as exam_sections_router
+from api.sections import section_router as sections_router
 from api.subscriptions import router as subscriptions_router
 from api.users import router as users_router
 from config.database import close_db_pool, get_db_pool, init_db_pool
@@ -49,7 +51,9 @@ app.include_router(users_router)
 app.include_router(subscriptions_router)
 app.include_router(admin_router)
 app.include_router(exams_router)
-app.include_router(exam_questions_router)
+app.include_router(exam_sections_router)
+app.include_router(sections_router)
+app.include_router(section_questions_router)
 app.include_router(questions_router)
 app.include_router(attempts_router)
 app.include_router(parents_router)
