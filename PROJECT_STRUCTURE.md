@@ -11,16 +11,17 @@
 
 ```
 maichienglish-be/
-├── main.py                          # ✅ FastAPI app entry — lifespan inits DB pool, uses setup_logging(), mounts auth/users/subscriptions/admin/exams/questions/attempts/parents routers, exposes /health and /db-ping
+├── main.py                          # ✅ FastAPI app entry — lifespan inits DB pool, uses setup_logging(), mounts auth/users/subscriptions/admin/exams/sections/questions/attempts/parents routers, exposes /health and /db-ping
 ├── requirements.txt                 # ✅ Pinned deps: fastapi, uvicorn, pydantic, pydantic-settings, email-validator, asyncpg, pyjwt, bcrypt
 ├── Dockerfile                       # ✅ Python 3.14-slim, non-root appuser, EXPOSE 8000, HEALTHCHECK on /health
 ├── render.yaml                      # ✅ Render web service: docker runtime, Singapore region, free plan, autoDeploy:false (deploy triggered by GHA after CI passes), healthCheckPath /health
-├── schema.sql                       # ✅ Initial Postgres schema — paste into Supabase SQL Editor on first setup. Source of truth: MAICHIENGLISH_BACKEND_PLAN.md §3
+├── schema.sql                       # ✅ Initial Postgres schema (Exam → Section → Question, attempt_section_state). Paste into Supabase SQL Editor on first setup. Source of truth: MAICHIENGLISH_BACKEND_PLAN.md §3
 ├── .env.example                     # ✅ Template for DATABASE_URL, DEBUG, CORS_ORIGINS, CORS_ORIGIN_REGEX, JWT_*, ADMIN_* (seed-only)
 ├── .env                             # ⏳ Local secrets (gitignored)
 ├── .gitignore                       # ✅ Ignore .env, __pycache__, .venv, .pytest_cache, IDE files
 ├── README.md                        # ✅ Project intro + quickstart
 ├── PROJECT_STRUCTURE.md             # ✅ This file — repo map
+├── DEPLOYMENT.md                    # ✅ Step-by-step: GitHub setup, Supabase setup, Render setup, ongoing deploys, migrations, rollback, troubleshooting
 └── MAICHIENGLISH_BACKEND_PLAN.md    # ✅ Backend spec + HLD (source of truth for schema, API, decisions)
 ```
 
@@ -57,18 +58,23 @@ api/
 │
 ├── exams/
 │   ├── __init__.py                  # ✅ Re-exports `router`
-│   ├── routes.py                    # ✅ GET / (filter level/skill/published), GET /{id}, POST /, PUT /{id}, POST /{id}/publish, POST /{id}/unpublish, DELETE /{id} (soft), DELETE /{id}/hard. Students forced to is_published=true.
-│   └── schemas.py                   # ✅ ExamCreate, ExamUpdate, ExamView, ExamResponse, ExamListResponse
+│   ├── routes.py                    # ✅ GET / (filter level/skill/published), GET /{id} (?include=sections nests section tree), POST /, PUT /{id}, POST /{id}/publish (needs ≥1 section w/ ≥1 active question), POST /{id}/unpublish, DELETE /{id} (soft), DELETE /{id}/hard. Students forced to is_published=true.
+│   └── schemas.py                   # ✅ ExamCreate, ExamUpdate, ExamView (optional `sections` populated by ?include=sections), ExamSectionPreview, ExamQuestionPreview, ExamResponse, ExamListResponse
+│
+├── sections/                        # ✅ Middle layer of Exam → Section → Question
+│   ├── __init__.py                  # ✅ Re-exports both routers
+│   ├── routes.py                    # ✅ exam_scoped_router: GET/POST /api/exams/{eid}/sections  |  section_router: GET/PUT/DELETE /api/sections/{sid}, DELETE /api/sections/{sid}/hard (?include=questions nests questions on GET)
+│   └── schemas.py                   # ✅ SectionCreate, SectionUpdate, SectionMaterial (only `text` variant today — audio lives on the `audio_url` column, not in materials), SectionView (optional `questions` populated by ?include=questions), SectionQuestionPreview + wrappers
 │
 ├── questions/
 │   ├── __init__.py                  # ✅ Re-exports both routers
-│   ├── routes.py                    # ✅ exam_scoped_router: GET/POST /api/exams/{id}/questions  |  question_router: GET/PUT/DELETE /api/questions/{id}, DELETE /api/questions/{id}/hard. Excel import deferred to B3.4b.
-│   └── schemas.py                   # ✅ QuestionCreate (server-side per-type validation), QuestionUpdate, QuestionView + wrappers
+│   ├── routes.py                    # ✅ section_scoped_router: GET/POST /api/sections/{sid}/questions  |  question_router: GET/PUT/DELETE /api/questions/{id}, DELETE /api/questions/{id}/hard. Excel import deferred to B3.4b.
+│   └── schemas.py                   # ✅ QuestionCreate (server-side per-type validation; MC options accept text|image_url), QuestionUpdate, QuestionView + wrappers
 │
 ├── attempts/
 │   ├── __init__.py                  # ✅ Re-exports `router`
-│   ├── routes.py                    # ✅ POST / (start, enforces tier limit), POST /{id}/submit (auto-grade), POST /{id}/audio-play (listening cap), GET /history, GET /{id} (detail; owner/staff/parent)
-│   └── schemas.py                   # ✅ AttemptStart/Submit Request+Response, AttemptDetailResponse, AttemptHistoryItem, AudioPlayResponse
+│   ├── routes.py                    # ✅ POST / (start, enforces tier limit, returns nested exam→sections→questions), POST /{id}/submit (auto-grade across all sections), POST /{id}/sections/{sid}/audio-play (per-section cap), GET /history, GET /{id} (detail grouped by section; owner/staff/parent)
+│   └── schemas.py                   # ✅ AttemptStart/Submit Request+Response (nested sections), AttemptDetailResponse, AttemptHistoryItem, AudioPlayResponse
 │
 ├── parents/
 │   ├── __init__.py                  # ✅ Re-exports `router` (router-level require_parent)
@@ -89,9 +95,10 @@ services/
 ├── exceptions.py                    # ✅ ServiceError base + NotFoundError, AlreadyExistsError, ValidationError, PermissionDeniedError, InvalidCredentialsError, InsufficientCreditsError
 ├── auth_service.py                  # ✅ Password reset code lifecycle: request_password_reset_code (anti-enumeration silent 200 + invalidate previous codes), reset_password (bcrypt-compare candidates, mark used, replace password_hash in one tx). Login/token logic stays in api/auth/routes.py + utils/jwt_utils.py.
 ├── user_service.py                  # ✅ create_user (profile + subscription tx, accepts parent_id), authenticate, get_by_email/id, list_users (filter+paginate), update_profile (self-edit fullName/phone), delete_user, admin_reset_password, link_parent, list_children_of_parent, is_child_of
-├── exam_service.py                  # ✅ Exam CRUD, publish (checks >=1 active question) / unpublish, soft delete (set deleted_at), hard delete (CASCADE)
-├── question_service.py              # ✅ Question CRUD with Pydantic per-type validation of question_data (multiple_choice / fill_blank / matching), auto-assigned position, soft/hard delete. Excel import lands in B3.4b.
-├── attempt_service.py               # ✅ Start (enforces tier limit via COUNT vs subscription.current_period_start), submit + auto-grade, history queries, record_audio_play (enforces exams.max_audio_plays). Custom AttemptLimitExceededError + AudioPlayLimitExceededError extend PermissionDeniedError.
+├── exam_service.py                  # ✅ Exam CRUD (no passage/audio fields), publish (checks ≥1 section w/ ≥1 active question) / unpublish, soft delete, hard delete (CASCADE through sections)
+├── section_service.py               # ✅ Section CRUD: create_section, list_sections_by_exam, get_section, update_section, soft_delete_section, hard_delete_section. Owns materials JSONB + audio_url + max_audio_plays; per-exam position auto-assigned; soft/hard delete. ?include=sections in exam routes composes list_sections_by_exam + question_service.list_questions_by_section.
+├── question_service.py              # ✅ Question CRUD scoped to section_id (per-section position); per-type validation (multiple_choice w/ text|image_url options, fill_blank, matching); soft/hard delete. Excel import lands in B3.4b.
+├── attempt_service.py               # ✅ Start (enforces tier limit; returns nested exam→sections→questions), submit + auto-grade across all sections, history queries, record_audio_play (per-section: upserts attempt_section_state, enforces sections.max_audio_plays). Custom AttemptLimitExceededError + AudioPlayLimitExceededError extend PermissionDeniedError.
 ├── subscription_service.py          # ✅ get_by_user_id, update_tier (validates tier + logs), list_plans serializer. Attempt-limit enforcement lives in attempt_service; period-reset is not yet implemented (period boundary still equals subscriptions.current_period_start from creation).
 └── subscription_plans.py            # ✅ PlanTier enum, SubscriptionPlan + PlanFeature dataclasses, SUBSCRIPTION_PLANS dict (Free / Basic / Pro / Ultra)
 ```
@@ -104,9 +111,11 @@ models/
 ├── user.py                          # ⏳ Profile model (matches §3.1 profiles table)
 ├── subscription.py                  # ⏳ Subscription model (matches §3.2)
 ├── exam.py                          # ⏳ Exam model with deleted_at (matches §3.4)
-├── question.py                      # ⏳ Question model with question_data JSONB + deleted_at (matches §3.5)
-├── attempt.py                       # ⏳ Attempt model (matches §3.6)
-└── answer.py                        # ⏳ Answer model (matches §3.7)
+├── section.py                       # ⏳ Section model with materials JSONB + audio_url + deleted_at (matches §3.5)
+├── question.py                      # ⏳ Question model with question_data JSONB + section_id + deleted_at (matches §3.6)
+├── attempt.py                       # ⏳ Attempt model (matches §3.7)
+├── attempt_section_state.py         # ⏳ Per-section progress + audio counter (matches §3.8)
+└── answer.py                        # ⏳ Answer model (matches §3.9)
 ```
 
 > Note: if the implementation uses raw asyncpg with dict rows instead of SQLAlchemy ORM, this folder may stay empty or be removed. Decide at implementation time.
@@ -118,7 +127,7 @@ utils/
 ├── __init__.py                      # ✅ Empty
 ├── jwt_utils.py                     # ✅ TokenType constants, create_access_token, create_refresh_token, decode_token (with type verification)
 ├── password_utils.py                # ✅ hash_password, verify_password (bcrypt cost 12)
-├── grading_utils.py                 # ✅ grade_question (multiple_choice index match / fill_blank string-match w/ case_sensitive / matching set-of-pairs compare), strip_correct (removes answer fields before serving to students mid-attempt)
+├── grading_utils.py                 # ✅ grade_question (multiple_choice index match against options with text|image_url variants / fill_blank string-match w/ case_sensitive / matching set-of-pairs compare), strip_correct (removes answer fields before serving to students mid-attempt)
 └── excel_utils.py                   # ⏳ Excel-to-questions parser (B3.4b — deferred, awaiting client confirmation on column format)
 ```
 
@@ -136,7 +145,8 @@ dependencies.py                      # ✅ get_current_user (Bearer JWT validato
 ```
 migrations/
 ├── 0002_add_parent_role.sql         # ✅ Add `parent` to role CHECK + `profiles.parent_id` self-FK. Idempotent.
-└── 0003_add_password_reset_codes.sql # ✅ Create `password_reset_codes` table (bcrypt-hashed 6-digit codes, 10-min TTL). Idempotent.
+├── 0003_add_password_reset_codes.sql # ✅ Create `password_reset_codes` table (bcrypt-hashed 6-digit codes, 10-min TTL). Idempotent.
+└── 0004_exam_sections.sql           # ✅ Introduce sections layer + attempt_section_state. Drops exams.audio_url/passage/max_audio_plays + questions.exam_id + attempts.audio_play_count. Breaking change — dev DB only; run init_schema.py --drop -y for fresh setup.
 ```
 
 ```
