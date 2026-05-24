@@ -1,4 +1,4 @@
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -7,35 +7,26 @@ SkillLiteral = Literal["listening", "reading"]
 
 
 class ExamCreate(BaseModel):
-    """Body for POST /api/exams (admin only)."""
+    """Body for POST /api/exams (admin only).
+
+    Passage / audio / replay caps belong to **sections**, not exams. Create
+    the exam first, then add sections via POST /api/exams/{eid}/sections.
+    """
 
     title: str = Field(..., min_length=1, description="Exam title shown in UI")
     level: LevelLiteral = Field(..., description="primary / secondary / KET / PET / IELTS")
     skill: SkillLiteral = Field(..., description="listening or reading")
     duration_minutes: int = Field(default=45, gt=0, description="Time limit in minutes")
     description: Optional[str] = None
-    audio_url: Optional[str] = Field(
-        default=None,
-        description="Shared listening audio (listening exams only)",
-    )
-    passage: Optional[str] = Field(
-        default=None, description="Reading passage text (reading exams only)"
-    )
-    max_audio_plays: int = Field(
-        default=3, ge=0, description="Cap on student replays for listening audio"
-    )
 
     model_config = {
         "json_schema_extra": {
             "example": {
-                "title": "KET Listening Practice 01",
+                "title": "KET Reading Practice 01",
                 "level": "KET",
-                "skill": "listening",
-                "duration_minutes": 30,
-                "description": "Two-part listening with 10 multiple-choice questions.",
-                "audio_url": "https://[project].supabase.co/storage/v1/object/sign/audio/ket01.mp3",
-                "passage": None,
-                "max_audio_plays": 3,
+                "skill": "reading",
+                "duration_minutes": 60,
+                "description": "Reading + writing paper, 5 parts.",
             }
         }
     }
@@ -49,13 +40,42 @@ class ExamUpdate(BaseModel):
     skill: Optional[SkillLiteral] = None
     duration_minutes: Optional[int] = Field(default=None, gt=0)
     description: Optional[str] = None
-    audio_url: Optional[str] = None
-    passage: Optional[str] = None
-    max_audio_plays: Optional[int] = Field(default=None, ge=0)
+
+
+class ExamQuestionPreview(BaseModel):
+    """Question shape nested under a section when `?include=sections` is requested.
+
+    `questionData` is `dict[str, Any]` because correct-answer fields are
+    stripped for non-privileged callers — both shapes round-trip cleanly.
+    """
+
+    id: str
+    position: int
+    questionType: str
+    questionData: dict[str, Any]
+    points: int
+
+
+class ExamSectionPreview(BaseModel):
+    """Section shape nested under an exam when `?include=sections` is requested."""
+
+    id: str
+    position: int
+    partLabel: Optional[str] = None
+    instructions: Optional[str] = None
+    materials: list[dict[str, Any]] = Field(default_factory=list)
+    audioUrl: Optional[str] = None
+    maxAudioPlays: Optional[int] = None
+    questions: list[ExamQuestionPreview] = Field(default_factory=list)
 
 
 class ExamView(BaseModel):
-    """Exam payload returned to clients."""
+    """Top-level exam metadata returned to clients.
+
+    `sections` is populated only when the endpoint was called with
+    `?include=sections`. `None` otherwise so the OpenAPI schema makes the
+    optional nesting explicit.
+    """
 
     id: str
     title: str
@@ -63,14 +83,15 @@ class ExamView(BaseModel):
     skill: str
     durationMinutes: int
     description: Optional[str] = None
-    audioUrl: Optional[str] = None
-    passage: Optional[str] = None
-    maxAudioPlays: int
     isPublished: bool
     createdBy: Optional[str] = None
     createdAt: Optional[str] = None
     updatedAt: Optional[str] = None
     deletedAt: Optional[str] = None
+    sections: Optional[list[ExamSectionPreview]] = Field(
+        default=None,
+        description="Populated only when ?include=sections was requested.",
+    )
 
 
 class ExamResponseData(BaseModel):

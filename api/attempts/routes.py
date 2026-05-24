@@ -22,7 +22,6 @@ from .schemas import (
     AttemptHistoryData,
     AttemptHistoryItem,
     AttemptHistoryResponse,
-    AttemptQuestionView,
     AttemptStartRequest,
     AttemptStartResponse,
     AttemptStartResponseData,
@@ -56,7 +55,6 @@ def _attempt_to_view(a: dict) -> AttemptView:
         totalPoints=a["total_points"],
         percentage=a["percentage"],
         timeSpentSeconds=a["time_spent_seconds"],
-        audioPlayCount=a["audio_play_count"],
         startedAt=a["started_at"],
         submittedAt=a["submitted_at"],
     )
@@ -74,6 +72,8 @@ async def start_attempt(
 
     - Blocked for `role=parent` (they don't take exams).
     - Enforces tier monthly attempt limit (Free 5, Basic 50, Pro/Ultra unlimited).
+    - Returns the exam nested as `sections[] → questions[]` with correct
+      answers stripped.
     """
     if current_user.get("role") == "parent":
         raise HTTPException(
@@ -96,16 +96,6 @@ async def start_attempt(
         data=AttemptStartResponseData(
             attemptId=result["attempt"]["id"],
             exam=AttemptExamView(**result["exam"]),
-            questions=[
-                AttemptQuestionView(
-                    id=q["id"],
-                    position=q["position"],
-                    questionType=q["question_type"],
-                    questionData=q["question_data"],
-                    points=q["points"],
-                )
-                for q in result["questions"]
-            ],
             startedAt=result["attempt"]["started_at"],
         ),
     )
@@ -119,7 +109,10 @@ async def submit_attempt(
     request: AttemptSubmitRequest,
     current_user: dict = Depends(get_current_user),
 ):
-    """Submit answers and finalize the attempt. Owner only."""
+    """Submit answers and finalize the attempt. Owner only.
+
+    Grading runs over every active question in every active section of the exam.
+    """
     user = await _resolve_user(current_user)
     try:
         attempt = await attempt_service.submit_attempt(
@@ -146,16 +139,25 @@ async def submit_attempt(
 
 
 @router.post(
-    "/{attempt_id}/audio-play", response_model=AudioPlayResponse
+    "/{attempt_id}/sections/{section_id}/audio-play",
+    response_model=AudioPlayResponse,
 )
 async def record_audio_play(
-    attempt_id: str, current_user: dict = Depends(get_current_user)
+    attempt_id: str,
+    section_id: str,
+    current_user: dict = Depends(get_current_user),
 ):
-    """Increment listening-audio play counter. Rejects past `max_audio_plays`."""
+    """Increment the listening-audio play counter for a section.
+
+    Rejects past `sections.max_audio_plays`. Creates the
+    `attempt_section_state` row lazily on the first call.
+    """
     user = await _resolve_user(current_user)
     try:
         result = await attempt_service.record_audio_play(
-            attempt_id=attempt_id, user_id=user["id"]
+            attempt_id=attempt_id,
+            section_id=section_id,
+            user_id=user["id"],
         )
     except NotFoundError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
@@ -199,7 +201,7 @@ async def get_history(current_user: dict = Depends(get_current_user)):
 async def get_attempt_detail(
     attempt_id: str, current_user: dict = Depends(get_current_user)
 ):
-    """Get an attempt with per-question breakdown.
+    """Get an attempt with per-question breakdown (grouped by section).
 
     - Owner can always view.
     - Admin/teacher can view any attempt.
@@ -235,6 +237,9 @@ async def get_attempt_detail(
                 AnswerView(
                     answerId=a["answer_id"],
                     questionId=a["question_id"],
+                    sectionId=a["section_id"],
+                    sectionPosition=a["section_position"],
+                    sectionPartLabel=a["section_part_label"],
                     position=a["position"],
                     questionType=a["question_type"],
                     questionData=a["question_data"],

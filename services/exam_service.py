@@ -14,9 +14,6 @@ def _row_to_exam(row) -> dict[str, Any]:
         "skill": row["skill"],
         "duration_minutes": row["duration_minutes"],
         "description": row["description"],
-        "audio_url": row["audio_url"],
-        "passage": row["passage"],
-        "max_audio_plays": row["max_audio_plays"],
         "is_published": row["is_published"],
         "created_by": str(row["created_by"]) if row["created_by"] else None,
         "created_at": row["created_at"].isoformat() if row["created_at"] else None,
@@ -26,8 +23,8 @@ def _row_to_exam(row) -> dict[str, Any]:
 
 
 _SELECT_COLS = """
-    id, title, level, skill, duration_minutes, description, audio_url, passage,
-    max_audio_plays, is_published, created_by, created_at, updated_at, deleted_at
+    id, title, level, skill, duration_minutes, description,
+    is_published, created_by, created_at, updated_at, deleted_at
 """
 
 
@@ -49,18 +46,14 @@ class ExamService:
         skill: str,
         duration_minutes: int = 45,
         description: Optional[str] = None,
-        audio_url: Optional[str] = None,
-        passage: Optional[str] = None,
-        max_audio_plays: int = 3,
         created_by: Optional[str] = None,
     ) -> dict[str, Any]:
         async with self.db.acquire() as conn:
             row = await conn.fetchrow(
                 f"""
                 INSERT INTO public.exams
-                    (title, level, skill, duration_minutes, description, audio_url,
-                     passage, max_audio_plays, created_by)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    (title, level, skill, duration_minutes, description, created_by)
+                VALUES ($1, $2, $3, $4, $5, $6)
                 RETURNING {_SELECT_COLS}
                 """,
                 title,
@@ -68,9 +61,6 @@ class ExamService:
                 skill,
                 duration_minutes,
                 description,
-                audio_url,
-                passage,
-                max_audio_plays,
                 created_by,
             )
         logger.info("Created exam: %s (level=%s, skill=%s)", row["id"], level, skill)
@@ -123,16 +113,12 @@ class ExamService:
         if not fields:
             raise ValidationError("No fields to update")
 
-        # Whitelist mutable columns
         allowed = {
             "title",
             "level",
             "skill",
             "duration_minutes",
             "description",
-            "audio_url",
-            "passage",
-            "max_audio_plays",
         }
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:
@@ -162,10 +148,11 @@ class ExamService:
         return _row_to_exam(row)
 
     async def publish_exam(self, exam_id: str) -> dict[str, Any]:
+        """Publish if the exam has at least one active question across all sections."""
         async with self.db.acquire() as conn:
             async with conn.transaction():
                 exam = await conn.fetchrow(
-                    "SELECT id, is_published FROM public.exams WHERE id = $1 AND deleted_at IS NULL",
+                    "SELECT id FROM public.exams WHERE id = $1 AND deleted_at IS NULL",
                     exam_id,
                 )
                 if not exam:
@@ -174,15 +161,21 @@ class ExamService:
 
                 count = await conn.fetchval(
                     """
-                    SELECT COUNT(*) FROM public.questions
-                    WHERE exam_id = $1 AND deleted_at IS NULL
+                    SELECT COUNT(*)
+                    FROM public.questions q
+                    JOIN public.sections s ON s.id = q.section_id
+                    WHERE s.exam_id = $1
+                      AND s.deleted_at IS NULL
+                      AND q.deleted_at IS NULL
                     """,
                     exam_id,
                 )
                 if count == 0:
-                    logger.warning("publish_exam: exam %s has no active questions", exam_id)
+                    logger.warning(
+                        "publish_exam: exam %s has no active sections/questions", exam_id
+                    )
                     raise ValidationError(
-                        "Cannot publish exam with no questions"
+                        "Cannot publish exam with no active questions"
                     )
 
                 row = await conn.fetchrow(
@@ -194,7 +187,7 @@ class ExamService:
                     """,
                     exam_id,
                 )
-        logger.info("Published exam %s (%d questions)", exam_id, count)
+        logger.info("Published exam %s (%d active questions)", exam_id, count)
         return _row_to_exam(row)
 
     async def unpublish_exam(self, exam_id: str) -> dict[str, Any]:

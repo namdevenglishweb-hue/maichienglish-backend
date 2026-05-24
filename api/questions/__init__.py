@@ -1,3 +1,3 @@
-from .routes import exam_scoped_router, question_router
+from .routes import question_router, section_scoped_router
 
-__all__ = ["exam_scoped_router", "question_router"]
+__all__ = ["question_router", "section_scoped_router"]

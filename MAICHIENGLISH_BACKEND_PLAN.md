@@ -126,11 +126,13 @@ This document outlines the backend portion of the Mai Chi English system: a **Fa
 maichienglish-be/
 ├── api/
 │   ├── auth/           # Authentication endpoints
-│   ├── exams/          # Exam CRUD + publishing
-│   ├── questions/      # Question management
-│   ├── attempts/       # Student exam attempts
 │   ├── users/          # User profile management
 │   ├── admin/          # Admin-only operations
+│   ├── exams/          # Exam CRUD + publishing
+│   ├── sections/       # Section CRUD (middle layer of Exam → Section → Question)
+│   ├── questions/      # Question management (scoped to a section)
+│   ├── attempts/       # Student exam attempts
+│   ├── parents/        # Parent ↔ linked-children views
 │   └── subscriptions/  # Subscription management
 ├── services/           # Business logic layer
 ├── models/             # SQLAlchemy models (optional)
@@ -170,13 +172,18 @@ maichienglish-be/
 
 #### Exam Management
 - [x] CRUD for exams
+- [x] **3-layer hierarchy**: Exam → Section → Question (matches KET/PET "Part 1/2/..." layout)
+- [x] CRUD for sections (passage / audio / instructions live here, not on exam)
 - [x] Publish/unpublish toggle
 - [x] Question CRUD (3 types: multiple_choice, fill_blank, matching)
+  - multiple_choice options accept text and/or image_url (for picture MC)
+  - shared-options pattern (Part 2 campsites, Listening P3 matching) is **denormalized** — options live on each question; FE detects shared layout at render time
 - [ ] Excel import for questions (deferred to B3.4b — column format pending client confirmation)
-- [x] Audio file management (storage buckets created, audio_url field on exams, audio-play counter enforcing `max_audio_plays`)
+- [x] Audio file management (storage buckets created, `sections.audio_url`, per-section play counter enforcing `sections.max_audio_plays`)
 
 #### Attempt Management
 - [x] Start exam attempt
+- [x] Per-section progress state (audio replay counters, resume per section)
 - [x] Submit answers
 - [x] Auto-grading
 - [x] View results
@@ -186,9 +193,17 @@ maichienglish-be/
 
 ## 3. Database Schema
 
-> **Delete semantics for exams & questions**: the default `DELETE` endpoint behavior is **soft delete** (set `deleted_at = now()`, all queries filter `WHERE deleted_at IS NULL`). A separate admin-only **hard delete** path runs an actual `DELETE` row, which `CASCADE`s through `attempts` and `answers` — used only to remove broken/erroneous content.
+> **Delete semantics for exams, sections & questions**: the default `DELETE`
+> endpoint behavior is **soft delete** (set `deleted_at = now()`, all queries
+> filter `WHERE deleted_at IS NULL`). A separate admin-only **hard delete**
+> path runs an actual `DELETE` row, which `CASCADE`s through sections,
+> questions, attempts and answers — used only to remove broken/erroneous
+> content.
 >
-> Schema is reconciled with the prior Supabase project's tables (preserving domain features like listening audio + reading passage + per-question points) and extended with refactor-only additions (custom JWT auth, subscriptions, soft delete, `ON DELETE CASCADE`). Run the SQL in [`schema.sql`](../schema.sql).
+> The exam tree is **Exam → Section → Question** (matching KET/PET "Part 1 /
+> Part 2 / …" layout). Passage, audio, and per-listening-section replay caps
+> live on `sections`, not on `exams`. Run the SQL in
+> [`schema.sql`](../schema.sql).
 
 ### 3.1 `profiles` — users + auth
 
@@ -243,9 +258,10 @@ CREATE TABLE public.password_reset_codes (
 );
 ```
 
-### 3.4 `exams` — exam definitions
+### 3.4 `exams` — top-level exam definition
 
-`audio_url` + `max_audio_plays` apply to listening exams (one shared audio per exam, with a play-count limit enforced via `attempts.audio_play_count`). `passage` applies to reading exams.
+Passage/audio/replay-cap live on `sections` (§3.5), not on the exam. An exam is
+just a title + level + skill + duration container.
 
 ```sql
 CREATE TABLE public.exams (
@@ -257,9 +273,6 @@ CREATE TABLE public.exams (
                       CHECK (skill IN ('listening', 'reading')),
   duration_minutes  int  NOT NULL DEFAULT 45 CHECK (duration_minutes > 0),
   description       text,
-  audio_url         text,                              -- listening: one shared audio file
-  passage           text,                              -- reading: passage text
-  max_audio_plays   int  NOT NULL DEFAULT 3,           -- listening: cap on student replays
   is_published      boolean NOT NULL DEFAULT false,
   created_by        uuid REFERENCES public.profiles(id) ON DELETE SET NULL,
   created_at        timestamptz NOT NULL DEFAULT now(),
@@ -268,29 +281,84 @@ CREATE TABLE public.exams (
 );
 ```
 
-### 3.5 `questions` — flexible per type via JSONB
+### 3.5 `sections` — one row per "Part" of an exam
 
-`question_data` shape varies by `question_type`:
+Models KET/PET-style structure (Part 1 / Part 2 / …). Each section can hold an
+optional passage (or several passages), an optional listening audio with its
+own replay cap, and an instruction rubric.
 
-- `multiple_choice`: `{ "options": ["A","B","C","D"], "correct_index": 2 }`
+- `materials` is a JSONB list of passages: `[{type, label?, content}, ...]`.
+  Most sections have 0 or 1 entries; two entries support exchanges like the
+  Bea ↔ Tania email pair (Reading Part 5 dialogue).
+- Gap markers inside `content` use the convention `{{gap:N}}` where **N is the
+  `position` of a question within this section**. The frontend parses the
+  passage and replaces each marker with an input bound to that question.
+- `audio_url` + `max_audio_plays` apply only to listening sections. Replay
+  counts are tracked per attempt in `attempt_section_state` (§3.8).
+
+```sql
+CREATE TABLE public.sections (
+  id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  exam_id           uuid NOT NULL REFERENCES public.exams(id) ON DELETE CASCADE,
+  position          int  NOT NULL,                     -- 1-based order within exam
+  part_label        text,                              -- e.g. "Part 1"
+  instructions      text,                              -- rubric shown to student
+  materials         jsonb NOT NULL DEFAULT '[]'::jsonb,
+  audio_url         text,                              -- listening sections only
+  max_audio_plays   int,                               -- listening sections only
+  created_at        timestamptz NOT NULL DEFAULT now(),
+  updated_at        timestamptz NOT NULL DEFAULT now(),
+  deleted_at        timestamptz,
+  UNIQUE (exam_id, position)
+);
+```
+
+### 3.6 `questions` — flexible per type via JSONB
+
+Scoped to a section. `position` is per-section and is referenced by the
+`{{gap:N}}` markers above. `question_data` shape varies by `question_type`:
+
+- `multiple_choice`:
+  ```jsonc
+  {
+    "stem": "What does the writer say?",       // optional
+    "options": [
+      {"text": "He was the only..."},          // each option has text and/or image_url
+      {"text": "He learned to play..."},
+      {"image_url": "https://.../bus.png"}     // picture MC (Listening Part 1)
+    ],
+    "correct_index": 1
+  }
+  ```
 - `fill_blank`: `{ "correct_answers": ["nine", "9"], "case_sensitive": false }`
 - `matching`: `{ "left": [...], "right": [...], "correct_pairs": [[0,1],[1,0],[2,2]] }`
+
+**Shared-options note**: KET/PET patterns where several questions share one set
+of options (Reading Part 2 campsites, Listening Part 3 places→things) are
+stored **denormalized** — every question carries its own `options`. The
+frontend detects "consecutive questions in the same section have identical
+options" and renders the shared header layout. Storage stays simple; UX is a
+render-time concern.
 
 ```sql
 CREATE TABLE public.questions (
   id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  exam_id        uuid NOT NULL REFERENCES public.exams(id) ON DELETE CASCADE,
+  section_id     uuid NOT NULL REFERENCES public.sections(id) ON DELETE CASCADE,
   position       int  NOT NULL,
   question_type  text NOT NULL
                   CHECK (question_type IN ('multiple_choice', 'fill_blank', 'matching')),
   question_data  jsonb NOT NULL,
   points         int  NOT NULL DEFAULT 1,
   created_at     timestamptz NOT NULL DEFAULT now(),
-  deleted_at     timestamptz                           -- soft delete; NULL = active
+  deleted_at     timestamptz,                          -- soft delete; NULL = active
+  UNIQUE (section_id, position)
 );
 ```
 
-### 3.6 `attempts` — one row per exam attempt
+### 3.7 `attempts` — one row per exam attempt
+
+Per-section replay counters + per-section resume state live on
+`attempt_section_state` (§3.8), not on this table.
 
 ```sql
 CREATE TABLE public.attempts (
@@ -301,13 +369,30 @@ CREATE TABLE public.attempts (
   total_points         numeric(6,2),
   percentage           numeric(5,2),
   time_spent_seconds   int,
-  audio_play_count     int NOT NULL DEFAULT 0,         -- listening: tracks plays for limit enforcement
   started_at           timestamptz NOT NULL DEFAULT now(),
   submitted_at         timestamptz
 );
 ```
 
-### 3.7 `answers` — one row per question per attempt
+### 3.8 `attempt_section_state` — per-section state for an attempt
+
+One row per (attempt, section). Created lazily the first time a student opens
+that section. Used to (a) enforce `sections.max_audio_plays` per section and
+(b) allow students to finalize sections one at a time.
+
+```sql
+CREATE TABLE public.attempt_section_state (
+  id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  attempt_id        uuid NOT NULL REFERENCES public.attempts(id) ON DELETE CASCADE,
+  section_id        uuid NOT NULL REFERENCES public.sections(id) ON DELETE CASCADE,
+  audio_play_count  int  NOT NULL DEFAULT 0,
+  started_at        timestamptz,
+  submitted_at      timestamptz,
+  UNIQUE (attempt_id, section_id)
+);
+```
+
+### 3.9 `answers` — one row per question per attempt
 
 ```sql
 CREATE TABLE public.answers (
@@ -321,7 +406,7 @@ CREATE TABLE public.answers (
 );
 ```
 
-### 3.8 Storage buckets (Supabase Storage)
+### 3.10 Storage buckets (Supabase Storage)
 
 Create two buckets in the new Supabase project:
 
@@ -635,19 +720,28 @@ List exams (filtered by role: students see published only).
 - `skill`: Filter by skill (listening, reading)
 - `published`: true/false (admin / teacher only)
 
-**Response (200):** uses the list envelope from §10.10 (`items`).
+**Response (200):** uses the list envelope from §10.10 (`items`). Rows contain
+only top-level exam fields (no nested sections/questions — use the section
+endpoints or `GET /api/exams/{id}?include=sections`).
 
 #### GET /api/exams/{exam_id}
 Get a single exam by id. Non-privileged users (student / parent) only see published exams; any attempt to read an unpublished exam returns 404.
 
+**Query Params:**
+- `include`: comma-separated; pass `sections` to nest the full
+  `sections[] → questions[]` tree under `data.exam.sections`. Used by the
+  student-facing exam viewer.
+
 #### POST /api/exams (admin only)
-Create new exam. Returns 201 with the created exam wrapped under `data.exam`.
+Create new exam. Body fields: `title`, `level`, `skill`, `duration_minutes`,
+`description`. Sections are added via §4.5. Returns 201 with the created
+exam wrapped under `data.exam`.
 
 #### PUT /api/exams/{exam_id} (admin only)
 Update exam. Partial — pass only the fields you want to change.
 
 #### POST /api/exams/{exam_id}/publish (admin only)
-Publish exam (requires at least 1 active question; otherwise 400).
+Publish exam. Requires at least one section that contains at least one active question; otherwise 400.
 
 #### POST /api/exams/{exam_id}/unpublish (admin only)
 Unpublish exam. Hides it from students without deleting.
@@ -656,18 +750,72 @@ Unpublish exam. Hides it from students without deleting.
 Soft-delete an exam: sets `deleted_at`, also forces `is_published=false`. Data preserved.
 
 #### DELETE /api/exams/{exam_id}/hard (admin only)
-Hard-delete an exam. Runs a real `DELETE` row — `CASCADE`s through questions, attempts, and answers. Use only for broken/erroneous content.
+Hard-delete an exam. Runs a real `DELETE` row — `CASCADE`s through sections, questions, attempts, and answers. Use only for broken/erroneous content.
 
-### 4.5 Question Endpoints
+### 4.5 Section Endpoints
 
-#### GET /api/exams/{exam_id}/questions
-List questions for an exam, ordered by `position`. Non-privileged users only see questions of published exams. Response uses the list envelope from §10.10 (`items`).
+Sections are the middle layer of the **Exam → Section → Question** hierarchy
+and model KET/PET-style "Part 1 / Part 2 / …" structure. Each section owns
+its own passage(s), optional listening audio with a per-section replay cap,
+and an instruction rubric.
 
-#### POST /api/exams/{exam_id}/questions (admin only)
-Add a question. `question_data` is validated server-side per `question_type` (multiple_choice / fill_blank / matching). If `position` is omitted, the server assigns `MAX(position)+1` within the exam.
+#### GET /api/exams/{exam_id}/sections
+List sections of an exam, ordered by `position`. Non-privileged users only see sections of published exams. Response uses the list envelope from §10.10 (`items`).
+
+#### POST /api/exams/{exam_id}/sections (admin only)
+Create a new section under an exam. If `position` is omitted, the server assigns `MAX(position)+1`.
+
+**Request:**
+```json
+{
+  "partLabel": "Part 5",
+  "instructions": "For each question, write the correct answer. Write ONE word for each gap.",
+  "materials": [
+    {
+      "type": "text",
+      "label": "From: Bea  |  To: Tania",
+      "content": "How are things? Are you busy {{gap:1}} the moment? {{gap:2}} you remember..."
+    },
+    {
+      "type": "text",
+      "label": "From: Tania  |  To: Bea",
+      "content": "That sounds great! {{gap:5}} would you like to go?..."
+    }
+  ],
+  "audioUrl": null,
+  "maxAudioPlays": null,
+  "position": 5
+}
+```
+
+**Response (201):** `{ "status": 201, "data": { "section": { ... } } }`.
+
+#### GET /api/sections/{section_id}
+Get a single section. Non-privileged users only see sections of published exams.
+
+**Query Params:**
+- `include`: pass `questions` to embed `questions[]` in the response.
+
+#### PUT /api/sections/{section_id} (admin only)
+Update a section. Partial — pass only the fields you want to change.
+
+#### DELETE /api/sections/{section_id} (admin only)
+Soft-delete a section (sets `deleted_at`). Questions remain in the DB but
+become unreachable through the published exam tree.
+
+#### DELETE /api/sections/{section_id}/hard (admin only)
+Hard-delete a section. `CASCADE`s through questions, answers, and per-section attempt state.
+
+### 4.6 Question Endpoints
+
+#### GET /api/sections/{section_id}/questions
+List questions of a section, ordered by `position`. Non-privileged users only see questions of sections in published exams. Response uses the list envelope from §10.10 (`items`).
+
+#### POST /api/sections/{section_id}/questions (admin only)
+Add a question to a section. `question_data` is validated server-side per `question_type` (multiple_choice / fill_blank / matching). If `position` is omitted, the server assigns `MAX(position)+1` within the section. The chosen `position` is the `N` referenced by `{{gap:N}}` markers inside the section's `materials`.
 
 #### GET /api/questions/{question_id}
-Get a single question by id. Non-privileged users only see questions of published exams.
+Get a single question by id. Non-privileged users only see questions belonging to a published exam.
 
 #### PUT /api/questions/{question_id} (admin only)
 Update a question. Changing `question_type` requires also supplying a matching `question_data`.
@@ -678,10 +826,10 @@ Soft-delete a question (sets `deleted_at`).
 #### DELETE /api/questions/{question_id}/hard (admin only)
 Hard-delete a question. `CASCADE`s through answers.
 
-#### POST /api/exams/{exam_id}/questions/import (admin only)
+#### POST /api/sections/{section_id}/questions/import (admin only)
 Import questions from Excel. ⏳ **Deferred to B3.4b** — column format pending client confirmation.
 
-### 4.6 Attempt Endpoints
+### 4.7 Attempt Endpoints
 
 #### POST /api/attempts
 Start new exam attempt.
@@ -693,21 +841,78 @@ Start new exam attempt.
 }
 ```
 
-**Response (200):**
+**Response (201):** returns the full exam tree (`sections[] → questions[]`)
+with correct-answer fields stripped from each `question_data`.
 ```json
 {
-  "status": 200,
+  "status": 201,
   "data": {
     "attemptId": "uuid",
-    "exam": { ... },
-    "questions": [ ... ],
+    "exam": {
+      "id": "uuid",
+      "title": "KET Reading 01",
+      "level": "KET",
+      "skill": "reading",
+      "durationMinutes": 60,
+      "description": "...",
+      "sections": [
+        {
+          "id": "uuid",
+          "position": 1,
+          "partLabel": "Part 1",
+          "instructions": "For each question, choose the correct answer.",
+          "materials": [],
+          "audioUrl": null,
+          "maxAudioPlays": null,
+          "questions": [
+            {
+              "id": "uuid",
+              "position": 1,
+              "questionType": "multiple_choice",
+              "questionData": {
+                "stem": "Chloe wants Susie...",
+                "options": [
+                  {"text": "to clean her room."},
+                  {"text": "to stop working at home."},
+                  {"text": "to tidy up the living room."}
+                ]
+              },
+              "points": 1
+            }
+          ]
+        }
+      ]
+    },
     "startedAt": "2026-05-12T10:00:00Z"
   }
 }
 ```
 
+#### POST /api/attempts/{attempt_id}/sections/{section_id}/audio-play
+Increment the per-section audio play counter on an in-progress attempt. Only
+valid when the section has an `audio_url` and before the attempt is
+submitted. Rejects once `audio_play_count >= sections.max_audio_plays`. The
+`attempt_section_state` row is created lazily on the first call.
+
+**Headers:** `Authorization: Bearer <token>` (owner only)
+
+**Response (200):**
+```json
+{
+  "status": 200,
+  "data": {
+    "audioPlayCount": 2,
+    "maxAudioPlays": 3,
+    "remainingPlays": 1
+  }
+}
+```
+
+**Error Response (403):** `"Not the owner of this attempt"` or `"Audio play limit reached (N)"`.
+**Error Response (400):** `"Attempt already submitted"` or `"Section has no audio"`.
+
 #### POST /api/attempts/{attempt_id}/submit
-Submit answers and get score.
+Submit answers and finalize the attempt. Owner only. Grading runs across **all sections** of the exam in one pass.
 
 **Request:**
 ```json
@@ -734,33 +939,13 @@ Submit answers and get score.
 }
 ```
 
-#### POST /api/attempts/{attempt_id}/audio-play
-Increment the listening-audio play counter on an in-progress attempt. Only valid for listening exams and before submit. Rejects once `audio_play_count >= exams.max_audio_plays`.
-
-**Headers:** `Authorization: Bearer <token>` (owner only)
-
-**Response (200):**
-```json
-{
-  "status": 200,
-  "data": {
-    "audioPlayCount": 2,
-    "maxAudioPlays": 3,
-    "remainingPlays": 1
-  }
-}
-```
-
-**Error Response (403):** `"Not the owner of this attempt"` or `"Audio play limit reached (N)"`.
-**Error Response (400):** `"Attempt already submitted"` or `"Audio playback only applies to listening exams"`.
-
 #### GET /api/attempts/{attempt_id}
-Get attempt details with per-question breakdown. Visible to owner, admin/teacher, or the parent linked to the owner. While the attempt is still in progress (no `submitted_at`), correct-answer fields inside `question_data` are stripped.
+Get attempt details with per-question breakdown (grouped by section). Visible to owner, admin/teacher, or the parent linked to the owner. While the attempt is still in progress (no `submitted_at`), correct-answer fields inside `question_data` are stripped.
 
 #### GET /api/attempts/history
 Get the current user's attempt history (most recent first, capped at 100). Response uses the list envelope from §10.10 (`items`).
 
-### 4.7 Subscription Endpoints
+### 4.8 Subscription Endpoints
 
 #### GET /api/subscriptions/me
 Get current user's subscription.
@@ -771,7 +956,7 @@ Get available plans and features.
 #### PUT /api/admin/subscriptions/{user_id} (admin only)
 Update user subscription tier.
 
-### 4.8 Parent Endpoints
+### 4.9 Parent Endpoints
 
 All endpoints under `/api/parents/me/...` require `role=parent` and only operate on students linked to the authenticated parent via `profiles.parent_id`. Accessing another parent's children returns 403.
 
@@ -1115,13 +1300,17 @@ maichienglish-be/
 │   │   ├── __init__.py
 │   │   ├── routes.py
 │   │   └── schemas.py
+│   ├── sections/                   # Middle layer of Exam → Section → Question
+│   │   ├── __init__.py
+│   │   ├── routes.py               # /api/exams/{eid}/sections + /api/sections/{sid}[/hard]
+│   │   └── schemas.py
 │   ├── questions/
 │   │   ├── __init__.py
-│   │   ├── routes.py
+│   │   ├── routes.py               # /api/sections/{sid}/questions + /api/questions/{qid}[/hard]
 │   │   └── schemas.py
 │   ├── attempts/
 │   │   ├── __init__.py
-│   │   ├── routes.py
+│   │   ├── routes.py               # nested exam→sections→questions on start; per-section audio-play
 │   │   └── schemas.py
 │   └── subscriptions/
 │       ├── __init__.py
@@ -1133,19 +1322,23 @@ maichienglish-be/
 │   ├── exceptions.py               # ServiceError base + typed subclasses
 │   ├── auth_service.py             # Password reset code lifecycle (B3.6)
 │   ├── user_service.py             # User CRUD + authenticate
-│   ├── exam_service.py             # Exam CRUD
-│   ├── question_service.py
-│   ├── attempt_service.py          # Attempts + grading
+│   ├── exam_service.py             # Exam CRUD (no passage/audio fields — those live on sections)
+│   ├── section_service.py          # Section CRUD; owns materials JSONB + audio_url + max_audio_plays
+│   ├── question_service.py         # Scoped to section_id; per-section position
+│   ├── attempt_service.py          # Attempts + grading + per-section audio counter via attempt_section_state
 │   ├── subscription_service.py
 │   └── subscription_plans.py       # Static plan catalog (Free / Basic / Pro / Ultra)
 │
 ├── models/                          # SQLAlchemy models (optional — only if ORM is adopted)
 │   ├── __init__.py
 │   ├── user.py
+│   ├── subscription.py
 │   ├── exam.py
+│   ├── section.py
 │   ├── question.py
 │   ├── attempt.py
-│   └── subscription.py
+│   ├── attempt_section_state.py
+│   └── answer.py
 │
 ├── utils/
 │   ├── __init__.py
