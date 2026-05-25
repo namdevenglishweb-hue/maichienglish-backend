@@ -2,6 +2,9 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from api.common import MAX_BATCH_SIZE
+from api.questions.schemas import QuestionCreate
+
 SectionTypeLiteral = Literal["multiple_choice", "fill_blank", "matching"]
 
 
@@ -59,6 +62,18 @@ class SectionCreate(BaseModel):
         default=None,
         ge=1,
         description="Order within the exam. If omitted, server appends to the end.",
+    )
+    questions: Optional[list[QuestionCreate]] = Field(
+        default=None,
+        max_length=MAX_BATCH_SIZE,
+        description=(
+            "Optional inline questions. When provided, the section and all "
+            "child questions are created in one transaction. Question "
+            "positions are server-assigned 1..N in array order (the `position` "
+            "field on each item is ignored in this nested context). Gap "
+            "markers in `materials` are validated against the resulting "
+            "question positions — broken markers reject the whole batch."
+        ),
     )
 
     model_config = {
@@ -138,6 +153,12 @@ class SectionView(BaseModel):
 
 class SectionResponseData(BaseModel):
     section: SectionView
+    createdCounts: Optional[dict[str, int]] = Field(
+        default=None,
+        description=(
+            "Populated only by nested POST that creates child questions inline."
+        ),
+    )
 
 
 class SectionResponse(BaseModel):
@@ -156,5 +177,41 @@ class SectionListResponseData(BaseModel):
 class SectionListResponse(BaseModel):
     """Wrapped response for GET /api/exams/{exam_id}/sections."""
 
+    status: int = 200
+    data: SectionListResponseData
+
+
+# ---------------------------------------------------------------------------
+# Batch operations (capped at MAX_BATCH_SIZE items per request)
+# ---------------------------------------------------------------------------
+
+
+class SectionBatchUpdateItem(SectionUpdate):
+    """One section patch in a batch update. `id` identifies the target row;
+    all other fields follow `SectionUpdate` semantics."""
+
+    id: str = Field(..., description="UUID of the section to update")
+
+
+class SectionBatchUpdateRequest(BaseModel):
+    """Body for PUT /api/sections/batch."""
+
+    updates: list[SectionBatchUpdateItem] = Field(
+        ..., min_length=1, max_length=MAX_BATCH_SIZE,
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "updates": [
+                    {"id": "uuid-1", "instructions": "Updated rubric"},
+                    {"id": "uuid-2", "partLabel": "Part 2", "position": 2},
+                ]
+            }
+        }
+    }
+
+
+class SectionBatchUpdateResponse(BaseModel):
     status: int = 200
     data: SectionListResponseData

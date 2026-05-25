@@ -6,7 +6,11 @@ from services.exceptions import NotFoundError, ValidationError
 from services.question_service import question_service
 from services.section_service import section_service
 
+from api.common import BatchDeleteRequest
+
 from .schemas import (
+    QuestionBatchUpdateRequest,
+    QuestionBatchUpdateResponse,
     QuestionCreate,
     QuestionListResponse,
     QuestionListResponseData,
@@ -89,6 +93,62 @@ async def create_question(section_id: str, request: QuestionCreate):
     return QuestionResponse(
         status=201, data=QuestionResponseData(question=_to_view(question))
     )
+
+
+# ---------------------------------------------------------------------------
+# Batch endpoints — MUST be registered before the `/{question_id}` routes
+# below, otherwise FastAPI matches `/batch` as question_id="batch".
+# ---------------------------------------------------------------------------
+
+
+@question_router.put(
+    "/batch",
+    response_model=QuestionBatchUpdateResponse,
+    dependencies=[Depends(require_admin)],
+)
+async def batch_update_questions(request: QuestionBatchUpdateRequest):
+    """Update up to 100 questions in one transaction (admin only).
+
+    Each item must include `id`. Changing `question_type` requires also
+    supplying matching `question_data` in the same item. Any invalid item
+    or missing id rolls back the whole batch.
+    """
+    from services.question_service import question_service as qs
+
+    updates = [item.model_dump(exclude_unset=True) for item in request.updates]
+    try:
+        rows = await qs.bulk_update_questions(updates)
+    except NotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValidationError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    return QuestionBatchUpdateResponse(
+        data=QuestionListResponseData(items=[_to_view(q) for q in rows]),
+    )
+
+
+@question_router.post(
+    "/batch-delete",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(require_admin)],
+)
+async def batch_delete_questions(
+    request: BatchDeleteRequest,
+    hard: bool = False,
+):
+    """Delete up to 100 questions in one transaction (admin only).
+
+    Soft delete by default. Pass `?hard=true` for hard delete (CASCADEs
+    through answers). Any missing id rolls back the whole batch.
+    """
+    try:
+        await question_service.bulk_delete_questions(request.ids, hard=hard)
+    except NotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValidationError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return None
 
 
 @question_router.get("/{question_id}", response_model=QuestionResponse)

@@ -41,6 +41,7 @@ config/
 ```
 api/
 ├── __init__.py                      # ✅ Empty package marker (main.py imports each subpackage's router directly, no aggregator)
+├── common.py                        # ✅ Cross-domain shared request schemas: BatchDeleteRequest + MAX_BATCH_SIZE (=100). Kept outside per-domain packages to avoid circular imports (sections + questions both need it).
 │
 ├── auth/
 │   ├── __init__.py                  # ✅ Re-exports `router`
@@ -59,18 +60,18 @@ api/
 │
 ├── exams/
 │   ├── __init__.py                  # ✅ Re-exports `router`
-│   ├── routes.py                    # ✅ GET / (filter level/skill/published), GET /{id} (?include=sections nests section tree), POST /, PUT /{id}, POST /{id}/publish (needs ≥1 section w/ ≥1 active question), POST /{id}/unpublish, DELETE /{id} (soft), DELETE /{id}/hard. Students forced to is_published=true.
-│   └── schemas.py                   # ✅ ExamCreate, ExamUpdate, ExamView (optional `sections` populated by ?include=sections), ExamSectionPreview, ExamQuestionPreview, ExamResponse, ExamListResponse
+│   ├── routes.py                    # ✅ GET / (filter level/skill/published), GET /{id} (?include=sections nests section tree), POST / (nested mode: optional sections[] + questions[] in 1 txn with gap-marker validation), PUT /{id}, POST /{id}/publish (needs ≥1 section w/ ≥1 active question), POST /{id}/unpublish, DELETE /{id} (soft), DELETE /{id}/hard. Students forced to is_published=true.
+│   └── schemas.py                   # ✅ ExamCreate (optional nested `sections[]`), ExamUpdate, ExamView (optional `sections` populated by ?include=sections), ExamSectionPreview (carries `type`), ExamQuestionPreview, ExamResponseData (carries optional `createdCounts`), ExamResponse, ExamListResponse
 │
 ├── sections/                        # ✅ Middle layer of Exam → Section → Question
 │   ├── __init__.py                  # ✅ Re-exports both routers
-│   ├── routes.py                    # ✅ exam_scoped_router: GET/POST /api/exams/{eid}/sections  |  section_router: GET/PUT/DELETE /api/sections/{sid}, DELETE /api/sections/{sid}/hard (?include=questions nests questions on GET)
-│   └── schemas.py                   # ✅ SectionCreate, SectionUpdate, SectionMaterial (only `text` variant today — audio lives on the `audio_url` column, not in materials), SectionView (optional `questions` populated by ?include=questions), SectionQuestionPreview + wrappers
+│   ├── routes.py                    # ✅ exam_scoped_router: GET/POST /api/exams/{eid}/sections (POST nested: optional questions[] in 1 txn)  |  section_router: PUT /api/sections/batch + POST /api/sections/batch-delete[?hard=true] (registered FIRST), then GET/PUT/DELETE /api/sections/{sid}, DELETE /api/sections/{sid}/hard (?include=questions on GET)
+│   └── schemas.py                   # ✅ SectionCreate (optional nested `questions[]`, `type` field), SectionUpdate, SectionMaterial (only `text` variant today — audio lives on `audio_url` column), SectionView (carries `type`; optional `questions` populated by ?include=questions), SectionQuestionPreview, SectionResponseData (optional `createdCounts`), SectionBatchUpdateItem/Request/Response + wrappers
 │
 ├── questions/
 │   ├── __init__.py                  # ✅ Re-exports both routers
-│   ├── routes.py                    # ✅ section_scoped_router: GET/POST /api/sections/{sid}/questions  |  question_router: GET/PUT/DELETE /api/questions/{id}, DELETE /api/questions/{id}/hard. Excel import deferred to B3.4b.
-│   └── schemas.py                   # ✅ QuestionCreate (server-side per-type validation; MC options accept text|image_url), QuestionUpdate, QuestionView + wrappers
+│   ├── routes.py                    # ✅ section_scoped_router: GET/POST /api/sections/{sid}/questions  |  question_router: PUT /api/questions/batch + POST /api/questions/batch-delete[?hard=true] (registered FIRST), then GET/PUT/DELETE /api/questions/{id}, DELETE /api/questions/{id}/hard. Excel import deferred to B3.4b.
+│   └── schemas.py                   # ✅ QuestionCreate (server-side per-type validation; MC + matching share {stem, options, correct_index} shape; MC options accept text|image_url), QuestionUpdate, QuestionView, QuestionBatchUpdateItem/Request/Response + wrappers
 │
 ├── attempts/
 │   ├── __init__.py                  # ✅ Re-exports `router`
@@ -96,9 +97,9 @@ services/
 ├── exceptions.py                    # ✅ ServiceError base + NotFoundError, AlreadyExistsError, ValidationError, PermissionDeniedError, InvalidCredentialsError, InsufficientCreditsError
 ├── auth_service.py                  # ✅ Password reset code lifecycle: request_password_reset_code (anti-enumeration silent 200 + invalidate previous codes), reset_password (bcrypt-compare candidates, mark used, replace password_hash in one tx). Login/token logic stays in api/auth/routes.py + utils/jwt_utils.py.
 ├── user_service.py                  # ✅ create_user (profile + subscription tx, accepts parent_id), authenticate, get_by_email/id, list_users (filter+paginate), update_profile (self-edit fullName/phone), delete_user, admin_reset_password, link_parent, list_children_of_parent, is_child_of
-├── exam_service.py                  # ✅ Exam CRUD (no passage/audio fields), publish (checks ≥1 section w/ ≥1 active question) / unpublish, soft delete, hard delete (CASCADE through sections)
-├── section_service.py               # ✅ Section CRUD: create_section, list_sections_by_exam, get_section, update_section, soft_delete_section, hard_delete_section. Owns materials JSONB + audio_url + max_audio_plays; per-exam position auto-assigned; soft/hard delete. ?include=sections in exam routes composes list_sections_by_exam + question_service.list_questions_by_section.
-├── question_service.py              # ✅ Question CRUD scoped to section_id (per-section position); per-type validation (multiple_choice w/ text|image_url options, fill_blank, matching); soft/hard delete. Excel import lands in B3.4b.
+├── exam_service.py                  # ✅ Exam CRUD (no passage/audio fields), publish (checks ≥1 section w/ ≥1 active question) / unpublish, soft delete, hard delete (CASCADE through sections). `create_exam_nested` builds whole exam+sections+questions tree in 1 transaction with gap-marker validation.
+├── section_service.py               # ✅ Section CRUD (now also carries `type` rendering hint + bulk methods). create_section, create_section_with_questions (nested inline questions in 1 txn), list_sections_by_exam, get_section, update_section, soft/hard delete, bulk_update_sections, bulk_delete_sections. Module-level `validate_gap_markers` reused by both section_service and exam_service.
+├── question_service.py              # ✅ Question CRUD scoped to section_id (per-section position); per-type validation (matching reuses MC validator). Single + bulk_update_questions + bulk_delete_questions. Excel import lands in B3.4b.
 ├── attempt_service.py               # ✅ Start (enforces tier limit; returns nested exam→sections→questions), submit + auto-grade across all sections, history queries, record_audio_play (per-section: upserts attempt_section_state, enforces sections.max_audio_plays). Custom AttemptLimitExceededError + AudioPlayLimitExceededError extend PermissionDeniedError.
 ├── subscription_service.py          # ✅ get_by_user_id, update_tier (validates tier + logs), list_plans serializer. Attempt-limit enforcement lives in attempt_service; period-reset is not yet implemented (period boundary still equals subscriptions.current_period_start from creation).
 └── subscription_plans.py            # ✅ PlanTier enum, SubscriptionPlan + PlanFeature dataclasses, SUBSCRIPTION_PLANS dict (Free / Basic / Pro / Ultra)
@@ -147,7 +148,8 @@ dependencies.py                      # ✅ get_current_user (Bearer JWT validato
 migrations/
 ├── 0002_add_parent_role.sql         # ✅ Add `parent` to role CHECK + `profiles.parent_id` self-FK. Idempotent.
 ├── 0003_add_password_reset_codes.sql # ✅ Create `password_reset_codes` table (bcrypt-hashed 6-digit codes, 10-min TTL). Idempotent.
-└── 0004_exam_sections.sql           # ✅ Introduce sections layer + attempt_section_state. Drops exams.audio_url/passage/max_audio_plays + questions.exam_id + attempts.audio_play_count. Breaking change — dev DB only; run init_schema.py --drop -y for fresh setup.
+├── 0004_exam_sections.sql           # ✅ Introduce sections layer + attempt_section_state. Drops exams.audio_url/passage/max_audio_plays + questions.exam_id + attempts.audio_play_count. Breaking change — dev DB only; run init_schema.py --drop -y for fresh setup.
+└── 0005_section_type.sql            # ✅ Add `sections.type` (rendering hint: multiple_choice/fill_blank/matching, nullable). No data migration needed for matching shape change (prior shape never shipped). Idempotent.
 ```
 
 ```

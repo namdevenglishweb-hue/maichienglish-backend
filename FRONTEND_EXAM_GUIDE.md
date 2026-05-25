@@ -199,54 +199,141 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 ## 5. Admin flow — build an exam
 
-Sections must be created **after** the exam exists. Questions must be created under a section. Publishing requires at least one section with at least one active question.
+Two ergonomic paths. **Use nested create when you have the whole exam ready (Excel import, JSON template, fixture seed)** — one HTTP call instead of 60+. **Use granular CRUD when editing an existing exam** (drag-and-drop reorder, fix a single question, etc.).
+
+### 5.1 Nested create — whole exam in one call
 
 ```ts
-// 1. Create the exam shell
-const exam = await api<{exam: Exam}>('/api/exams', {
-  method: 'POST',
-  body: JSON.stringify({
-    title: 'KET Reading Practice 01',
-    level: 'KET',
-    skill: 'reading',
-    duration_minutes: 60,
-    description: 'Reading + writing paper, 5 parts.',
-  }),
-});
-
-// 2. Add a section
-const section = await api<{section: Section}>(`/api/exams/${exam.exam.id}/sections`, {
-  method: 'POST',
-  body: JSON.stringify({
-    partLabel: 'Part 1',
-    instructions: 'For each question, choose the correct answer.',
-    materials: [],          // empty for standalone-text sections
-    // audioUrl: 'https://...mp3',  // listening only
-    // maxAudioPlays: 3,
-  }),
-});
-
-// 3. Add questions to the section (position auto-assigned if omitted)
-await api(`/api/sections/${section.section.id}/questions`, {
-  method: 'POST',
-  body: JSON.stringify({
-    question_type: 'multiple_choice',
-    question_data: {
-      stem: 'Chloe wants Susie...',
-      options: [
-        {text: 'to clean her room.'},
-        {text: 'to stop working at home.'},
-        {text: 'to tidy up the living room.'},
+const result = await api<{exam: Exam; createdCounts: {sections: number; questions: number}}>(
+  '/api/exams',
+  {
+    method: 'POST',
+    body: JSON.stringify({
+      title: 'KET Reading 01',
+      level: 'KET',
+      skill: 'reading',
+      duration_minutes: 60,
+      sections: [
+        {
+          partLabel: 'Part 1',
+          type: 'multiple_choice',
+          instructions: 'For each question, choose the correct answer.',
+          materials: [],
+          questions: [
+            {
+              question_type: 'multiple_choice',
+              question_data: {
+                stem: 'Chloe wants Susie...',
+                options: [
+                  {text: 'to clean her room.'},
+                  {text: 'to stop working at home.'},
+                  {text: 'to tidy up the living room.'},
+                ],
+                correct_index: 2,
+              },
+              points: 1,
+            },
+            // ... up to 100 questions per section
+          ],
+        },
+        {
+          partLabel: 'Part 5',
+          type: 'fill_blank',
+          instructions: 'Write ONE word for each gap.',
+          materials: [
+            {type: 'text', content: 'I {{gap:1}} home {{gap:2}} 5pm.'},
+          ],
+          questions: [
+            {question_type: 'fill_blank', question_data: {correct_answers: ['leave']}},
+            {question_type: 'fill_blank', question_data: {correct_answers: ['at']}},
+          ],
+        },
+        // ... up to 100 sections
       ],
-      correct_index: 2,
-    },
-    points: 1,
+    }),
+  },
+);
+
+// result.exam.id is the new exam UUID
+// result.createdCounts = {sections: 2, questions: <total>}
+// Fetch full tree with IDs:
+const tree = await api<{exam: Exam}>(`/api/exams/${result.exam.id}?include=sections`);
+
+// Publish when ready
+await api(`/api/exams/${result.exam.id}/publish`, {method: 'POST'});
+```
+
+**Validation runs server-side before any INSERT**:
+- Each question's `question_data` is validated per `question_type`.
+- For each section, `{{gap:N}}` markers in `materials` must resolve to a question at position N (1-based, in array order). Broken markers reject the **whole batch** with 400 and tell you which marker is broken.
+- Sections + questions are server-assigned `position = 1..N` in array order. Any admin-supplied `position` in nested mode is ignored — reorder the array to control ordering.
+- Limits: 100 sections per exam, 100 questions per section.
+
+You can also nest **just questions** into a single section call:
+
+```ts
+// Adding a whole new Part to an existing exam:
+const result = await api<{section: Section; createdCounts: {questions: number}}>(
+  `/api/exams/${examId}/sections`,
+  {
+    method: 'POST',
+    body: JSON.stringify({
+      partLabel: 'Part 2',
+      type: 'matching',
+      audioUrl: 'https://...mp3',
+      maxAudioPlays: 3,
+      questions: [/* up to 100 matching questions */],
+    }),
+  },
+);
+```
+
+### 5.2 Granular CRUD — single-record edits
+
+Use these when the user is editing in the admin UI (single question form, single section rename, etc.):
+
+```ts
+// Patch a single question
+await api(`/api/questions/${qid}`, {
+  method: 'PUT',
+  body: JSON.stringify({points: 2}),
+});
+
+// Soft-delete a single section
+await api(`/api/sections/${sid}`, {method: 'DELETE'});
+```
+
+### 5.3 Batch update / delete
+
+For admin tools that mutate many rows (e.g. "renumber all sections", "delete 10 selected questions"), use the batch endpoints. Up to **100 items** per call, **all-or-nothing transaction** — one bad id rolls back the whole batch.
+
+```ts
+// Batch update questions
+await api<{items: Question[]}>('/api/questions/batch', {
+  method: 'PUT',
+  body: JSON.stringify({
+    updates: [
+      {id: 'uuid-1', points: 2},
+      {id: 'uuid-2', question_type: 'fill_blank',
+       question_data: {correct_answers: ['nine'], case_sensitive: false}},
+    ],
   }),
 });
 
-// 4. Publish (gated: must have ≥1 section with ≥1 active question)
-await api(`/api/exams/${exam.exam.id}/publish`, {method: 'POST'});
+// Batch soft-delete sections
+await api('/api/sections/batch-delete', {
+  method: 'POST',
+  body: JSON.stringify({ids: ['uuid-1', 'uuid-2']}),
+});
+
+// Batch hard-delete (CASCADEs)
+await api('/api/sections/batch-delete?hard=true', {
+  method: 'POST',
+  body: JSON.stringify({ids: ['uuid-1', 'uuid-2']}),
+});
 ```
+
+Same shape for `/api/questions/batch-delete`.
 
 **Endpoint summary (admin)**
 
@@ -254,24 +341,28 @@ await api(`/api/exams/${exam.exam.id}/publish`, {method: 'POST'});
 |---|---|---|
 | `GET`    | `/api/exams?published=&level=&skill=` | List exams (admin can include unpublished) |
 | `GET`    | `/api/exams/{id}?include=sections` | Get exam, optionally with full section tree |
-| `POST`   | `/api/exams` | Create exam |
+| `POST`   | `/api/exams` | Create exam (optionally with nested sections+questions) |
 | `PUT`    | `/api/exams/{id}` | Patch exam fields |
 | `POST`   | `/api/exams/{id}/publish` | Publish (gated) |
 | `POST`   | `/api/exams/{id}/unpublish` | Unpublish |
 | `DELETE` | `/api/exams/{id}` | Soft-delete |
 | `DELETE` | `/api/exams/{id}/hard` | Hard-delete (CASCADE) |
 | `GET`    | `/api/exams/{eid}/sections` | List sections of an exam |
-| `POST`   | `/api/exams/{eid}/sections` | Create section |
+| `POST`   | `/api/exams/{eid}/sections` | Create section (optionally with nested questions) |
 | `GET`    | `/api/sections/{sid}?include=questions` | Get section, optionally with questions |
 | `PUT`    | `/api/sections/{sid}` | Patch section |
 | `DELETE` | `/api/sections/{sid}` | Soft-delete section |
 | `DELETE` | `/api/sections/{sid}/hard` | Hard-delete section (CASCADE) |
+| `PUT`    | `/api/sections/batch` | Batch update up to 100 sections (one txn) |
+| `POST`   | `/api/sections/batch-delete[?hard=true]` | Batch delete up to 100 sections |
 | `GET`    | `/api/sections/{sid}/questions` | List questions of a section |
 | `POST`   | `/api/sections/{sid}/questions` | Create question |
 | `GET`    | `/api/questions/{qid}` | Get a single question |
 | `PUT`    | `/api/questions/{qid}` | Patch question |
 | `DELETE` | `/api/questions/{qid}` | Soft-delete question |
 | `DELETE` | `/api/questions/{qid}/hard` | Hard-delete question (CASCADE) |
+| `PUT`    | `/api/questions/batch` | Batch update up to 100 questions (one txn) |
+| `POST`   | `/api/questions/batch-delete[?hard=true]` | Batch delete up to 100 questions |
 
 > **Note on field naming**: request bodies for `POST/PUT /api/exams` and `POST /api/sections/{sid}/questions` currently use **snake_case** (`question_type`, `question_data`, `duration_minutes`), while bodies for `POST/PUT /api/sections` and all response payloads use **camelCase**. This will be normalized — for now, follow the examples in this doc.
 

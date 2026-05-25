@@ -174,6 +174,8 @@ maichienglish-be/
 - [x] CRUD for exams
 - [x] **3-layer hierarchy**: Exam → Section → Question (matches KET/PET "Part 1/2/..." layout)
 - [x] CRUD for sections (passage / audio / instructions live here, not on exam)
+- [x] **Nested create**: `POST /api/exams` and `POST /api/exams/{eid}/sections` accept optional nested children (`sections[]` / `questions[]`) — whole tree created in one transaction with server-assigned positions + gap-marker validation. Avoids the 60+ roundtrips needed to seed a full KET paper one-record-at-a-time.
+- [x] **Batch update + delete**: `PUT /api/sections/batch`, `PUT /api/questions/batch`, `POST /api/{sections,questions}/batch-delete?hard=...` — up to 100 items per call, all-or-nothing transaction.
 - [x] Publish/unpublish toggle
 - [x] Question CRUD (3 types: multiple_choice, fill_blank, matching)
   - multiple_choice options accept text and/or image_url (for picture MC)
@@ -752,9 +754,23 @@ Get a single exam by id. Non-privileged users (student / parent) only see publis
   student-facing exam viewer.
 
 #### POST /api/exams (admin only)
-Create new exam. Body fields: `title`, `level`, `skill`, `duration_minutes`,
-`description`. Sections are added via §4.5. Returns 201 with the created
-exam wrapped under `data.exam`.
+Create new exam. Two modes:
+
+- **Plain**: body has top-level fields only (`title`, `level`, `skill`,
+  `duration_minutes`, `description`). Returns the exam shell; add sections
+  via §4.5.
+- **Nested**: body additionally supplies `sections[]` (each may carry
+  `questions[]`). Whole tree is created in one transaction. Server assigns
+  `position = 1..N` in array order at both levels (admin-supplied positions
+  ignored in this mode). Gap markers `{{gap:N}}` inside each section's
+  `materials` are validated against that section's resulting question
+  positions — any broken marker rejects the whole batch (400). Max 100
+  sections and 100 questions per section.
+
+**Nested response** (`201`): standard `{ status, data: { exam: {...} } }`
+plus a sibling `data.createdCounts: { sections: N, questions: M }` so the
+FE can confirm what was persisted. Section/question IDs are not returned
+inline — call `GET /api/exams/{id}?include=sections` to fetch them.
 
 #### PUT /api/exams/{exam_id} (admin only)
 Update exam. Partial — pass only the fields you want to change.
@@ -782,7 +798,16 @@ and an instruction rubric.
 List sections of an exam, ordered by `position`. Non-privileged users only see sections of published exams. Response uses the list envelope from §10.10 (`items`).
 
 #### POST /api/exams/{exam_id}/sections (admin only)
-Create a new section under an exam. If `position` is omitted, the server assigns `MAX(position)+1`. `type` is an optional rendering hint (see §3.5) — set it when the section is homogeneous (e.g. "all matching" for a Listening Part 5).
+Create a new section under an exam. If `position` is omitted, the server
+assigns `MAX(position)+1`. `type` is an optional rendering hint (see §3.5)
+— set it when the section is homogeneous (e.g. "all matching" for a
+Listening Part 5).
+
+**Nested mode**: body may include `questions[]` (up to 100). When supplied,
+the section and all child questions are created in one transaction with
+server-assigned question positions 1..N (in array order). Gap markers in
+`materials` are validated against the resulting question positions.
+Response carries `data.createdCounts: { questions: N }`.
 
 **Request:**
 ```json
@@ -844,6 +869,26 @@ become unreachable through the published exam tree.
 #### DELETE /api/sections/{section_id}/hard (admin only)
 Hard-delete a section. `CASCADE`s through questions, answers, and per-section attempt state.
 
+#### PUT /api/sections/batch (admin only)
+Update up to 100 sections in one transaction. Body:
+```json
+{
+  "updates": [
+    {"id": "uuid-1", "instructions": "new"},
+    {"id": "uuid-2", "partLabel": "Part 2", "position": 2}
+  ]
+}
+```
+Each item must include `id`; remaining fields follow `SectionUpdate`
+semantics. Any invalid item or missing id rolls back the whole batch
+(404). Returns `{ status: 200, data: { items: [SectionView, ...] } }`.
+
+#### POST /api/sections/batch-delete (admin only)
+Delete up to 100 sections in one transaction. Body: `{ "ids": ["uuid-1", ...] }`.
+Soft delete by default. Pass `?hard=true` for hard delete (CASCADEs
+through questions/answers/state). Any missing id rolls back the whole
+batch (404). Returns `204 No Content`.
+
 ### 4.6 Question Endpoints
 
 #### GET /api/sections/{section_id}/questions
@@ -866,6 +911,31 @@ Hard-delete a question. `CASCADE`s through answers.
 
 #### POST /api/sections/{section_id}/questions/import (admin only)
 Import questions from Excel. ⏳ **Deferred to B3.4b** — column format pending client confirmation.
+
+#### PUT /api/questions/batch (admin only)
+Update up to 100 questions in one transaction. Body:
+```json
+{
+  "updates": [
+    {"id": "uuid-1", "points": 2},
+    {
+      "id": "uuid-2",
+      "question_type": "fill_blank",
+      "question_data": {"correct_answers": ["nine"], "case_sensitive": false}
+    }
+  ]
+}
+```
+Each item must include `id`. Changing `question_type` still requires
+supplying matching `question_data` in the same item. Any invalid item or
+missing id rolls back the whole batch (404). Returns
+`{ status: 200, data: { items: [QuestionView, ...] } }`.
+
+#### POST /api/questions/batch-delete (admin only)
+Delete up to 100 questions in one transaction. Body: `{ "ids": ["uuid-1", ...] }`.
+Soft delete by default. Pass `?hard=true` for hard delete (CASCADEs
+through answers). Any missing id rolls back the whole batch (404).
+Returns `204 No Content`.
 
 ### 4.7 Attempt Endpoints
 

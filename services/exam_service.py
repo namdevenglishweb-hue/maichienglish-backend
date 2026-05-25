@@ -1,7 +1,14 @@
+import json
 import logging
 from typing import Any, Optional
 
 from services.exceptions import NotFoundError, ValidationError
+from services.question_service import _validate_question_data
+from services.section_service import (
+    _ALLOWED_TYPES as _ALLOWED_SECTION_TYPES,
+    _validate_materials,
+    validate_gap_markers,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -234,6 +241,166 @@ class ExamService:
             logger.warning("hard_delete_exam: exam %s not found", exam_id)
             raise NotFoundError(f"Exam {exam_id} not found")
         logger.info("Hard-deleted exam %s (CASCADE)", exam_id)
+
+    # ------------------------------------------------------------------
+    # Nested create — option D from the bulk-endpoint plan
+    # ------------------------------------------------------------------
+
+    async def create_exam_nested(
+        self,
+        title: str,
+        level: str,
+        skill: str,
+        duration_minutes: int = 45,
+        description: Optional[str] = None,
+        created_by: Optional[str] = None,
+        sections: Optional[list[dict[str, Any]]] = None,
+    ) -> dict[str, Any]:
+        """Create exam + optional sections + optional questions in 1 transaction.
+
+        Positions are server-assigned in array order (sections[0] → position 1,
+        questions[0] → position 1 within its section). Admin-provided position
+        fields are ignored — reorder the arrays to control ordering.
+
+        Validates per-section gap markers against question positions.
+
+        Args:
+            title/level/skill/duration_minutes/description/created_by:
+                same as create_exam.
+            sections: optional list of section payloads. Each payload may
+                contain a `questions` key with question payloads.
+
+        Returns:
+            Exam dict with `created_counts: {sections, questions}`.
+
+        Raises:
+            ValidationError: any section/question payload invalid, or any
+                gap marker references a missing question position.
+        """
+        sections = sections or []
+
+        # Validate everything BEFORE opening the transaction so we fail fast
+        # and don't leave half-written state under any race.
+        normalized_sections: list[dict[str, Any]] = []
+        for si, sec in enumerate(sections):
+            sec_type = sec.get("type")
+            if sec_type is not None and sec_type not in _ALLOWED_SECTION_TYPES:
+                raise ValidationError(
+                    f"sections[{si}]: invalid type {sec_type!r}"
+                )
+            materials = _validate_materials(sec.get("materials"))
+
+            questions = sec.get("questions") or []
+            normalized_qs: list[dict[str, Any]] = []
+            question_positions: set[int] = set()
+            for qi, q in enumerate(questions):
+                qtype = q.get("question_type")
+                qdata_raw = q.get("question_data")
+                if qtype is None or qdata_raw is None:
+                    raise ValidationError(
+                        f"sections[{si}].questions[{qi}]: question_type "
+                        f"and question_data are required"
+                    )
+                try:
+                    qdata = _validate_question_data(qtype, qdata_raw)
+                except ValidationError as e:
+                    raise ValidationError(
+                        f"sections[{si}].questions[{qi}]: {e}"
+                    )
+                pos = qi + 1
+                question_positions.add(pos)
+                normalized_qs.append(
+                    {
+                        "position": pos,
+                        "question_type": qtype,
+                        "question_data": qdata,
+                        "points": q.get("points", 1),
+                    }
+                )
+
+            # Gap-marker integrity: every {{gap:N}} must resolve to a question
+            validate_gap_markers(
+                materials,
+                question_positions,
+                section_label=f"sections[{si}]",
+            )
+
+            normalized_sections.append(
+                {
+                    "position": si + 1,
+                    "part_label": sec.get("part_label") or sec.get("partLabel"),
+                    "type": sec_type,
+                    "instructions": sec.get("instructions"),
+                    "materials": materials,
+                    "audio_url": sec.get("audio_url") or sec.get("audioUrl"),
+                    "max_audio_plays": (
+                        sec.get("max_audio_plays")
+                        if sec.get("max_audio_plays") is not None
+                        else sec.get("maxAudioPlays")
+                    ),
+                    "questions": normalized_qs,
+                }
+            )
+
+        async with self.db.acquire() as conn:
+            async with conn.transaction():
+                exam_row = await conn.fetchrow(
+                    f"""
+                    INSERT INTO public.exams
+                        (title, level, skill, duration_minutes, description, created_by)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    RETURNING {_SELECT_COLS}
+                    """,
+                    title, level, skill, duration_minutes, description, created_by,
+                )
+                exam_id = exam_row["id"]
+                created_sections = 0
+                created_questions = 0
+                for sec in normalized_sections:
+                    section_row = await conn.fetchrow(
+                        """
+                        INSERT INTO public.sections
+                            (exam_id, position, part_label, type, instructions,
+                             materials, audio_url, max_audio_plays)
+                        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
+                        RETURNING id
+                        """,
+                        exam_id,
+                        sec["position"],
+                        sec["part_label"],
+                        sec["type"],
+                        sec["instructions"],
+                        json.dumps(sec["materials"]),
+                        sec["audio_url"],
+                        sec["max_audio_plays"],
+                    )
+                    created_sections += 1
+                    section_id = section_row["id"]
+                    for q in sec["questions"]:
+                        await conn.execute(
+                            """
+                            INSERT INTO public.questions
+                                (section_id, position, question_type, question_data, points)
+                            VALUES ($1, $2, $3, $4::jsonb, $5)
+                            """,
+                            section_id,
+                            q["position"],
+                            q["question_type"],
+                            json.dumps(q["question_data"]),
+                            q["points"],
+                        )
+                        created_questions += 1
+
+        logger.info(
+            "Created exam %s nested (%d sections, %d questions)",
+            exam_id, created_sections, created_questions,
+        )
+        result = _row_to_exam(exam_row)
+        result["created_counts"] = {
+            "sections": created_sections,
+            "questions": created_questions,
+        }
+        return result
 
 
 exam_service = ExamService()

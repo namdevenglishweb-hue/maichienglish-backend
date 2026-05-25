@@ -7,7 +7,11 @@ from services.exam_service import exam_service
 from services.exceptions import NotFoundError, ValidationError
 from services.section_service import section_service
 
+from api.common import BatchDeleteRequest
+
 from .schemas import (
+    SectionBatchUpdateRequest,
+    SectionBatchUpdateResponse,
     SectionCreate,
     SectionListResponse,
     SectionListResponseData,
@@ -74,25 +78,129 @@ async def list_sections(
     dependencies=[Depends(require_admin)],
 )
 async def create_section(exam_id: str, request: SectionCreate):
-    """Create a new section under an exam (admin only)."""
+    """Create a new section under an exam (admin only).
+
+    If `questions` is supplied, both the section and all questions are
+    created in one transaction; gap markers in `materials` are validated
+    against the resulting question positions (1..N in array order). Reject
+    rolls back the whole batch.
+    """
+    materials = [m.model_dump(exclude_none=True) for m in request.materials]
+    nested_questions = (
+        [q.model_dump(exclude_unset=False) for q in request.questions]
+        if request.questions is not None
+        else None
+    )
+
     try:
-        section = await section_service.create_section(
-            exam_id=exam_id,
-            part_label=request.partLabel,
-            type=request.type,
-            instructions=request.instructions,
-            materials=[m.model_dump(exclude_none=True) for m in request.materials],
-            audio_url=request.audioUrl,
-            max_audio_plays=request.maxAudioPlays,
-            position=request.position,
-        )
+        if nested_questions is not None:
+            section = await section_service.create_section_with_questions(
+                exam_id=exam_id,
+                part_label=request.partLabel,
+                type=request.type,
+                instructions=request.instructions,
+                materials=materials,
+                audio_url=request.audioUrl,
+                max_audio_plays=request.maxAudioPlays,
+                position=request.position,
+                questions=nested_questions,
+            )
+        else:
+            section = await section_service.create_section(
+                exam_id=exam_id,
+                part_label=request.partLabel,
+                type=request.type,
+                instructions=request.instructions,
+                materials=materials,
+                audio_url=request.audioUrl,
+                max_audio_plays=request.maxAudioPlays,
+                position=request.position,
+            )
     except NotFoundError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except ValidationError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     return SectionResponse(
-        status=201, data=SectionResponseData(section=_to_view(section))
+        status=201,
+        data=SectionResponseData(
+            section=_to_view(section),
+            createdCounts=section.get("created_counts"),
+        ),
     )
+
+
+# ---------------------------------------------------------------------------
+# Batch endpoints — MUST be registered before the `/{section_id}` routes
+# below, otherwise FastAPI matches `/batch` as section_id="batch".
+# ---------------------------------------------------------------------------
+
+
+@section_router.put(
+    "/batch",
+    response_model=SectionBatchUpdateResponse,
+    dependencies=[Depends(require_admin)],
+)
+async def batch_update_sections(request: SectionBatchUpdateRequest):
+    """Update up to 100 sections in one transaction (admin only).
+
+    Each item must include `id`; remaining fields follow `SectionUpdate`
+    semantics. Any invalid item or missing id rolls back the whole batch.
+    """
+    field_map = {
+        "partLabel": "part_label",
+        "type": "type",
+        "instructions": "instructions",
+        "materials": "materials",
+        "audioUrl": "audio_url",
+        "maxAudioPlays": "max_audio_plays",
+        "position": "position",
+    }
+    updates: list[dict] = []
+    for item in request.updates:
+        raw = item.model_dump(exclude_unset=True)
+        sid = raw.pop("id")
+        patch: dict = {"id": sid}
+        for k, v in raw.items():
+            if k == "materials" and v is not None:
+                patch["materials"] = v
+            else:
+                patch[field_map[k]] = v
+        updates.append(patch)
+
+    try:
+        rows = await section_service.bulk_update_sections(updates)
+    except NotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValidationError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    return SectionBatchUpdateResponse(
+        data=SectionListResponseData(items=[_to_view(s) for s in rows]),
+    )
+
+
+@section_router.post(
+    "/batch-delete",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(require_admin)],
+)
+async def batch_delete_sections(
+    request: BatchDeleteRequest,
+    hard: bool = False,
+):
+    """Delete up to 100 sections in one transaction (admin only).
+
+    Soft delete by default. Pass `?hard=true` for hard delete (CASCADEs
+    through questions/answers/state). Any missing id rolls back the whole
+    batch.
+    """
+    try:
+        await section_service.bulk_delete_sections(request.ids, hard=hard)
+    except NotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValidationError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return None
 
 
 @section_router.get("/{section_id}", response_model=SectionResponse)

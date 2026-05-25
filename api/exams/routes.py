@@ -62,6 +62,7 @@ async def _build_sections_payload(
                 id=s["id"],
                 position=s["position"],
                 partLabel=s["part_label"],
+                type=s["type"],
                 instructions=s["instructions"],
                 materials=s["materials"],
                 audioUrl=s["audio_url"],
@@ -146,9 +147,43 @@ async def get_exam(
 async def create_exam(
     request: ExamCreate, admin: dict = Depends(require_admin)
 ):
-    """Create a new exam (admin only). Add sections separately via §4.5."""
+    """Create a new exam (admin only).
+
+    Plain mode: returns just the exam metadata. Add sections separately
+    via §4.5.
+
+    Nested mode: if `sections` is supplied (each may also nest
+    `questions`), the whole tree is created in one transaction.
+    Server-assigned positions 1..N in array order. Gap markers inside each
+    section's materials are validated against that section's question
+    positions before any INSERT runs. Response includes `createdCounts`
+    so the FE can confirm what was persisted; call
+    `GET /api/exams/{id}?include=sections` to fetch the IDs.
+    """
     admin_profile = await user_service.get_by_email(admin["sub"])
     created_by = admin_profile["id"] if admin_profile else None
+
+    if request.sections is not None:
+        try:
+            exam = await exam_service.create_exam_nested(
+                title=request.title,
+                level=request.level,
+                skill=request.skill,
+                duration_minutes=request.duration_minutes,
+                description=request.description,
+                created_by=created_by,
+                sections=[s.model_dump(exclude_unset=False) for s in request.sections],
+            )
+        except ValidationError as e:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        return ExamResponse(
+            status=201,
+            data=ExamResponseData(
+                exam=_to_view(exam),
+                createdCounts=exam.get("created_counts"),
+            ),
+        )
+
     exam = await exam_service.create_exam(
         title=request.title,
         level=request.level,
