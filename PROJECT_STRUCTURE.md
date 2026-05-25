@@ -22,6 +22,7 @@ maichienglish-be/
 ├── README.md                        # ✅ Project intro + quickstart
 ├── PROJECT_STRUCTURE.md             # ✅ This file — repo map
 ├── DEPLOYMENT.md                    # ✅ Step-by-step: GitHub setup, Supabase setup, Render setup, ongoing deploys, migrations, rollback, troubleshooting
+├── FRONTEND_EXAM_GUIDE.md           # ✅ FE-facing integration spec for exam subsystem (auth recap, data model, full endpoint catalog, question types + studentAnswer shapes, {{gap:N}} rendering, shared-options detection, audio cap, RBAC, TS types, FAQ)
 └── MAICHIENGLISH_BACKEND_PLAN.md    # ✅ Backend spec + HLD (source of truth for schema, API, decisions)
 ```
 

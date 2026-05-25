@@ -177,7 +177,7 @@ maichienglish-be/
 - [x] Publish/unpublish toggle
 - [x] Question CRUD (3 types: multiple_choice, fill_blank, matching)
   - multiple_choice options accept text and/or image_url (for picture MC)
-  - shared-options pattern (Part 2 campsites, Listening P3 matching) is **denormalized** — options live on each question; FE detects shared layout at render time
+  - `matching` reuses MC data shape (`{stem, options, correct_index}`) — each matching question is one independently-scored row of a shared-options table. The `section.type` field is the rendering signal (no client-side detection of "siblings with identical options").
 - [ ] Excel import for questions (deferred to B3.4b — column format pending client confirmation)
 - [x] Audio file management (storage buckets created, `sections.audio_url`, per-section play counter enforcing `sections.max_audio_plays`)
 
@@ -295,6 +295,12 @@ own replay cap, and an instruction rubric.
   passage and replaces each marker with an input bound to that question.
 - `audio_url` + `max_audio_plays` apply only to listening sections. Replay
   counts are tracked per attempt in `attempt_section_state` (§3.8).
+- `type` is a **rendering hint** for the frontend. Same enum as
+  `questions.question_type`. Tells the UI whether to render the section as a
+  vertical list (`multiple_choice`, `fill_blank`) or a shared-options table
+  (`matching` — see §3.6). Nullable: leave `NULL` for sections with mixed or
+  no question types. Not enforced against actual question types in the
+  section — soft hint only.
 
 ```sql
 CREATE TABLE public.sections (
@@ -302,6 +308,8 @@ CREATE TABLE public.sections (
   exam_id           uuid NOT NULL REFERENCES public.exams(id) ON DELETE CASCADE,
   position          int  NOT NULL,                     -- 1-based order within exam
   part_label        text,                              -- e.g. "Part 1"
+  type              text                               -- rendering hint; soft
+                      CHECK (type IN ('multiple_choice', 'fill_blank', 'matching')),
   instructions      text,                              -- rubric shown to student
   materials         jsonb NOT NULL DEFAULT '[]'::jsonb,
   audio_url         text,                              -- listening sections only
@@ -331,14 +339,25 @@ Scoped to a section. `position` is per-section and is referenced by the
   }
   ```
 - `fill_blank`: `{ "correct_answers": ["nine", "9"], "case_sensitive": false }`
-- `matching`: `{ "left": [...], "right": [...], "correct_pairs": [[0,1],[1,0],[2,2]] }`
+- `matching`: **same shape as `multiple_choice`** (`{stem, options, correct_index}`).
+  Each matching question is **one row** of a shared-options table (e.g. KET
+  Listening Part 5: 5 separate matching questions for Q21–25, each picking
+  one of A–H presents for a given person). The `matching` label is a
+  rendering signal — the UI checks `section.type === 'matching'` to render
+  all questions in that section as a single shared-options table.
 
-**Shared-options note**: KET/PET patterns where several questions share one set
-of options (Reading Part 2 campsites, Listening Part 3 places→things) are
-stored **denormalized** — every question carries its own `options`. The
-frontend detects "consecutive questions in the same section have identical
-options" and renders the shared header layout. Storage stays simple; UX is a
-render-time concern.
+**Why `matching` reuses MC shape**: in KET/PET, every "connect/nối" Part is a
+list of independently-scored items (1 mark per row) drawn from a shared pool
+of options. That's data-identical to MC; only the layout differs. We collapse
+storage + grading into one path (`multiple_choice` validator + grader) and
+let `section.type` signal the rendering. The previous `{left, right,
+correct_pairs}` shape (one question = whole table) doesn't appear in KET/PET
+and was removed in migration 0005.
+
+**Shared options live denormalized** — each matching question carries its own
+copy of `options`. For Listening P5 (5 questions × 8 options) that's ~40
+short strings per attempt, trivial. Single source of truth on section level
+was considered and rejected; the duplication is intentional.
 
 ```sql
 CREATE TABLE public.questions (
@@ -763,12 +782,13 @@ and an instruction rubric.
 List sections of an exam, ordered by `position`. Non-privileged users only see sections of published exams. Response uses the list envelope from §10.10 (`items`).
 
 #### POST /api/exams/{exam_id}/sections (admin only)
-Create a new section under an exam. If `position` is omitted, the server assigns `MAX(position)+1`.
+Create a new section under an exam. If `position` is omitted, the server assigns `MAX(position)+1`. `type` is an optional rendering hint (see §3.5) — set it when the section is homogeneous (e.g. "all matching" for a Listening Part 5).
 
 **Request:**
 ```json
 {
   "partLabel": "Part 5",
+  "type": "fill_blank",
   "instructions": "For each question, write the correct answer. Write ONE word for each gap.",
   "materials": [
     {
@@ -787,6 +807,24 @@ Create a new section under an exam. If `position` is omitted, the server assigns
   "position": 5
 }
 ```
+
+**Matching section example** (KET Listening Part 5 — 5 questions sharing one
+A–H option pool, rendered as a table):
+```json
+{
+  "partLabel": "Part 5",
+  "type": "matching",
+  "instructions": "You will hear Larry talking to Cara about a friend's birthday. What present will each person give?",
+  "materials": [],
+  "audioUrl": "https://[project].supabase.co/storage/v1/object/sign/audio/ket-l-p5.mp3",
+  "maxAudioPlays": 3
+}
+```
+
+After creating this section, POST 5 `matching` questions to it (Q21–Q25 in
+the printed paper). Each carries its own copy of the 8 A–H options; FE
+detects the layout via `section.type === "matching"`, not by comparing
+options across questions.
 
 **Response (201):** `{ "status": 201, "data": { "section": { ... } } }`.
 

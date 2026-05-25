@@ -59,6 +59,7 @@ def _row_to_section(row) -> dict[str, Any]:
         "exam_id": str(row["exam_id"]),
         "position": row["position"],
         "part_label": row["part_label"],
+        "type": row["type"],
         "instructions": row["instructions"],
         "materials": _coerce_jsonb(row["materials"]) or [],
         "audio_url": row["audio_url"],
@@ -70,9 +71,11 @@ def _row_to_section(row) -> dict[str, Any]:
 
 
 _SELECT_COLS = """
-    id, exam_id, position, part_label, instructions, materials,
+    id, exam_id, position, part_label, type, instructions, materials,
     audio_url, max_audio_plays, created_at, updated_at, deleted_at
 """
+
+_ALLOWED_TYPES = {"multiple_choice", "fill_blank", "matching"}
 
 
 class SectionService:
@@ -90,6 +93,7 @@ class SectionService:
         self,
         exam_id: str,
         part_label: Optional[str] = None,
+        type: Optional[str] = None,
         instructions: Optional[str] = None,
         materials: Optional[list[dict]] = None,
         audio_url: Optional[str] = None,
@@ -101,6 +105,7 @@ class SectionService:
         Args:
             exam_id: parent exam (must exist and not be soft-deleted).
             part_label: display label, e.g. "Part 1".
+            type: rendering hint — one of multiple_choice/fill_blank/matching, or None.
             instructions: rubric shown to the student.
             materials: list of `{type, label?, content}` passage entries.
                 Validated server-side (only `text` variant is supported today).
@@ -113,9 +118,13 @@ class SectionService:
 
         Raises:
             NotFoundError: parent exam doesn't exist.
-            ValidationError: materials shape is invalid.
+            ValidationError: materials or type invalid.
         """
         validated_materials = _validate_materials(materials)
+        if type is not None and type not in _ALLOWED_TYPES:
+            raise ValidationError(
+                f"Invalid section type {type!r}; allowed: {sorted(_ALLOWED_TYPES)}"
+            )
 
         async with self.db.acquire() as conn:
             async with conn.transaction():
@@ -140,14 +149,15 @@ class SectionService:
                 row = await conn.fetchrow(
                     f"""
                     INSERT INTO public.sections
-                        (exam_id, position, part_label, instructions, materials,
-                         audio_url, max_audio_plays)
-                    VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)
+                        (exam_id, position, part_label, type, instructions,
+                         materials, audio_url, max_audio_plays)
+                    VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
                     RETURNING {_SELECT_COLS}
                     """,
                     exam_id,
                     position,
                     part_label,
+                    type,
                     instructions,
                     json.dumps(validated_materials),
                     audio_url,
@@ -155,8 +165,8 @@ class SectionService:
                 )
 
         logger.info(
-            "Created section %s (exam=%s, position=%d)",
-            row["id"], exam_id, position,
+            "Created section %s (exam=%s, position=%d, type=%s)",
+            row["id"], exam_id, position, type,
         )
         return _row_to_section(row)
 
@@ -206,6 +216,7 @@ class SectionService:
 
         allowed = {
             "part_label",
+            "type",
             "instructions",
             "materials",
             "audio_url",
@@ -218,6 +229,10 @@ class SectionService:
 
         if "materials" in updates:
             updates["materials"] = _validate_materials(updates["materials"])
+        if "type" in updates and updates["type"] is not None and updates["type"] not in _ALLOWED_TYPES:
+            raise ValidationError(
+                f"Invalid section type {updates['type']!r}; allowed: {sorted(_ALLOWED_TYPES)}"
+            )
 
         set_parts = []
         params: list[Any] = []

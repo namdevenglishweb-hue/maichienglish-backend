@@ -29,6 +29,7 @@ def _to_view(s: dict) -> SectionView:
         examId=s["exam_id"],
         position=s["position"],
         partLabel=s["part_label"],
+        type=s["type"],
         instructions=s["instructions"],
         materials=s["materials"],
         audioUrl=s["audio_url"],
@@ -78,6 +79,7 @@ async def create_section(exam_id: str, request: SectionCreate):
         section = await section_service.create_section(
             exam_id=exam_id,
             part_label=request.partLabel,
+            type=request.type,
             instructions=request.instructions,
             materials=[m.model_dump(exclude_none=True) for m in request.materials],
             audio_url=request.audioUrl,
@@ -155,6 +157,7 @@ async def update_section(section_id: str, request: SectionUpdate):
     # Translate camelCase API fields to snake_case service kwargs
     field_map = {
         "partLabel": "part_label",
+        "type": "type",
         "instructions": "instructions",
         "materials": "materials",
         "audioUrl": "audio_url",

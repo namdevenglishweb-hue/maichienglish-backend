@@ -2,6 +2,8 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
+SectionTypeLiteral = Literal["multiple_choice", "fill_blank", "matching"]
+
 
 class SectionMaterial(BaseModel):
     """A passage entry inside `sections.materials`.
@@ -30,6 +32,13 @@ class SectionCreate(BaseModel):
     partLabel: Optional[str] = Field(
         default=None, description="Display label, e.g. 'Part 1'"
     )
+    type: Optional[SectionTypeLiteral] = Field(
+        default=None,
+        description=(
+            "FE rendering hint. 'matching' → shared-options table; "
+            "'multiple_choice'/'fill_blank' → vertical list; null → mixed."
+        ),
+    )
     instructions: Optional[str] = Field(
         default=None, description="Rubric shown to the student"
     )
@@ -56,6 +65,7 @@ class SectionCreate(BaseModel):
         "json_schema_extra": {
             "example": {
                 "partLabel": "Part 5",
+                "type": "fill_blank",
                 "instructions": "For each question, write the correct answer. Write ONE word for each gap.",
                 "materials": [
                     {
@@ -75,6 +85,7 @@ class SectionUpdate(BaseModel):
     """Body for PUT /api/sections/{section_id}. Omit a field to leave it unchanged."""
 
     partLabel: Optional[str] = None
+    type: Optional[SectionTypeLiteral] = None
     instructions: Optional[str] = None
     materials: Optional[list[SectionMaterial]] = None
     audioUrl: Optional[str] = None
@@ -108,6 +119,10 @@ class SectionView(BaseModel):
     examId: str
     position: int
     partLabel: Optional[str] = None
+    type: Optional[SectionTypeLiteral] = Field(
+        default=None,
+        description="FE rendering hint; 'matching' signals shared-options table layout.",
+    )
     instructions: Optional[str] = None
     materials: list[dict[str, Any]] = Field(default_factory=list)
     audioUrl: Optional[str] = None

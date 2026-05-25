@@ -93,6 +93,8 @@ CREATE TABLE public.sections (
   exam_id           uuid NOT NULL REFERENCES public.exams(id) ON DELETE CASCADE,
   position          int  NOT NULL,
   part_label        text,
+  type              text                                          -- FE rendering hint; soft
+                      CHECK (type IN ('multiple_choice', 'fill_blank', 'matching')),
   instructions      text,
   materials         jsonb NOT NULL DEFAULT '[]'::jsonb,
   audio_url         text,

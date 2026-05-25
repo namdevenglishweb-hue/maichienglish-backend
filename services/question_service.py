@@ -55,28 +55,13 @@ class _FillBlankData(BaseModel):
     case_sensitive: bool = False
 
 
-class _MatchingData(BaseModel):
-    left: list[str] = Field(..., min_length=1)
-    right: list[str] = Field(..., min_length=1)
-    correct_pairs: list[list[int]] = Field(..., min_length=1)
-
-    @model_validator(mode="after")
-    def _check_pairs(self):
-        for i, pair in enumerate(self.correct_pairs):
-            if len(pair) != 2:
-                raise ValueError(f"correct_pairs[{i}] must have exactly 2 indices")
-            l_idx, r_idx = pair
-            if not (0 <= l_idx < len(self.left)):
-                raise ValueError(f"correct_pairs[{i}]: left index {l_idx} out of range")
-            if not (0 <= r_idx < len(self.right)):
-                raise ValueError(f"correct_pairs[{i}]: right index {r_idx} out of range")
-        return self
-
-
+# `matching` reuses the MC shape: each matching question is one independently-
+# scored row of a shared-options table (KET Listening P5, Reading P2 etc.).
+# The rendering distinction is signaled by `section.type` (plan §3.5/§3.6).
 _VALIDATORS = {
     "multiple_choice": _MultipleChoiceData,
     "fill_blank": _FillBlankData,
-    "matching": _MatchingData,
+    "matching": _MultipleChoiceData,
 }
 
 
