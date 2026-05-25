@@ -45,8 +45,13 @@ def validate_gap_markers(
 
 
 # ---------------------------------------------------------------------------
-# Materials validator — list of {type, label?, content} entries.
-# Only the "text" variant is supported today; audio lives in section columns.
+# Materials validator — list of typed blocks shown above the questions.
+# Three variants discriminated by `type`:
+#   - text:  {type, label?, content}                  (passage; supports {{gap:N}})
+#   - image: {type, label?, url, alt?}                (diagram, form, illustration)
+#   - audio: {type, label?, url}                      (listening clip)
+# Audio cap value is section-wide (sections.max_audio_plays); per-audio
+# play counters live in attempt_section_state.audio_play_counts.
 # ---------------------------------------------------------------------------
 
 
@@ -56,6 +61,26 @@ class _TextMaterial(BaseModel):
     content: str = Field(..., min_length=1)
 
 
+class _ImageMaterial(BaseModel):
+    type: Literal["image"]
+    label: Optional[str] = None
+    url: str = Field(..., min_length=1)
+    alt: Optional[str] = None
+
+
+class _AudioMaterial(BaseModel):
+    type: Literal["audio"]
+    label: Optional[str] = None
+    url: str = Field(..., min_length=1)
+
+
+_MATERIAL_CLASSES = {
+    "text": _TextMaterial,
+    "image": _ImageMaterial,
+    "audio": _AudioMaterial,
+}
+
+
 def _validate_materials(raw: Any) -> list[dict[str, Any]]:
     if raw is None:
         return []
@@ -63,12 +88,17 @@ def _validate_materials(raw: Any) -> list[dict[str, Any]]:
         raise ValidationError("materials must be a list")
     out: list[dict[str, Any]] = []
     for i, item in enumerate(raw):
-        if not isinstance(item, dict) or item.get("type") != "text":
+        if not isinstance(item, dict):
+            raise ValidationError(f"materials[{i}]: must be an object")
+        mtype = item.get("type")
+        cls = _MATERIAL_CLASSES.get(mtype)
+        if cls is None:
             raise ValidationError(
-                f"materials[{i}]: only {{type:'text'}} entries are supported"
+                f"materials[{i}]: invalid type {mtype!r}; "
+                f"allowed: {sorted(_MATERIAL_CLASSES)}"
             )
         try:
-            out.append(_TextMaterial(**item).model_dump(exclude_none=True))
+            out.append(cls(**item).model_dump(exclude_none=True))
         except PydanticValidationError as e:
             raise ValidationError(f"materials[{i}]: {e.errors()}")
     return out
@@ -91,7 +121,6 @@ def _row_to_section(row) -> dict[str, Any]:
         "type": row["type"],
         "instructions": row["instructions"],
         "materials": _coerce_jsonb(row["materials"]) or [],
-        "audio_url": row["audio_url"],
         "max_audio_plays": row["max_audio_plays"],
         "created_at": row["created_at"].isoformat() if row["created_at"] else None,
         "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
@@ -101,7 +130,7 @@ def _row_to_section(row) -> dict[str, Any]:
 
 _SELECT_COLS = """
     id, exam_id, position, part_label, type, instructions, materials,
-    audio_url, max_audio_plays, created_at, updated_at, deleted_at
+    max_audio_plays, created_at, updated_at, deleted_at
 """
 
 _ALLOWED_TYPES = {"multiple_choice", "fill_blank", "matching"}
@@ -125,7 +154,6 @@ class SectionService:
         type: Optional[str] = None,
         instructions: Optional[str] = None,
         materials: Optional[list[dict]] = None,
-        audio_url: Optional[str] = None,
         max_audio_plays: Optional[int] = None,
         position: Optional[int] = None,
     ) -> dict[str, Any]:
@@ -136,10 +164,10 @@ class SectionService:
             part_label: display label, e.g. "Part 1".
             type: rendering hint — one of multiple_choice/fill_blank/matching, or None.
             instructions: rubric shown to the student.
-            materials: list of `{type, label?, content}` passage entries.
-                Validated server-side (only `text` variant is supported today).
-            audio_url: listening sections only.
-            max_audio_plays: listening sections only.
+            materials: list of typed blocks (`text` / `image` / `audio`),
+                validated server-side per type.
+            max_audio_plays: section-wide cap value applied independently to
+                every audio material in this section. Null = unlimited.
             position: 1-based order in the exam. If None, append after MAX.
 
         Returns:
@@ -179,8 +207,8 @@ class SectionService:
                     f"""
                     INSERT INTO public.sections
                         (exam_id, position, part_label, type, instructions,
-                         materials, audio_url, max_audio_plays)
-                    VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
+                         materials, max_audio_plays)
+                    VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
                     RETURNING {_SELECT_COLS}
                     """,
                     exam_id,
@@ -189,7 +217,6 @@ class SectionService:
                     type,
                     instructions,
                     json.dumps(validated_materials),
-                    audio_url,
                     max_audio_plays,
                 )
 
@@ -248,7 +275,6 @@ class SectionService:
             "type",
             "instructions",
             "materials",
-            "audio_url",
             "max_audio_plays",
             "position",
         }
@@ -335,7 +361,6 @@ class SectionService:
         type: Optional[str] = None,
         instructions: Optional[str] = None,
         materials: Optional[list[dict]] = None,
-        audio_url: Optional[str] = None,
         max_audio_plays: Optional[int] = None,
         position: Optional[int] = None,
         questions: Optional[list[dict[str, Any]]] = None,
@@ -411,8 +436,8 @@ class SectionService:
                     f"""
                     INSERT INTO public.sections
                         (exam_id, position, part_label, type, instructions,
-                         materials, audio_url, max_audio_plays)
-                    VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
+                         materials, max_audio_plays)
+                    VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
                     RETURNING {_SELECT_COLS}
                     """,
                     exam_id,
@@ -421,7 +446,6 @@ class SectionService:
                     type,
                     instructions,
                     json.dumps(validated_materials),
-                    audio_url,
                     max_audio_plays,
                 )
                 section_id = section_row["id"]
@@ -470,7 +494,7 @@ class SectionService:
         normalized: list[tuple[str, dict[str, Any]]] = []
         allowed = {
             "part_label", "type", "instructions", "materials",
-            "audio_url", "max_audio_plays", "position",
+            "max_audio_plays", "position",
         }
         for i, item in enumerate(updates):
             sid = item.get("id")

@@ -84,9 +84,12 @@ CREATE TABLE public.exams (
 
 -- ------------------------------------------------------------
 -- sections — one row per "Part" of an exam (KET/PET style).
---   `materials` is a JSONB list of passages: [{type:"text", label?, content}].
---   Gap markers in content use {{gap:N}} where N = questions.position.
---   audio_url + max_audio_plays apply only to listening sections.
+--   `materials` is a JSONB list of typed blocks shown above the questions:
+--     - {type:"text",  label?, content}            (passage; supports {{gap:N}})
+--     - {type:"image", label?, url, alt?}          (diagram, form, illustration)
+--     - {type:"audio", label?, url}                (listening clip)
+--   max_audio_plays is a SECTION-WIDE cap value that applies independently
+--   to every audio material in this section (per-audio counter, shared cap).
 -- ------------------------------------------------------------
 CREATE TABLE public.sections (
   id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -97,8 +100,7 @@ CREATE TABLE public.sections (
                       CHECK (type IN ('multiple_choice', 'fill_blank', 'matching')),
   instructions      text,
   materials         jsonb NOT NULL DEFAULT '[]'::jsonb,
-  audio_url         text,
-  max_audio_plays   int,
+  max_audio_plays   int,                                          -- cap value; null = unlimited
   created_at        timestamptz NOT NULL DEFAULT now(),
   updated_at        timestamptz NOT NULL DEFAULT now(),
   deleted_at        timestamptz,
@@ -150,14 +152,17 @@ CREATE TABLE public.attempts (
 
 -- ------------------------------------------------------------
 -- attempt_section_state — per-section progress for an attempt.
---   Tracks audio replay counts (vs sections.max_audio_plays) and lets
---   students resume one section at a time.
+--   audio_play_counts: jsonb map {"<material_index>": <play_count>, ...}
+--   Each audio material in the section has its own counter; all share
+--   the same `sections.max_audio_plays` cap value. material_index is
+--   positional within sections.materials JSONB (caveat documented in
+--   FE GUIDE: admins should avoid reordering materials mid-attempt).
 -- ------------------------------------------------------------
 CREATE TABLE public.attempt_section_state (
   id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   attempt_id        uuid NOT NULL REFERENCES public.attempts(id) ON DELETE CASCADE,
   section_id        uuid NOT NULL REFERENCES public.sections(id) ON DELETE CASCADE,
-  audio_play_count  int  NOT NULL DEFAULT 0,
+  audio_play_counts jsonb NOT NULL DEFAULT '{}'::jsonb,
   started_at        timestamptz,
   submitted_at      timestamptz,
   UNIQUE (attempt_id, section_id)

@@ -106,8 +106,8 @@ class AttemptService:
 
                 section_rows = await conn.fetch(
                     """
-                    SELECT id, position, part_label, instructions, materials,
-                           audio_url, max_audio_plays
+                    SELECT id, position, part_label, type, instructions,
+                           materials, max_audio_plays
                     FROM public.sections
                     WHERE exam_id = $1 AND deleted_at IS NULL
                     ORDER BY position ASC, created_at ASC
@@ -150,9 +150,9 @@ class AttemptService:
                 "id": str(s["id"]),
                 "position": s["position"],
                 "partLabel": s["part_label"],
+                "type": s["type"],
                 "instructions": s["instructions"],
                 "materials": _coerce_jsonb(s["materials"]) or [],
-                "audioUrl": s["audio_url"],
                 "maxAudioPlays": s["max_audio_plays"],
                 "questions": q_by_section.get(str(s["id"]), []),
             }
@@ -407,19 +407,31 @@ class AttemptService:
         ]
 
     async def record_audio_play(
-        self, attempt_id: str, section_id: str, user_id: str
+        self,
+        attempt_id: str,
+        section_id: str,
+        material_index: int,
+        user_id: str,
     ) -> dict[str, Any]:
-        """Increment per-section audio_play_count; reject if it would exceed
-        the section's max_audio_plays. Upserts attempt_section_state on first call.
+        """Increment the per-audio counter for `materials[material_index]`
+        inside `section_id` for this attempt. Rejects if it would exceed the
+        section's `max_audio_plays` cap (shared across all audio materials,
+        but counted independently per material).
+
+        Counter is stored under `attempt_section_state.audio_play_counts`
+        as a JSONB map keyed by the string form of material_index.
 
         Raises:
-            NotFoundError: attempt or section doesn't exist, or section
-                doesn't belong to this attempt's exam.
+            NotFoundError: attempt missing, section missing, section not in
+                this attempt's exam, or no material at `material_index`.
             PermissionDeniedError: user is not the owner.
-            ValidationError: attempt already submitted, or section has no
-                audio configured.
-            AudioPlayLimitExceededError: cap reached.
+            ValidationError: attempt already submitted, or the material at
+                `material_index` is not type=audio.
+            AudioPlayLimitExceededError: cap reached for this material.
         """
+        if material_index < 0:
+            raise ValidationError("materialIndex must be non-negative")
+
         async with self.db.acquire() as conn:
             async with conn.transaction():
                 attempt = await conn.fetchrow(
@@ -439,7 +451,7 @@ class AttemptService:
 
                 section = await conn.fetchrow(
                     """
-                    SELECT id, exam_id, audio_url, max_audio_plays
+                    SELECT id, exam_id, materials, max_audio_plays
                     FROM public.sections
                     WHERE id = $1 AND deleted_at IS NULL
                     """,
@@ -451,30 +463,52 @@ class AttemptService:
                     raise NotFoundError(
                         f"Section {section_id} not part of this attempt"
                     )
-                if not section["audio_url"]:
-                    raise ValidationError("Section has no audio")
+
+                materials = _coerce_jsonb(section["materials"]) or []
+                if material_index >= len(materials):
+                    raise NotFoundError(
+                        f"Section has no material at index {material_index} "
+                        f"(only {len(materials)} present)"
+                    )
+                material = materials[material_index]
+                if not isinstance(material, dict) or material.get("type") != "audio":
+                    raise ValidationError(
+                        f"Material at index {material_index} is not audio "
+                        f"(type={material.get('type') if isinstance(material, dict) else type(material).__name__!r})"
+                    )
 
                 max_plays = section["max_audio_plays"]
-                # Upsert state row, returning the (post-increment) count.
+                key = str(material_index)
+                # Atomic upsert + increment of the specific key inside the jsonb map.
                 row = await conn.fetchrow(
                     """
                     INSERT INTO public.attempt_section_state
-                        (attempt_id, section_id, audio_play_count, started_at)
-                    VALUES ($1, $2, 1, now())
-                    ON CONFLICT (attempt_id, section_id)
-                    DO UPDATE SET
-                        audio_play_count = public.attempt_section_state.audio_play_count + 1,
+                        (attempt_id, section_id, audio_play_counts, started_at)
+                    VALUES ($1, $2, jsonb_build_object($3::text, 1), now())
+                    ON CONFLICT (attempt_id, section_id) DO UPDATE SET
+                        audio_play_counts = jsonb_set(
+                            public.attempt_section_state.audio_play_counts,
+                            ARRAY[$3::text],
+                            to_jsonb(
+                                COALESCE(
+                                    (public.attempt_section_state.audio_play_counts->>$3::text)::int,
+                                    0
+                                ) + 1
+                            )
+                        ),
                         started_at = COALESCE(public.attempt_section_state.started_at, now())
-                    RETURNING audio_play_count
+                    RETURNING (audio_play_counts->>$3::text)::int AS new_count
                     """,
                     attempt_id,
                     section_id,
+                    key,
                 )
-                new_count = row["audio_play_count"]
+                new_count = row["new_count"]
                 if max_plays is not None and new_count > max_plays:
                     logger.warning(
-                        "record_audio_play: cap reached (attempt=%s, section=%s, %d>%d)",
-                        attempt_id, section_id, new_count, max_plays,
+                        "record_audio_play: cap reached (attempt=%s, section=%s, "
+                        "materialIndex=%d, %d>%d)",
+                        attempt_id, section_id, material_index, new_count, max_plays,
                     )
                     raise AudioPlayLimitExceededError(
                         f"Audio play limit reached ({max_plays})"
@@ -482,12 +516,13 @@ class AttemptService:
 
         remaining = (max_plays - new_count) if max_plays is not None else None
         logger.info(
-            "record_audio_play: attempt %s section %s at %d/%s plays",
-            attempt_id, section_id, new_count, max_plays,
+            "record_audio_play: attempt %s section %s materialIndex=%d at %d/%s plays",
+            attempt_id, section_id, material_index, new_count, max_plays,
         )
         return {
+            "materialIndex": material_index,
             "audioPlayCount": new_count,
-            "maxAudioPlays": max_plays,
+            "maxPlays": max_plays,
             "remainingPlays": remaining,
         }
 

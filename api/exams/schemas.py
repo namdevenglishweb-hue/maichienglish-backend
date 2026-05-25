@@ -83,8 +83,10 @@ class ExamSectionPreview(BaseModel):
         description="FE rendering hint; 'matching' signals shared-options table layout.",
     )
     instructions: Optional[str] = None
-    materials: list[dict[str, Any]] = Field(default_factory=list)
-    audioUrl: Optional[str] = None
+    materials: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Typed blocks (text/image/audio). Audio entries carry `url`.",
+    )
     maxAudioPlays: Optional[int] = None
     questions: list[ExamQuestionPreview] = Field(default_factory=list)
 

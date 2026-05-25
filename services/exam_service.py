@@ -332,7 +332,6 @@ class ExamService:
                     "type": sec_type,
                     "instructions": sec.get("instructions"),
                     "materials": materials,
-                    "audio_url": sec.get("audio_url") or sec.get("audioUrl"),
                     "max_audio_plays": (
                         sec.get("max_audio_plays")
                         if sec.get("max_audio_plays") is not None
@@ -361,8 +360,8 @@ class ExamService:
                         """
                         INSERT INTO public.sections
                             (exam_id, position, part_label, type, instructions,
-                             materials, audio_url, max_audio_plays)
-                        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
+                             materials, max_audio_plays)
+                        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
                         RETURNING id
                         """,
                         exam_id,
@@ -371,7 +370,6 @@ class ExamService:
                         sec["type"],
                         sec["instructions"],
                         json.dumps(sec["materials"]),
-                        sec["audio_url"],
                         sec["max_audio_plays"],
                     )
                     created_sections += 1

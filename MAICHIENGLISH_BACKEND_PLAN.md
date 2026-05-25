@@ -285,18 +285,26 @@ CREATE TABLE public.exams (
 
 ### 3.5 `sections` — one row per "Part" of an exam
 
-Models KET/PET-style structure (Part 1 / Part 2 / …). Each section can hold an
-optional passage (or several passages), an optional listening audio with its
-own replay cap, and an instruction rubric.
+Models KET/PET-style structure (Part 1 / Part 2 / …). Each section holds an
+instruction rubric and an ordered list of **typed content blocks**
+(`materials`) that the FE renders above the questions. Listening audio is
+one of those block types — there's no separate `audio_url` column.
 
-- `materials` is a JSONB list of passages: `[{type, label?, content}, ...]`.
-  Most sections have 0 or 1 entries; two entries support exchanges like the
-  Bea ↔ Tania email pair (Reading Part 5 dialogue).
-- Gap markers inside `content` use the convention `{{gap:N}}` where **N is the
-  `position` of a question within this section**. The frontend parses the
-  passage and replaces each marker with an input bound to that question.
-- `audio_url` + `max_audio_plays` apply only to listening sections. Replay
-  counts are tracked per attempt in `attempt_section_state` (§3.8).
+- `materials` is a JSONB list of typed blocks discriminated by `type`:
+  - `{type:"text",  label?, content}`     — passage (supports `{{gap:N}}`)
+  - `{type:"image", label?, url, alt?}`   — diagram, form, illustration
+  - `{type:"audio", label?, url}`         — listening clip
+  Order is significant: per-audio play counters are keyed by **material index**
+  (see §3.8). Most sections have 0–3 entries; KET Listening P2-style sections
+  combine `[audio, image, text]`.
+- Gap markers inside text material `content` use the convention `{{gap:N}}`
+  where **N is the `position` of a question within this section**. The
+  frontend parses the passage and replaces each marker with an input bound to
+  that question.
+- `max_audio_plays` is the **section-wide cap value** applied
+  **independently** to every audio material in this section. Counters are
+  per-material but the cap value is shared (e.g. `max=3` and 2 audios → each
+  audio can be played up to 3 times independently). Null = unlimited.
 - `type` is a **rendering hint** for the frontend. Same enum as
   `questions.question_type`. Tells the UI whether to render the section as a
   vertical list (`multiple_choice`, `fill_blank`) or a shared-options table
@@ -313,9 +321,8 @@ CREATE TABLE public.sections (
   type              text                               -- rendering hint; soft
                       CHECK (type IN ('multiple_choice', 'fill_blank', 'matching')),
   instructions      text,                              -- rubric shown to student
-  materials         jsonb NOT NULL DEFAULT '[]'::jsonb,
-  audio_url         text,                              -- listening sections only
-  max_audio_plays   int,                               -- listening sections only
+  materials         jsonb NOT NULL DEFAULT '[]'::jsonb,  -- typed blocks (text/image/audio)
+  max_audio_plays   int,                               -- cap value; null = unlimited
   created_at        timestamptz NOT NULL DEFAULT now(),
   updated_at        timestamptz NOT NULL DEFAULT now(),
   deleted_at        timestamptz,
@@ -397,16 +404,29 @@ CREATE TABLE public.attempts (
 
 ### 3.8 `attempt_section_state` — per-section state for an attempt
 
-One row per (attempt, section). Created lazily the first time a student opens
-that section. Used to (a) enforce `sections.max_audio_plays` per section and
-(b) allow students to finalize sections one at a time.
+One row per (attempt, section). Created lazily on the first audio play or
+when the FE marks the section as opened. Used to (a) enforce per-audio
+replay caps and (b) allow students to finalize sections one at a time.
+
+`audio_play_counts` is a JSONB map keyed by **material index** within
+`sections.materials`:
+
+```jsonc
+// after playing audio at index 0 twice and audio at index 2 once:
+{"0": 2, "2": 1}
+```
+
+Each key has its own counter; all share the section's `max_audio_plays`
+cap value. Material index is positional — admins should avoid reordering
+materials of a section that has in-flight attempts (the FE GUIDE
+documents this caveat).
 
 ```sql
 CREATE TABLE public.attempt_section_state (
   id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   attempt_id        uuid NOT NULL REFERENCES public.attempts(id) ON DELETE CASCADE,
   section_id        uuid NOT NULL REFERENCES public.sections(id) ON DELETE CASCADE,
-  audio_play_count  int  NOT NULL DEFAULT 0,
+  audio_play_counts jsonb NOT NULL DEFAULT '{}'::jsonb,
   started_at        timestamptz,
   submitted_at      timestamptz,
   UNIQUE (attempt_id, section_id)
@@ -996,11 +1016,17 @@ with correct-answer fields stripped from each `question_data`.
 }
 ```
 
-#### POST /api/attempts/{attempt_id}/sections/{section_id}/audio-play
-Increment the per-section audio play counter on an in-progress attempt. Only
-valid when the section has an `audio_url` and before the attempt is
-submitted. Rejects once `audio_play_count >= sections.max_audio_plays`. The
-`attempt_section_state` row is created lazily on the first call.
+#### POST /api/attempts/{attempt_id}/sections/{section_id}/audio-play?materialIndex=N
+Increment the per-audio play counter for one specific audio material in
+this section. `materialIndex` is the 0-based position of the audio entry
+inside `sections.materials`. Each audio has its **own** counter; all share
+the same cap value (`sections.max_audio_plays`).
+
+The `attempt_section_state` row is upserted on first call; subsequent
+calls atomically `jsonb_set` the counter for that material index.
+
+**Query Params:**
+- `materialIndex` (int, required, ≥0) — index of the audio material.
 
 **Headers:** `Authorization: Bearer <token>` (owner only)
 
@@ -1009,15 +1035,17 @@ submitted. Rejects once `audio_play_count >= sections.max_audio_plays`. The
 {
   "status": 200,
   "data": {
+    "materialIndex": 0,
     "audioPlayCount": 2,
-    "maxAudioPlays": 3,
+    "maxPlays": 3,
     "remainingPlays": 1
   }
 }
 ```
 
-**Error Response (403):** `"Not the owner of this attempt"` or `"Audio play limit reached (N)"`.
-**Error Response (400):** `"Attempt already submitted"` or `"Section has no audio"`.
+**Error Response (403):** `"Not the owner of this attempt"` or `"Audio play limit reached (N)"`. Cap-reached rolls back the increment in the same transaction — counter stays at its prior value.
+**Error Response (404):** `"Attempt not found"`, `"Section not found"`, `"Section not part of this attempt"`, or `"Section has no material at index N"`.
+**Error Response (400):** `"Attempt already submitted"` or `"Material at index N is not audio"`.
 
 #### POST /api/attempts/{attempt_id}/submit
 Submit answers and finalize the attempt. Owner only. Grading runs across **all sections** of the exam in one pass.

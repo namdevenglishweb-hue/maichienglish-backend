@@ -36,7 +36,6 @@ def _to_view(s: dict) -> SectionView:
         type=s["type"],
         instructions=s["instructions"],
         materials=s["materials"],
-        audioUrl=s["audio_url"],
         maxAudioPlays=s["max_audio_plays"],
         createdAt=s["created_at"],
         updatedAt=s["updated_at"],
@@ -100,7 +99,6 @@ async def create_section(exam_id: str, request: SectionCreate):
                 type=request.type,
                 instructions=request.instructions,
                 materials=materials,
-                audio_url=request.audioUrl,
                 max_audio_plays=request.maxAudioPlays,
                 position=request.position,
                 questions=nested_questions,
@@ -112,7 +110,6 @@ async def create_section(exam_id: str, request: SectionCreate):
                 type=request.type,
                 instructions=request.instructions,
                 materials=materials,
-                audio_url=request.audioUrl,
                 max_audio_plays=request.maxAudioPlays,
                 position=request.position,
             )
@@ -151,7 +148,6 @@ async def batch_update_sections(request: SectionBatchUpdateRequest):
         "type": "type",
         "instructions": "instructions",
         "materials": "materials",
-        "audioUrl": "audio_url",
         "maxAudioPlays": "max_audio_plays",
         "position": "position",
     }
@@ -268,7 +264,6 @@ async def update_section(section_id: str, request: SectionUpdate):
         "type": "type",
         "instructions": "instructions",
         "materials": "materials",
-        "audioUrl": "audio_url",
         "maxAudioPlays": "max_audio_plays",
         "position": "position",
     }

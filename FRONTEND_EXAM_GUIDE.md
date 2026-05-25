@@ -572,62 +572,93 @@ function MatchingSection({section}: {section: Section}) {
 
 ---
 
-## 9. `materials` and `{{gap:N}}` rendering
+## 9. `materials` — typed content blocks
 
-A section may include one or more **passages** in `section.materials`. Each entry has shape:
+`section.materials` is an **ordered list of typed blocks** rendered above the questions area. Three variants, discriminated by `type`:
+
+| `type` | Fields | Use case |
+|---|---|---|
+| `"text"`  | `label?`, `content` | Passage / instructions / form labels. `content` may embed `{{gap:N}}` markers. |
+| `"image"` | `label?`, `url`, `alt?` | Diagram, form image, illustration. FE should warn (but not block) when `alt` missing. |
+| `"audio"` | `label?`, `url` | Listening clip. Per-audio counter + section-wide cap (see [§11](#11-listening-audio-replay-cap)). |
+
+**Order is significant** — per-audio play counters are keyed by index within the materials array. KET Listening Part 2-style sections combine all three types:
 
 ```jsonc
-{
-  "type": "text",
-  "label": "From: Bea  |  To: Tania",   // optional heading
-  "content": "Are you busy {{gap:1}} the moment? {{gap:2}} you remember..."
-}
+"materials": [
+  {"type": "audio", "label": "Track 1",
+   "url": "https://[project].supabase.co/.../ket-l-p2.mp3"},
+  {"type": "image", "label": "City Bus Tours form",
+   "url": "https://[project].supabase.co/.../form.png",
+   "alt": "Form with 5 fields"},
+  {"type": "text", "content": "Name of guide: {{gap:1}}\nLength of tour: {{gap:2}} minutes"}
+]
 ```
 
-Inside `content`, the token `{{gap:N}}` is a placeholder for the question whose `position` equals `N` **within the same section**. Render an input bound to that question at the marker location.
+### 9.1 `{{gap:N}}` markers (text materials only)
 
-**Sample parser (React)**
+Inside a text material's `content`, the token `{{gap:N}}` is a placeholder for the question whose `position` equals `N` **within the same section**. Render an input bound to that question at the marker location.
+
+`{{gap:N}}` numbering is per-section across *all* text materials — markers `{{gap:1}}` in material[0] and `{{gap:5}}` in material[2] both reference questions in the same `section.questions[]` list.
+
+**Sample render dispatcher** — iterate materials and pick a renderer per type:
 
 ```tsx
-function PassageWithGaps({content, questions, onAnswer}: {
-  content: string;
-  questions: Question[];                          // questions of this section
+function SectionMaterials({materials, questions, onAnswer, sectionId, attemptId}: {
+  materials: Material[];
+  questions: Question[];
   onAnswer: (qid: string, value: string) => void;
+  sectionId: string;
+  attemptId: string;
 }) {
-  const parts = content.split(/(\{\{gap:\d+\}\})/g);
   return (
-    <p>
-      {parts.map((part, i) => {
-        const m = part.match(/^\{\{gap:(\d+)\}\}$/);
-        if (!m) return <span key={i}>{part}</span>;
-        const pos = Number(m[1]);
-        const q = questions.find(qq => qq.position === pos);
-        if (!q) return <span key={i} className="text-red-500">[gap {pos}?]</span>;
-        return (
-          <input key={i}
-            data-question-id={q.id}
-            onBlur={e => onAnswer(q.id, e.target.value)} />
-        );
+    <div className="materials">
+      {materials.map((m, idx) => {
+        if (m.type === 'text') {
+          return <PassageWithGaps key={idx} content={m.content} questions={questions} onAnswer={onAnswer} label={m.label} />;
+        }
+        if (m.type === 'image') {
+          return <figure key={idx}>{m.label && <figcaption>{m.label}</figcaption>}<img src={m.url} alt={m.alt ?? ''} /></figure>;
+        }
+        if (m.type === 'audio') {
+          return <AudioPlayer key={idx} url={m.url} label={m.label}
+                              attemptId={attemptId} sectionId={sectionId} materialIndex={idx} />;
+        }
+        return null;
       })}
-    </p>
+    </div>
   );
 }
 ```
 
-**Multi-passage example** (Reading P5 dialogue):
+**`PassageWithGaps`** — parse text content, replace markers with inputs:
 
-```jsonc
-"materials": [
-  {"type": "text", "label": "From: Bea  |  To: Tania",
-   "content": "Are you busy {{gap:1}} the moment? {{gap:2}} you remember..."},
-  {"type": "text", "label": "From: Tania  |  To: Bea",
-   "content": "That sounds great! {{gap:5}} would you like to go?..."}
-]
+```tsx
+function PassageWithGaps({content, questions, onAnswer, label}: {
+  content: string;
+  questions: Question[];
+  onAnswer: (qid: string, value: string) => void;
+  label?: string | null;
+}) {
+  const parts = content.split(/(\{\{gap:\d+\}\})/g);
+  return (
+    <div>
+      {label && <h4>{label}</h4>}
+      <p>
+        {parts.map((part, i) => {
+          const m = part.match(/^\{\{gap:(\d+)\}\}$/);
+          if (!m) return <span key={i}>{part}</span>;
+          const pos = Number(m[1]);
+          const q = questions.find(qq => qq.position === pos);
+          if (!q) return <span key={i} className="text-red-500">[gap {pos}?]</span>;
+          return <input key={i} data-question-id={q.id}
+                        onBlur={e => onAnswer(q.id, e.target.value)} />;
+        })}
+      </p>
+    </div>
+  );
+}
 ```
-
-Note that `{{gap:N}}` numbering is per-section across *all* materials — markers 1, 2 in passage A and 5 in passage B all reference distinct questions in the same `section.questions[]` list.
-
-> Today only `type: "text"` is supported in materials. Audio is on `section.audioUrl`, not inside materials.
 
 ---
 
@@ -671,36 +702,62 @@ numbers.get(someQuestion.id);   // e.g. 23
 
 ## 11. Listening audio replay cap
 
-Each **listening section** can declare `audioUrl` and `maxAudioPlays` (e.g. 3). The backend tracks plays **per attempt × per section** in `attempt_section_state`. Past the cap, plays are rejected.
+Audio lives **inside `section.materials`** (entries with `type: "audio"`). The section declares `maxAudioPlays` — a single cap **value** that applies **independently to every audio material** in that section. The backend tracks each audio's plays separately, keyed by the audio's **0-based index** in the materials array.
+
+Example: section has 3 audios at indices `[0, 2, 4]` (interleaved with text/image), `maxAudioPlays = 3`. The student can play each of those audios up to 3 times — they do **not** share quota.
 
 ```
-POST /api/attempts/{aid}/sections/{sid}/audio-play
+POST /api/attempts/{aid}/sections/{sid}/audio-play?materialIndex=N
 
-200 {audioPlayCount: 2, maxAudioPlays: 3, remainingPlays: 1}
+200 {materialIndex: N, audioPlayCount: 2, maxPlays: 3, remainingPlays: 1}
 403 {detail: "Audio play limit reached (3)"}
-400 {detail: "Section has no audio"}
+404 {detail: "Section has no material at index N"}
+400 {detail: "Material at index N is not audio"}
 400 {detail: "Attempt already submitted"}
 ```
 
-**Required pattern**: call the endpoint **before** starting `<audio>` playback. If it returns 403, gray out the play button. If it succeeds, start playback.
+**Required pattern**: call the endpoint **before** starting `<audio>` playback, with the audio's `materialIndex`. If it returns 403, gray out the play button. If it succeeds, start playback. Each audio button tracks its own remaining count.
 
 ```tsx
-async function play(attemptId: string, sectionId: string, audioEl: HTMLAudioElement) {
-  try {
-    const res = await api<AudioPlay>(
-      `/api/attempts/${attemptId}/sections/${sectionId}/audio-play`,
-      {method: 'POST'},
-    );
-    audioEl.play();
-    setRemainingPlays(res.remainingPlays);
-  } catch (e) {
-    if (e.status === 403) setRemainingPlays(0);  // cap reached, disable button
-    else throw e;
+function AudioPlayer({url, label, attemptId, sectionId, materialIndex}: {
+  url: string;
+  label?: string | null;
+  attemptId: string;
+  sectionId: string;
+  materialIndex: number;
+}) {
+  const audioRef = useRef<HTMLAudioElement>(null);
+  const [remaining, setRemaining] = useState<number | null>(null);
+
+  async function play() {
+    try {
+      const res = await api<AudioPlay>(
+        `/api/attempts/${attemptId}/sections/${sectionId}/audio-play?materialIndex=${materialIndex}`,
+        {method: 'POST'},
+      );
+      setRemaining(res.remainingPlays);
+      audioRef.current?.play();
+    } catch (e) {
+      if (e.status === 403) setRemaining(0);  // cap reached, disable button
+      else throw e;
+    }
   }
+
+  return (
+    <div>
+      {label && <span>{label}</span>}
+      <audio ref={audioRef} src={url} />
+      <button disabled={remaining === 0} onClick={play}>
+        Play {remaining !== null && `(${remaining} left)`}
+      </button>
+    </div>
+  );
 }
 ```
 
-**Rollback guarantee**: if the endpoint returns 403 (cap reached), the counter does NOT advance — the increment runs in a transaction that rolls back on the exception. Safe to call repeatedly without polluting state.
+**Rollback guarantee**: if the endpoint returns 403 (cap reached for *this* material), its counter does NOT advance — the increment runs in a transaction that rolls back on the exception. Safe to retry display, just don't auto-retry the play.
+
+**Caveat — material index is positional**: if an admin reorders or inserts a material in `section.materials` while an attempt is in-flight, the index references shift and counters may mis-align. Admins should avoid editing section materials during active attempts. (v2 may switch to stable per-material UUIDs if this becomes a real problem.)
 
 ---
 
@@ -710,12 +767,11 @@ The same question can return two shapes depending on whether the attempt is subm
 
 | Field | Mid-attempt (before submit) | Post-submit (after submit) |
 |---|---|---|
-| `multiple_choice.options` | always present | always present |
-| `multiple_choice.correct_index` | **stripped** | present |
+| `multiple_choice.options` / `matching.options` | always present | always present |
+| `multiple_choice.correct_index` / `matching.correct_index` | **stripped** | present |
 | `fill_blank.correct_answers` | **stripped** | present |
 | `fill_blank.case_sensitive` | **stripped** | present |
-| `matching.correct_pairs` | **stripped** | present |
-| `matching.left` / `matching.right` | always present | always present |
+| `multiple_choice.stem` / `matching.stem` | always present | always present |
 
 Endpoints that strip mid-attempt (for non-privileged callers):
 - `POST /api/attempts` (the initial fetch returning the tree)
@@ -814,11 +870,25 @@ export interface Question {
   questionData: QuestionData;
   points: number;
 }
-export interface Material {
+// ===== Materials — discriminated union on `type` =====
+export interface TextMaterial {
   type: 'text';
   label?: string | null;
-  content: string;
+  content: string;                 // may embed {{gap:N}}
 }
+export interface ImageMaterial {
+  type: 'image';
+  label?: string | null;
+  url: string;
+  alt?: string | null;
+}
+export interface AudioMaterial {
+  type: 'audio';
+  label?: string | null;
+  url: string;
+}
+export type Material = TextMaterial | ImageMaterial | AudioMaterial;
+
 export interface Section {
   id: string;
   position: number;
@@ -828,7 +898,7 @@ export interface Section {
   type: QuestionType | null;
   instructions: string | null;
   materials: Material[];
-  audioUrl: string | null;
+  /** Section-wide cap value applied INDEPENDENTLY to each audio material. */
   maxAudioPlays: number | null;
   questions: Question[];          // present when fetched via attempt-start or ?include=
 }
@@ -865,9 +935,10 @@ export interface SubmitResult {
   submittedAt: string;
 }
 export interface AudioPlay {
-  audioPlayCount: number;
-  maxAudioPlays: number | null;
-  remainingPlays: number | null;
+  materialIndex: number;            // which audio material was incremented
+  audioPlayCount: number;           // post-increment count for THIS material
+  maxPlays: number | null;          // = section.maxAudioPlays (shared cap value)
+  remainingPlays: number | null;    // null when maxPlays is null (unlimited)
 }
 export interface AnswerDetail {
   answerId: string;
@@ -936,8 +1007,8 @@ A: The backend doesn't enforce gap/question alignment. Render a visible placehol
 **Q: I called `/audio-play` 3 times and the 4th returned 403. Did the counter advance to 4?**
 A: No. The over-cap call rolls back the increment in its DB transaction. The counter stays at 3. Safe to retry display, just don't auto-retry the play.
 
-**Q: A material has `audio` or `image` `type` — what do I do?**
-A: Today only `type: "text"` exists. If you see anything else, fail soft (ignore the entry, log a warning) — the schema may grow.
+**Q: Materials now support `image` and `audio` — what's the difference between them and a text passage?**
+A: All three are typed content blocks rendered above the questions area. Text carries `content` (may include `{{gap:N}}`); image carries `url` + optional `alt`; audio carries `url` and is gated by the per-audio replay endpoint (see [§11](#11-listening-audio-replay-cap)). The FE picks a renderer based on `material.type` — see the dispatcher in [§9](#9-materials--typed-content-blocks).
 
 **Q: I submitted, then refreshed and got the detail screen with `correct_index` still missing. Why?**
 A: Two reasons to check:

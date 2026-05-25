@@ -66,7 +66,7 @@ api/
 ├── sections/                        # ✅ Middle layer of Exam → Section → Question
 │   ├── __init__.py                  # ✅ Re-exports both routers
 │   ├── routes.py                    # ✅ exam_scoped_router: GET/POST /api/exams/{eid}/sections (POST nested: optional questions[] in 1 txn)  |  section_router: PUT /api/sections/batch + POST /api/sections/batch-delete[?hard=true] (registered FIRST), then GET/PUT/DELETE /api/sections/{sid}, DELETE /api/sections/{sid}/hard (?include=questions on GET)
-│   └── schemas.py                   # ✅ SectionCreate (optional nested `questions[]`, `type` field), SectionUpdate, SectionMaterial (only `text` variant today — audio lives on `audio_url` column), SectionView (carries `type`; optional `questions` populated by ?include=questions), SectionQuestionPreview, SectionResponseData (optional `createdCounts`), SectionBatchUpdateItem/Request/Response + wrappers
+│   └── schemas.py                   # ✅ SectionCreate (optional nested `questions[]`, `type` field), SectionUpdate, SectionMaterial = Union[TextMaterial, ImageMaterial, AudioMaterial] (discriminated on `type`; audio carries `url` + section-wide `max_audio_plays` cap), SectionView (carries `type`; optional `questions` populated by ?include=questions), SectionQuestionPreview, SectionResponseData (optional `createdCounts`), SectionBatchUpdateItem/Request/Response + wrappers
 │
 ├── questions/
 │   ├── __init__.py                  # ✅ Re-exports both routers
@@ -75,8 +75,8 @@ api/
 │
 ├── attempts/
 │   ├── __init__.py                  # ✅ Re-exports `router`
-│   ├── routes.py                    # ✅ POST / (start, enforces tier limit, returns nested exam→sections→questions), POST /{id}/submit (auto-grade across all sections), POST /{id}/sections/{sid}/audio-play (per-section cap), GET /history, GET /{id} (detail grouped by section; owner/staff/parent)
-│   └── schemas.py                   # ✅ AttemptStart/Submit Request+Response (nested sections), AttemptDetailResponse, AttemptHistoryItem, AudioPlayResponse
+│   ├── routes.py                    # ✅ POST / (start, enforces tier limit, returns nested exam→sections→questions; sections carry typed materials incl. audio), POST /{id}/submit (auto-grade across all sections), POST /{id}/sections/{sid}/audio-play?materialIndex=N (per-audio counter, shared cap), GET /history, GET /{id} (detail grouped by section; owner/staff/parent)
+│   └── schemas.py                   # ✅ AttemptStart/Submit Request+Response (nested sections), AttemptSectionView (carries `type`; no audioUrl — audio in materials), AttemptDetailResponse, AttemptHistoryItem, AudioPlayResponse (materialIndex + per-audio audioPlayCount + maxPlays)
 │
 ├── parents/
 │   ├── __init__.py                  # ✅ Re-exports `router` (router-level require_parent)
@@ -98,7 +98,7 @@ services/
 ├── auth_service.py                  # ✅ Password reset code lifecycle: request_password_reset_code (anti-enumeration silent 200 + invalidate previous codes), reset_password (bcrypt-compare candidates, mark used, replace password_hash in one tx). Login/token logic stays in api/auth/routes.py + utils/jwt_utils.py.
 ├── user_service.py                  # ✅ create_user (profile + subscription tx, accepts parent_id), authenticate, get_by_email/id, list_users (filter+paginate), update_profile (self-edit fullName/phone), delete_user, admin_reset_password, link_parent, list_children_of_parent, is_child_of
 ├── exam_service.py                  # ✅ Exam CRUD (no passage/audio fields), publish (checks ≥1 section w/ ≥1 active question) / unpublish, soft delete, hard delete (CASCADE through sections). `create_exam_nested` builds whole exam+sections+questions tree in 1 transaction with gap-marker validation.
-├── section_service.py               # ✅ Section CRUD (now also carries `type` rendering hint + bulk methods). create_section, create_section_with_questions (nested inline questions in 1 txn), list_sections_by_exam, get_section, update_section, soft/hard delete, bulk_update_sections, bulk_delete_sections. Module-level `validate_gap_markers` reused by both section_service and exam_service.
+├── section_service.py               # ✅ Section CRUD with `type` hint + bulk methods. _validate_materials accepts 3 typed variants (text/image/audio) via discriminated union. create_section, create_section_with_questions (nested inline questions in 1 txn), list_sections_by_exam, get_section, update_section, soft/hard delete, bulk_update_sections, bulk_delete_sections. Module-level `validate_gap_markers` reused by both section_service and exam_service.
 ├── question_service.py              # ✅ Question CRUD scoped to section_id (per-section position); per-type validation (matching reuses MC validator). Single + bulk_update_questions + bulk_delete_questions. Excel import lands in B3.4b.
 ├── attempt_service.py               # ✅ Start (enforces tier limit; returns nested exam→sections→questions), submit + auto-grade across all sections, history queries, record_audio_play (per-section: upserts attempt_section_state, enforces sections.max_audio_plays). Custom AttemptLimitExceededError + AudioPlayLimitExceededError extend PermissionDeniedError.
 ├── subscription_service.py          # ✅ get_by_user_id, update_tier (validates tier + logs), list_plans serializer. Attempt-limit enforcement lives in attempt_service; period-reset is not yet implemented (period boundary still equals subscriptions.current_period_start from creation).
@@ -116,7 +116,7 @@ models/
 ├── section.py                       # ⏳ Section model with materials JSONB + audio_url + deleted_at (matches §3.5)
 ├── question.py                      # ⏳ Question model with question_data JSONB + section_id + deleted_at (matches §3.6)
 ├── attempt.py                       # ⏳ Attempt model (matches §3.7)
-├── attempt_section_state.py         # ⏳ Per-section progress + audio counter (matches §3.8)
+├── attempt_section_state.py         # ⏳ Per-section progress + per-audio counter map (matches §3.8)
 └── answer.py                        # ⏳ Answer model (matches §3.9)
 ```
 
@@ -149,7 +149,8 @@ migrations/
 ├── 0002_add_parent_role.sql         # ✅ Add `parent` to role CHECK + `profiles.parent_id` self-FK. Idempotent.
 ├── 0003_add_password_reset_codes.sql # ✅ Create `password_reset_codes` table (bcrypt-hashed 6-digit codes, 10-min TTL). Idempotent.
 ├── 0004_exam_sections.sql           # ✅ Introduce sections layer + attempt_section_state. Drops exams.audio_url/passage/max_audio_plays + questions.exam_id + attempts.audio_play_count. Breaking change — dev DB only; run init_schema.py --drop -y for fresh setup.
-└── 0005_section_type.sql            # ✅ Add `sections.type` (rendering hint: multiple_choice/fill_blank/matching, nullable). No data migration needed for matching shape change (prior shape never shipped). Idempotent.
+├── 0005_section_type.sql            # ✅ Add `sections.type` (rendering hint: multiple_choice/fill_blank/matching, nullable). No data migration needed for matching shape change (prior shape never shipped). Idempotent.
+└── 0006_materials_typed_blocks.sql  # ✅ Drop `sections.audio_url` (audio moves into `materials` JSONB as typed block). Replace `attempt_section_state.audio_play_count` (scalar) with `audio_play_counts jsonb` keyed by material_index for per-audio counters. Idempotent.
 ```
 
 ```

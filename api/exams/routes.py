@@ -65,7 +65,6 @@ async def _build_sections_payload(
                 type=s["type"],
                 instructions=s["instructions"],
                 materials=s["materials"],
-                audioUrl=s["audio_url"],
                 maxAudioPlays=s["max_audio_plays"],
                 questions=[
                     ExamQuestionPreview(

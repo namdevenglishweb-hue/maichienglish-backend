@@ -29,10 +29,23 @@ class AttemptSectionView(BaseModel):
     id: str
     position: int
     partLabel: Optional[str] = None
+    type: Optional[str] = Field(
+        default=None,
+        description="FE rendering hint mirrored from section.type.",
+    )
     instructions: Optional[str] = None
-    materials: list[dict[str, Any]] = Field(default_factory=list)
-    audioUrl: Optional[str] = None
-    maxAudioPlays: Optional[int] = None
+    materials: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Typed content blocks (text/image/audio). Audio entries carry "
+            "`url`; FE calls POST /attempts/{aid}/sections/{sid}/audio-play"
+            "?materialIndex=<index> before each play, gated by maxAudioPlays."
+        ),
+    )
+    maxAudioPlays: Optional[int] = Field(
+        default=None,
+        description="Section-wide cap value applied INDEPENDENTLY per audio material.",
+    )
     questions: list[AttemptQuestionView] = Field(default_factory=list)
 
 
@@ -179,9 +192,16 @@ class AttemptHistoryResponse(BaseModel):
 
 
 class AudioPlayResponseData(BaseModel):
-    audioPlayCount: int
-    maxAudioPlays: Optional[int] = None
-    remainingPlays: Optional[int] = None
+    materialIndex: int = Field(..., description="The audio material whose counter was incremented.")
+    audioPlayCount: int = Field(..., description="Post-increment count for THIS material.")
+    maxPlays: Optional[int] = Field(
+        default=None,
+        description="Cap value (= sections.max_audio_plays). Null = unlimited.",
+    )
+    remainingPlays: Optional[int] = Field(
+        default=None,
+        description="maxPlays - audioPlayCount, or null when unlimited.",
+    )
 
 
 class AudioPlayResponse(BaseModel):

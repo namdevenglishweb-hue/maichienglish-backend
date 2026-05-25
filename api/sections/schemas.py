@@ -1,4 +1,4 @@
-from typing import Any, Literal, Optional
+from typing import Annotated, Any, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -8,16 +8,15 @@ from api.questions.schemas import QuestionCreate
 SectionTypeLiteral = Literal["multiple_choice", "fill_blank", "matching"]
 
 
-class SectionMaterial(BaseModel):
-    """A passage entry inside `sections.materials`.
+class TextMaterial(BaseModel):
+    """A passage block inside `sections.materials`.
 
-    Only the `text` variant is supported today. Gap markers in `content` use
-    the convention `{{gap:N}}` where N is the `position` of a question within
-    the same section. The frontend parses these markers and renders an input
-    bound to that question.
+    Gap markers in `content` use the convention `{{gap:N}}` where N is the
+    `position` of a question within the same section. The frontend parses
+    these markers and replaces each with an input bound to that question.
     """
 
-    type: Literal["text"] = "text"
+    type: Literal["text"]
     label: Optional[str] = Field(
         default=None,
         description="Optional heading shown above the passage (e.g. 'From: Bea').",
@@ -27,6 +26,47 @@ class SectionMaterial(BaseModel):
         min_length=1,
         description="Passage body. May embed {{gap:N}} markers.",
     )
+
+
+class ImageMaterial(BaseModel):
+    """An image block inside `sections.materials` (diagram, form, illustration)."""
+
+    type: Literal["image"]
+    label: Optional[str] = Field(
+        default=None,
+        description="Optional caption shown above the image.",
+    )
+    url: str = Field(..., min_length=1, description="Image asset URL.")
+    alt: Optional[str] = Field(
+        default=None,
+        description="Accessibility description. FE should warn (but not block) when missing.",
+    )
+
+
+class AudioMaterial(BaseModel):
+    """An audio block inside `sections.materials`.
+
+    Per-audio replay tracking lives in `attempt_section_state.audio_play_counts`
+    keyed by the material's index within this section. The cap value is
+    `sections.max_audio_plays` — shared across all audio materials in this
+    section but counted independently per audio.
+    """
+
+    type: Literal["audio"]
+    label: Optional[str] = Field(
+        default=None,
+        description="Optional label shown next to the play control.",
+    )
+    url: str = Field(..., min_length=1, description="Audio asset URL.")
+
+
+# Discriminated union — Pydantic routes each dict to the right class based
+# on its `type` field. FE/admin send and receive items of this shape inside
+# `materials`.
+SectionMaterial = Annotated[
+    Union[TextMaterial, ImageMaterial, AudioMaterial],
+    Field(discriminator="type"),
+]
 
 
 class SectionCreate(BaseModel):
@@ -47,16 +87,20 @@ class SectionCreate(BaseModel):
     )
     materials: list[SectionMaterial] = Field(
         default_factory=list,
-        description="Passage entries. Empty list for sections without passages.",
-    )
-    audioUrl: Optional[str] = Field(
-        default=None,
-        description="Listening audio URL (listening sections only).",
+        description=(
+            "Typed content blocks shown above the questions. Each entry is "
+            "one of: TextMaterial / ImageMaterial / AudioMaterial. Order is "
+            "significant — audio counters are addressed by index."
+        ),
     )
     maxAudioPlays: Optional[int] = Field(
         default=None,
         ge=0,
-        description="Per-section cap on student replays (listening only).",
+        description=(
+            "Section-wide cap value applied INDEPENDENTLY to each audio "
+            "material in this section (per-audio counter, shared cap value). "
+            "Null = unlimited."
+        ),
     )
     position: Optional[int] = Field(
         default=None,
@@ -79,18 +123,27 @@ class SectionCreate(BaseModel):
     model_config = {
         "json_schema_extra": {
             "example": {
-                "partLabel": "Part 5",
+                "partLabel": "Part 2",
                 "type": "fill_blank",
-                "instructions": "For each question, write the correct answer. Write ONE word for each gap.",
+                "instructions": "You will hear some information about city bus tours. Listen and complete the form.",
                 "materials": [
                     {
+                        "type": "audio",
+                        "label": "Track 1",
+                        "url": "https://[project].supabase.co/.../ket-l-p2.mp3"
+                    },
+                    {
+                        "type": "image",
+                        "label": "City Bus Tours form",
+                        "url": "https://[project].supabase.co/.../ket-l-p2-form.png",
+                        "alt": "Form with 5 blank fields to fill in",
+                    },
+                    {
                         "type": "text",
-                        "label": "From: Bea  |  To: Tania",
-                        "content": "How are things? Are you busy {{gap:1}} the moment?",
+                        "content": "Name of guide: {{gap:1}}",
                     }
                 ],
-                "audioUrl": None,
-                "maxAudioPlays": None,
+                "maxAudioPlays": 3,
             }
         }
     }
@@ -103,7 +156,6 @@ class SectionUpdate(BaseModel):
     type: Optional[SectionTypeLiteral] = None
     instructions: Optional[str] = None
     materials: Optional[list[SectionMaterial]] = None
-    audioUrl: Optional[str] = None
     maxAudioPlays: Optional[int] = Field(default=None, ge=0)
     position: Optional[int] = Field(default=None, ge=1)
 
@@ -140,7 +192,6 @@ class SectionView(BaseModel):
     )
     instructions: Optional[str] = None
     materials: list[dict[str, Any]] = Field(default_factory=list)
-    audioUrl: Optional[str] = None
     maxAudioPlays: Optional[int] = None
     createdAt: Optional[str] = None
     updatedAt: Optional[str] = None

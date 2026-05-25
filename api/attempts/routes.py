@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from dependencies import get_current_user
 from services.attempt_service import (
@@ -145,18 +145,29 @@ async def submit_attempt(
 async def record_audio_play(
     attempt_id: str,
     section_id: str,
+    materialIndex: int = Query(
+        ...,
+        ge=0,
+        description=(
+            "0-based index of the audio material within section.materials. "
+            "Each audio has its own counter; cap value is shared via "
+            "section.max_audio_plays."
+        ),
+    ),
     current_user: dict = Depends(get_current_user),
 ):
-    """Increment the listening-audio play counter for a section.
+    """Increment the per-audio play counter for one material in this section.
 
-    Rejects past `sections.max_audio_plays`. Creates the
-    `attempt_section_state` row lazily on the first call.
+    Each audio material has an independent counter; the cap value
+    (`sections.max_audio_plays`) is shared but applied per-counter. Past
+    the cap → 403 and the transaction rolls back (counter doesn't advance).
     """
     user = await _resolve_user(current_user)
     try:
         result = await attempt_service.record_audio_play(
             attempt_id=attempt_id,
             section_id=section_id,
+            material_index=materialIndex,
             user_id=user["id"],
         )
     except NotFoundError as e:
