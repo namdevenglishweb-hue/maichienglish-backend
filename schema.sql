@@ -103,9 +103,14 @@ CREATE TABLE public.sections (
   max_audio_plays   int,                                          -- cap value; null = unlimited
   created_at        timestamptz NOT NULL DEFAULT now(),
   updated_at        timestamptz NOT NULL DEFAULT now(),
-  deleted_at        timestamptz,
-  UNIQUE (exam_id, position)
+  deleted_at        timestamptz
 );
+
+-- Partial unique: only ACTIVE sections must have distinct positions per
+-- exam. Soft-deleted rows keep their old position without blocking reuse.
+CREATE UNIQUE INDEX sections_exam_id_position_active_key
+  ON public.sections (exam_id, position)
+  WHERE deleted_at IS NULL;
 
 CREATE INDEX idx_sections_exam
   ON public.sections(exam_id)
@@ -128,9 +133,14 @@ CREATE TABLE public.questions (
   question_data  jsonb NOT NULL,
   points         int  NOT NULL DEFAULT 1,
   created_at     timestamptz NOT NULL DEFAULT now(),
-  deleted_at     timestamptz,
-  UNIQUE (section_id, position)
+  deleted_at     timestamptz
 );
+
+-- Partial unique: only ACTIVE questions must have distinct positions per
+-- section. Soft-deleted rows don't block reuse (same fix as sections).
+CREATE UNIQUE INDEX questions_section_id_position_active_key
+  ON public.questions (section_id, position)
+  WHERE deleted_at IS NULL;
 
 
 -- ------------------------------------------------------------

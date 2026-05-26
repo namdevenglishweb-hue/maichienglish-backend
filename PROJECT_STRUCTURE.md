@@ -150,7 +150,8 @@ migrations/
 ├── 0003_add_password_reset_codes.sql # ✅ Create `password_reset_codes` table (bcrypt-hashed 6-digit codes, 10-min TTL). Idempotent.
 ├── 0004_exam_sections.sql           # ✅ Introduce sections layer + attempt_section_state. Drops exams.audio_url/passage/max_audio_plays + questions.exam_id + attempts.audio_play_count. Breaking change — dev DB only; run init_schema.py --drop -y for fresh setup.
 ├── 0005_section_type.sql            # ✅ Add `sections.type` (rendering hint: multiple_choice/fill_blank/matching, nullable). No data migration needed for matching shape change (prior shape never shipped). Idempotent.
-└── 0006_materials_typed_blocks.sql  # ✅ Drop `sections.audio_url` (audio moves into `materials` JSONB as typed block). Replace `attempt_section_state.audio_play_count` (scalar) with `audio_play_counts jsonb` keyed by material_index for per-audio counters. Idempotent.
+├── 0006_materials_typed_blocks.sql  # ✅ Drop `sections.audio_url` (audio moves into `materials` JSONB as typed block). Replace `attempt_section_state.audio_play_count` (scalar) with `audio_play_counts jsonb` keyed by material_index for per-audio counters. Idempotent.
+└── 0007_partial_unique_positions.sql # ✅ Hotfix: replace plain UNIQUE(exam_id, position) / UNIQUE(section_id, position) with PARTIAL unique indexes filtered by `deleted_at IS NULL`. Soft-deleted rows no longer block position reuse (was causing 500 UniqueViolation on POST /sections after admin soft-deletes any position). Idempotent.
 ```
 
 ```
