@@ -2,6 +2,8 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from api.common import MAX_BATCH_SIZE
+
 QuestionTypeLiteral = Literal["multiple_choice", "fill_blank", "matching"]
 
 
@@ -124,5 +126,49 @@ class QuestionListResponseData(BaseModel):
 class QuestionListResponse(BaseModel):
     """Wrapped response for GET /api/sections/{section_id}/questions."""
 
+    status: int = 200
+    data: QuestionListResponseData
+
+
+# ---------------------------------------------------------------------------
+# Batch operations (capped at MAX_BATCH_SIZE items per request)
+# ---------------------------------------------------------------------------
+
+
+class QuestionBatchUpdateItem(QuestionUpdate):
+    """One question patch in a batch update. `id` identifies the target row;
+    all other fields follow `QuestionUpdate` semantics. Changing
+    `question_type` still requires a matching `question_data` in the same item."""
+
+    id: str = Field(..., description="UUID of the question to update")
+
+
+class QuestionBatchUpdateRequest(BaseModel):
+    """Body for PUT /api/questions/batch."""
+
+    updates: list[QuestionBatchUpdateItem] = Field(
+        ..., min_length=1, max_length=MAX_BATCH_SIZE,
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "updates": [
+                    {"id": "uuid-1", "points": 2},
+                    {
+                        "id": "uuid-2",
+                        "question_type": "fill_blank",
+                        "question_data": {
+                            "correct_answers": ["nine"],
+                            "case_sensitive": False,
+                        },
+                    },
+                ]
+            }
+        }
+    }
+
+
+class QuestionBatchUpdateResponse(BaseModel):
     status: int = 200
     data: QuestionListResponseData

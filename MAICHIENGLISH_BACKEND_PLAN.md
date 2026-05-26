@@ -174,12 +174,14 @@ maichienglish-be/
 - [x] CRUD for exams
 - [x] **3-layer hierarchy**: Exam → Section → Question (matches KET/PET "Part 1/2/..." layout)
 - [x] CRUD for sections (passage / audio / instructions live here, not on exam)
+- [x] **Nested create**: `POST /api/exams` and `POST /api/exams/{eid}/sections` accept optional nested children (`sections[]` / `questions[]`) — whole tree created in one transaction with server-assigned positions + gap-marker validation. Avoids the 60+ roundtrips needed to seed a full KET paper one-record-at-a-time.
+- [x] **Batch update + delete**: `PUT /api/sections/batch`, `PUT /api/questions/batch`, `POST /api/{sections,questions}/batch-delete?hard=...` — up to 100 items per call, all-or-nothing transaction.
 - [x] Publish/unpublish toggle
 - [x] Question CRUD (3 types: multiple_choice, fill_blank, matching)
   - multiple_choice options accept text and/or image_url (for picture MC)
-  - shared-options pattern (Part 2 campsites, Listening P3 matching) is **denormalized** — options live on each question; FE detects shared layout at render time
+  - `matching` reuses MC data shape (`{stem, options, correct_index}`) — each matching question is one independently-scored row of a shared-options table. The `section.type` field is the rendering signal (no client-side detection of "siblings with identical options").
 - [ ] Excel import for questions (deferred to B3.4b — column format pending client confirmation)
-- [x] Audio file management (storage buckets created, `sections.audio_url`, per-section play counter enforcing `sections.max_audio_plays`)
+- [x] Audio file management (storage buckets created, audio lives as `{type:"audio", url}` blocks inside `sections.materials`; per-audio play counters tracked in `attempt_section_state.audio_play_counts` jsonb map; cap value section-wide via `sections.max_audio_plays`)
 
 #### Attempt Management
 - [x] Start exam attempt
@@ -283,18 +285,32 @@ CREATE TABLE public.exams (
 
 ### 3.5 `sections` — one row per "Part" of an exam
 
-Models KET/PET-style structure (Part 1 / Part 2 / …). Each section can hold an
-optional passage (or several passages), an optional listening audio with its
-own replay cap, and an instruction rubric.
+Models KET/PET-style structure (Part 1 / Part 2 / …). Each section holds an
+instruction rubric and an ordered list of **typed content blocks**
+(`materials`) that the FE renders above the questions. Listening audio is
+one of those block types — there's no separate `audio_url` column.
 
-- `materials` is a JSONB list of passages: `[{type, label?, content}, ...]`.
-  Most sections have 0 or 1 entries; two entries support exchanges like the
-  Bea ↔ Tania email pair (Reading Part 5 dialogue).
-- Gap markers inside `content` use the convention `{{gap:N}}` where **N is the
-  `position` of a question within this section**. The frontend parses the
-  passage and replaces each marker with an input bound to that question.
-- `audio_url` + `max_audio_plays` apply only to listening sections. Replay
-  counts are tracked per attempt in `attempt_section_state` (§3.8).
+- `materials` is a JSONB list of typed blocks discriminated by `type`:
+  - `{type:"text",  label?, content}`     — passage (supports `{{gap:N}}`)
+  - `{type:"image", label?, url, alt?}`   — diagram, form, illustration
+  - `{type:"audio", label?, url}`         — listening clip
+  Order is significant: per-audio play counters are keyed by **material index**
+  (see §3.8). Most sections have 0–3 entries; KET Listening P2-style sections
+  combine `[audio, image, text]`.
+- Gap markers inside text material `content` use the convention `{{gap:N}}`
+  where **N is the `position` of a question within this section**. The
+  frontend parses the passage and replaces each marker with an input bound to
+  that question.
+- `max_audio_plays` is the **section-wide cap value** applied
+  **independently** to every audio material in this section. Counters are
+  per-material but the cap value is shared (e.g. `max=3` and 2 audios → each
+  audio can be played up to 3 times independently). Null = unlimited.
+- `type` is a **rendering hint** for the frontend. Same enum as
+  `questions.question_type`. Tells the UI whether to render the section as a
+  vertical list (`multiple_choice`, `fill_blank`) or a shared-options table
+  (`matching` — see §3.6). Nullable: leave `NULL` for sections with mixed or
+  no question types. Not enforced against actual question types in the
+  section — soft hint only.
 
 ```sql
 CREATE TABLE public.sections (
@@ -302,10 +318,11 @@ CREATE TABLE public.sections (
   exam_id           uuid NOT NULL REFERENCES public.exams(id) ON DELETE CASCADE,
   position          int  NOT NULL,                     -- 1-based order within exam
   part_label        text,                              -- e.g. "Part 1"
+  type              text                               -- rendering hint; soft
+                      CHECK (type IN ('multiple_choice', 'fill_blank', 'matching')),
   instructions      text,                              -- rubric shown to student
-  materials         jsonb NOT NULL DEFAULT '[]'::jsonb,
-  audio_url         text,                              -- listening sections only
-  max_audio_plays   int,                               -- listening sections only
+  materials         jsonb NOT NULL DEFAULT '[]'::jsonb,  -- typed blocks (text/image/audio)
+  max_audio_plays   int,                               -- cap value; null = unlimited
   created_at        timestamptz NOT NULL DEFAULT now(),
   updated_at        timestamptz NOT NULL DEFAULT now(),
   deleted_at        timestamptz,
@@ -331,14 +348,25 @@ Scoped to a section. `position` is per-section and is referenced by the
   }
   ```
 - `fill_blank`: `{ "correct_answers": ["nine", "9"], "case_sensitive": false }`
-- `matching`: `{ "left": [...], "right": [...], "correct_pairs": [[0,1],[1,0],[2,2]] }`
+- `matching`: **same shape as `multiple_choice`** (`{stem, options, correct_index}`).
+  Each matching question is **one row** of a shared-options table (e.g. KET
+  Listening Part 5: 5 separate matching questions for Q21–25, each picking
+  one of A–H presents for a given person). The `matching` label is a
+  rendering signal — the UI checks `section.type === 'matching'` to render
+  all questions in that section as a single shared-options table.
 
-**Shared-options note**: KET/PET patterns where several questions share one set
-of options (Reading Part 2 campsites, Listening Part 3 places→things) are
-stored **denormalized** — every question carries its own `options`. The
-frontend detects "consecutive questions in the same section have identical
-options" and renders the shared header layout. Storage stays simple; UX is a
-render-time concern.
+**Why `matching` reuses MC shape**: in KET/PET, every "connect/nối" Part is a
+list of independently-scored items (1 mark per row) drawn from a shared pool
+of options. That's data-identical to MC; only the layout differs. We collapse
+storage + grading into one path (`multiple_choice` validator + grader) and
+let `section.type` signal the rendering. The previous `{left, right,
+correct_pairs}` shape (one question = whole table) doesn't appear in KET/PET
+and was removed in migration 0005.
+
+**Shared options live denormalized** — each matching question carries its own
+copy of `options`. For Listening P5 (5 questions × 8 options) that's ~40
+short strings per attempt, trivial. Single source of truth on section level
+was considered and rejected; the duplication is intentional.
 
 ```sql
 CREATE TABLE public.questions (
@@ -376,16 +404,29 @@ CREATE TABLE public.attempts (
 
 ### 3.8 `attempt_section_state` — per-section state for an attempt
 
-One row per (attempt, section). Created lazily the first time a student opens
-that section. Used to (a) enforce `sections.max_audio_plays` per section and
-(b) allow students to finalize sections one at a time.
+One row per (attempt, section). Created lazily on the first audio play or
+when the FE marks the section as opened. Used to (a) enforce per-audio
+replay caps and (b) allow students to finalize sections one at a time.
+
+`audio_play_counts` is a JSONB map keyed by **material index** within
+`sections.materials`:
+
+```jsonc
+// after playing audio at index 0 twice and audio at index 2 once:
+{"0": 2, "2": 1}
+```
+
+Each key has its own counter; all share the section's `max_audio_plays`
+cap value. Material index is positional — admins should avoid reordering
+materials of a section that has in-flight attempts (the FE GUIDE
+documents this caveat).
 
 ```sql
 CREATE TABLE public.attempt_section_state (
   id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   attempt_id        uuid NOT NULL REFERENCES public.attempts(id) ON DELETE CASCADE,
   section_id        uuid NOT NULL REFERENCES public.sections(id) ON DELETE CASCADE,
-  audio_play_count  int  NOT NULL DEFAULT 0,
+  audio_play_counts jsonb NOT NULL DEFAULT '{}'::jsonb,
   started_at        timestamptz,
   submitted_at      timestamptz,
   UNIQUE (attempt_id, section_id)
@@ -412,7 +453,7 @@ Create two buckets in the new Supabase project:
 
 | Bucket | Purpose |
 |--------|---------|
-| `audio` | Listening exam audio files (`.mp3`, `.m4a`) — referenced by `exams.audio_url` |
+| `audio` | Listening exam audio files (`.mp3`, `.m4a`) — referenced by `{type:"audio", url}` blocks inside `sections.materials` |
 | `images` | Image assets for questions (`.png`, `.jpg`, `.webp`) — referenced inside `questions.question_data` |
 
 ---
@@ -733,9 +774,23 @@ Get a single exam by id. Non-privileged users (student / parent) only see publis
   student-facing exam viewer.
 
 #### POST /api/exams (admin only)
-Create new exam. Body fields: `title`, `level`, `skill`, `duration_minutes`,
-`description`. Sections are added via §4.5. Returns 201 with the created
-exam wrapped under `data.exam`.
+Create new exam. Two modes:
+
+- **Plain**: body has top-level fields only (`title`, `level`, `skill`,
+  `duration_minutes`, `description`). Returns the exam shell; add sections
+  via §4.5.
+- **Nested**: body additionally supplies `sections[]` (each may carry
+  `questions[]`). Whole tree is created in one transaction. Server assigns
+  `position = 1..N` in array order at both levels (admin-supplied positions
+  ignored in this mode). Gap markers `{{gap:N}}` inside each section's
+  `materials` are validated against that section's resulting question
+  positions — any broken marker rejects the whole batch (400). Max 100
+  sections and 100 questions per section.
+
+**Nested response** (`201`): standard `{ status, data: { exam: {...} } }`
+plus a sibling `data.createdCounts: { sections: N, questions: M }` so the
+FE can confirm what was persisted. Section/question IDs are not returned
+inline — call `GET /api/exams/{id}?include=sections` to fetch them.
 
 #### PUT /api/exams/{exam_id} (admin only)
 Update exam. Partial — pass only the fields you want to change.
@@ -763,12 +818,22 @@ and an instruction rubric.
 List sections of an exam, ordered by `position`. Non-privileged users only see sections of published exams. Response uses the list envelope from §10.10 (`items`).
 
 #### POST /api/exams/{exam_id}/sections (admin only)
-Create a new section under an exam. If `position` is omitted, the server assigns `MAX(position)+1`.
+Create a new section under an exam. If `position` is omitted, the server
+assigns `MAX(position)+1`. `type` is an optional rendering hint (see §3.5)
+— set it when the section is homogeneous (e.g. "all matching" for a
+Listening Part 5).
+
+**Nested mode**: body may include `questions[]` (up to 100). When supplied,
+the section and all child questions are created in one transaction with
+server-assigned question positions 1..N (in array order). Gap markers in
+`materials` are validated against the resulting question positions.
+Response carries `data.createdCounts: { questions: N }`.
 
 **Request:**
 ```json
 {
   "partLabel": "Part 5",
+  "type": "fill_blank",
   "instructions": "For each question, write the correct answer. Write ONE word for each gap.",
   "materials": [
     {
@@ -782,11 +847,33 @@ Create a new section under an exam. If `position` is omitted, the server assigns
       "content": "That sounds great! {{gap:5}} would you like to go?..."
     }
   ],
-  "audioUrl": null,
   "maxAudioPlays": null,
   "position": 5
 }
 ```
+
+**Matching section example** (KET Listening Part 5 — 5 questions sharing one
+A–H option pool, rendered as a table; audio lives in `materials`):
+```json
+{
+  "partLabel": "Part 5",
+  "type": "matching",
+  "instructions": "You will hear Larry talking to Cara about a friend's birthday. What present will each person give?",
+  "materials": [
+    {
+      "type": "audio",
+      "label": "Track 1",
+      "url": "https://[project].supabase.co/storage/v1/object/sign/audio/ket-l-p5.mp3"
+    }
+  ],
+  "maxAudioPlays": 3
+}
+```
+
+After creating this section, POST 5 `matching` questions to it (Q21–Q25 in
+the printed paper). Each carries its own copy of the 8 A–H options; FE
+detects the layout via `section.type === "matching"`, not by comparing
+options across questions.
 
 **Response (201):** `{ "status": 201, "data": { "section": { ... } } }`.
 
@@ -805,6 +892,26 @@ become unreachable through the published exam tree.
 
 #### DELETE /api/sections/{section_id}/hard (admin only)
 Hard-delete a section. `CASCADE`s through questions, answers, and per-section attempt state.
+
+#### PUT /api/sections/batch (admin only)
+Update up to 100 sections in one transaction. Body:
+```json
+{
+  "updates": [
+    {"id": "uuid-1", "instructions": "new"},
+    {"id": "uuid-2", "partLabel": "Part 2", "position": 2}
+  ]
+}
+```
+Each item must include `id`; remaining fields follow `SectionUpdate`
+semantics. Any invalid item or missing id rolls back the whole batch
+(404). Returns `{ status: 200, data: { items: [SectionView, ...] } }`.
+
+#### POST /api/sections/batch-delete (admin only)
+Delete up to 100 sections in one transaction. Body: `{ "ids": ["uuid-1", ...] }`.
+Soft delete by default. Pass `?hard=true` for hard delete (CASCADEs
+through questions/answers/state). Any missing id rolls back the whole
+batch (404). Returns `204 No Content`.
 
 ### 4.6 Question Endpoints
 
@@ -828,6 +935,31 @@ Hard-delete a question. `CASCADE`s through answers.
 
 #### POST /api/sections/{section_id}/questions/import (admin only)
 Import questions from Excel. ⏳ **Deferred to B3.4b** — column format pending client confirmation.
+
+#### PUT /api/questions/batch (admin only)
+Update up to 100 questions in one transaction. Body:
+```json
+{
+  "updates": [
+    {"id": "uuid-1", "points": 2},
+    {
+      "id": "uuid-2",
+      "question_type": "fill_blank",
+      "question_data": {"correct_answers": ["nine"], "case_sensitive": false}
+    }
+  ]
+}
+```
+Each item must include `id`. Changing `question_type` still requires
+supplying matching `question_data` in the same item. Any invalid item or
+missing id rolls back the whole batch (404). Returns
+`{ status: 200, data: { items: [QuestionView, ...] } }`.
+
+#### POST /api/questions/batch-delete (admin only)
+Delete up to 100 questions in one transaction. Body: `{ "ids": ["uuid-1", ...] }`.
+Soft delete by default. Pass `?hard=true` for hard delete (CASCADEs
+through answers). Any missing id rolls back the whole batch (404).
+Returns `204 No Content`.
 
 ### 4.7 Attempt Endpoints
 
@@ -860,9 +992,9 @@ with correct-answer fields stripped from each `question_data`.
           "id": "uuid",
           "position": 1,
           "partLabel": "Part 1",
+          "type": "multiple_choice",
           "instructions": "For each question, choose the correct answer.",
           "materials": [],
-          "audioUrl": null,
           "maxAudioPlays": null,
           "questions": [
             {
@@ -888,11 +1020,17 @@ with correct-answer fields stripped from each `question_data`.
 }
 ```
 
-#### POST /api/attempts/{attempt_id}/sections/{section_id}/audio-play
-Increment the per-section audio play counter on an in-progress attempt. Only
-valid when the section has an `audio_url` and before the attempt is
-submitted. Rejects once `audio_play_count >= sections.max_audio_plays`. The
-`attempt_section_state` row is created lazily on the first call.
+#### POST /api/attempts/{attempt_id}/sections/{section_id}/audio-play?materialIndex=N
+Increment the per-audio play counter for one specific audio material in
+this section. `materialIndex` is the 0-based position of the audio entry
+inside `sections.materials`. Each audio has its **own** counter; all share
+the same cap value (`sections.max_audio_plays`).
+
+The `attempt_section_state` row is upserted on first call; subsequent
+calls atomically `jsonb_set` the counter for that material index.
+
+**Query Params:**
+- `materialIndex` (int, required, ≥0) — index of the audio material.
 
 **Headers:** `Authorization: Bearer <token>` (owner only)
 
@@ -901,15 +1039,17 @@ submitted. Rejects once `audio_play_count >= sections.max_audio_plays`. The
 {
   "status": 200,
   "data": {
+    "materialIndex": 0,
     "audioPlayCount": 2,
-    "maxAudioPlays": 3,
+    "maxPlays": 3,
     "remainingPlays": 1
   }
 }
 ```
 
-**Error Response (403):** `"Not the owner of this attempt"` or `"Audio play limit reached (N)"`.
-**Error Response (400):** `"Attempt already submitted"` or `"Section has no audio"`.
+**Error Response (403):** `"Not the owner of this attempt"` or `"Audio play limit reached (N)"`. Cap-reached rolls back the increment in the same transaction — counter stays at its prior value.
+**Error Response (404):** `"Attempt not found"`, `"Section not found"`, `"Section not part of this attempt"`, or `"Section has no material at index N"`.
+**Error Response (400):** `"Attempt already submitted"` or `"Material at index N is not audio"`.
 
 #### POST /api/attempts/{attempt_id}/submit
 Submit answers and finalize the attempt. Owner only. Grading runs across **all sections** of the exam in one pass.
@@ -1323,7 +1463,7 @@ maichienglish-be/
 │   ├── auth_service.py             # Password reset code lifecycle (B3.6)
 │   ├── user_service.py             # User CRUD + authenticate
 │   ├── exam_service.py             # Exam CRUD (no passage/audio fields — those live on sections)
-│   ├── section_service.py          # Section CRUD; owns materials JSONB + audio_url + max_audio_plays
+│   ├── section_service.py          # Section CRUD; owns materials JSONB (text/image/audio typed blocks) + max_audio_plays
 │   ├── question_service.py         # Scoped to section_id; per-section position
 │   ├── attempt_service.py          # Attempts + grading + per-section audio counter via attempt_section_state
 │   ├── subscription_service.py

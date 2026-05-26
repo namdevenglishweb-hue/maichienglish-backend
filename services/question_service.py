@@ -55,28 +55,13 @@ class _FillBlankData(BaseModel):
     case_sensitive: bool = False
 
 
-class _MatchingData(BaseModel):
-    left: list[str] = Field(..., min_length=1)
-    right: list[str] = Field(..., min_length=1)
-    correct_pairs: list[list[int]] = Field(..., min_length=1)
-
-    @model_validator(mode="after")
-    def _check_pairs(self):
-        for i, pair in enumerate(self.correct_pairs):
-            if len(pair) != 2:
-                raise ValueError(f"correct_pairs[{i}] must have exactly 2 indices")
-            l_idx, r_idx = pair
-            if not (0 <= l_idx < len(self.left)):
-                raise ValueError(f"correct_pairs[{i}]: left index {l_idx} out of range")
-            if not (0 <= r_idx < len(self.right)):
-                raise ValueError(f"correct_pairs[{i}]: right index {r_idx} out of range")
-        return self
-
-
+# `matching` reuses the MC shape: each matching question is one independently-
+# scored row of a shared-options table (KET Listening P5, Reading P2 etc.).
+# The rendering distinction is signaled by `section.type` (plan §3.5/§3.6).
 _VALIDATORS = {
     "multiple_choice": _MultipleChoiceData,
     "fill_blank": _FillBlankData,
-    "matching": _MatchingData,
+    "matching": _MultipleChoiceData,
 }
 
 
@@ -285,6 +270,126 @@ class QuestionService:
             logger.warning("soft_delete_question: question %s not found", question_id)
             raise NotFoundError(f"Question {question_id} not found")
         logger.info("Soft-deleted question %s", question_id)
+
+    # ------------------------------------------------------------------
+    # Bulk operations
+    # ------------------------------------------------------------------
+
+    async def bulk_update_questions(
+        self, updates: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Apply N question patches in one transaction; all-or-nothing.
+
+        Each item must include `id`. Patches use the same whitelist as
+        update_question. Type change still requires matching question_data.
+
+        Raises:
+            ValidationError: missing id, no fields, invalid type/data.
+            NotFoundError: any id missing (entire batch rolled back).
+        """
+        if not updates:
+            raise ValidationError("Empty batch")
+
+        out: list[dict[str, Any]] = []
+        async with self.db.acquire() as conn:
+            async with conn.transaction():
+                for i, item in enumerate(updates):
+                    qid = item.get("id")
+                    if not qid:
+                        raise ValidationError(f"updates[{i}]: missing `id`")
+                    patch = {k: v for k, v in item.items() if k != "id"}
+                    if not patch:
+                        raise ValidationError(f"updates[{i}]: no updatable fields")
+
+                    current = await conn.fetchrow(
+                        f"SELECT {_SELECT_COLS} FROM public.questions "
+                        "WHERE id = $1 AND deleted_at IS NULL",
+                        qid,
+                    )
+                    if not current:
+                        raise NotFoundError(f"Question {qid} not found")
+
+                    new_type = patch.get("question_type", current["question_type"])
+                    if "question_data" in patch:
+                        patch["question_data"] = _validate_question_data(
+                            new_type, patch["question_data"]
+                        )
+                    elif (
+                        "question_type" in patch
+                        and new_type != current["question_type"]
+                    ):
+                        raise ValidationError(
+                            f"updates[{i}]: changing question_type requires "
+                            f"matching question_data"
+                        )
+
+                    allowed = {
+                        "question_type", "question_data", "points", "position",
+                    }
+                    patch = {k: v for k, v in patch.items() if k in allowed}
+                    if not patch:
+                        raise ValidationError(
+                            f"updates[{i}]: no updatable fields after whitelist"
+                        )
+
+                    set_parts: list[str] = []
+                    params: list[Any] = []
+                    for k, v in patch.items():
+                        params.append(json.dumps(v) if k == "question_data" else v)
+                        cast = "::jsonb" if k == "question_data" else ""
+                        set_parts.append(f"{k} = ${len(params)}{cast}")
+                    params.append(qid)
+                    row = await conn.fetchrow(
+                        f"""
+                        UPDATE public.questions
+                        SET {', '.join(set_parts)}
+                        WHERE id = ${len(params)} AND deleted_at IS NULL
+                        RETURNING {_SELECT_COLS}
+                        """,
+                        *params,
+                    )
+                    out.append(_row_to_question(row))
+        logger.info("Bulk-updated %d questions", len(out))
+        return out
+
+    async def bulk_delete_questions(
+        self, ids: list[str], hard: bool = False
+    ) -> None:
+        """Delete N questions in one transaction. Soft by default.
+
+        Raises:
+            ValidationError: empty list.
+            NotFoundError: any id missing (entire batch rolled back).
+        """
+        if not ids:
+            raise ValidationError("Empty batch")
+
+        async with self.db.acquire() as conn:
+            async with conn.transaction():
+                if hard:
+                    result = await conn.execute(
+                        "DELETE FROM public.questions WHERE id = ANY($1::uuid[])",
+                        ids,
+                    )
+                else:
+                    result = await conn.execute(
+                        """
+                        UPDATE public.questions
+                        SET deleted_at = now()
+                        WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL
+                        """,
+                        ids,
+                    )
+                affected = int(result.split()[-1]) if result else 0
+                if affected != len(ids):
+                    raise NotFoundError(
+                        f"Some question IDs were not found "
+                        f"({affected}/{len(ids)} matched)"
+                    )
+        logger.info(
+            "Bulk-%s-deleted %d questions",
+            "hard" if hard else "soft", len(ids),
+        )
 
     async def hard_delete_question(self, question_id: str) -> None:
         async with self.db.acquire() as conn:

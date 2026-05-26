@@ -2,6 +2,9 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from api.common import MAX_BATCH_SIZE
+from api.sections.schemas import SectionCreate
+
 LevelLiteral = Literal["primary", "secondary", "KET", "PET", "IELTS"]
 SkillLiteral = Literal["listening", "reading"]
 
@@ -9,8 +12,9 @@ SkillLiteral = Literal["listening", "reading"]
 class ExamCreate(BaseModel):
     """Body for POST /api/exams (admin only).
 
-    Passage / audio / replay caps belong to **sections**, not exams. Create
-    the exam first, then add sections via POST /api/exams/{eid}/sections.
+    Optionally accepts a `sections` array; each section may itself nest
+    `questions`. When `sections` is provided, the whole tree is created in
+    one transaction with server-assigned positions (1..N in array order).
     """
 
     title: str = Field(..., min_length=1, description="Exam title shown in UI")
@@ -18,6 +22,18 @@ class ExamCreate(BaseModel):
     skill: SkillLiteral = Field(..., description="listening or reading")
     duration_minutes: int = Field(default=45, gt=0, description="Time limit in minutes")
     description: Optional[str] = None
+    sections: Optional[list[SectionCreate]] = Field(
+        default=None,
+        max_length=MAX_BATCH_SIZE,
+        description=(
+            "Optional inline sections. When provided, the exam, every "
+            "section, and every question (nested under each section) are "
+            "created in one transaction. Section positions are assigned "
+            "1..N in array order; same rule for questions within each "
+            "section. Gap markers in each section's materials are validated "
+            "against that section's question positions."
+        ),
+    )
 
     model_config = {
         "json_schema_extra": {
@@ -62,9 +78,15 @@ class ExamSectionPreview(BaseModel):
     id: str
     position: int
     partLabel: Optional[str] = None
+    type: Optional[Literal["multiple_choice", "fill_blank", "matching"]] = Field(
+        default=None,
+        description="FE rendering hint; 'matching' signals shared-options table layout.",
+    )
     instructions: Optional[str] = None
-    materials: list[dict[str, Any]] = Field(default_factory=list)
-    audioUrl: Optional[str] = None
+    materials: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Typed blocks (text/image/audio). Audio entries carry `url`.",
+    )
     maxAudioPlays: Optional[int] = None
     questions: list[ExamQuestionPreview] = Field(default_factory=list)
 
@@ -96,6 +118,14 @@ class ExamView(BaseModel):
 
 class ExamResponseData(BaseModel):
     exam: ExamView
+    createdCounts: Optional[dict[str, int]] = Field(
+        default=None,
+        description=(
+            "Populated only when the exam was created via nested POST that "
+            "also inserted sections/questions. Shape: "
+            "{'sections': int, 'questions': int}."
+        ),
+    )
 
 
 class ExamResponse(BaseModel):
