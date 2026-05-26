@@ -113,7 +113,7 @@ models/
 ├── user.py                          # ⏳ Profile model (matches §3.1 profiles table)
 ├── subscription.py                  # ⏳ Subscription model (matches §3.2)
 ├── exam.py                          # ⏳ Exam model with deleted_at (matches §3.4)
-├── section.py                       # ⏳ Section model with materials JSONB + audio_url + deleted_at (matches §3.5)
+├── section.py                       # ⏳ Section model with materials JSONB (typed blocks) + max_audio_plays + deleted_at (matches §3.5)
 ├── question.py                      # ⏳ Question model with question_data JSONB + section_id + deleted_at (matches §3.6)
 ├── attempt.py                       # ⏳ Attempt model (matches §3.7)
 ├── attempt_section_state.py         # ⏳ Per-section progress + per-audio counter map (matches §3.8)

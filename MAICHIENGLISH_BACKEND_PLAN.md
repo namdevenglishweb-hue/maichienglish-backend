@@ -181,7 +181,7 @@ maichienglish-be/
   - multiple_choice options accept text and/or image_url (for picture MC)
   - `matching` reuses MC data shape (`{stem, options, correct_index}`) — each matching question is one independently-scored row of a shared-options table. The `section.type` field is the rendering signal (no client-side detection of "siblings with identical options").
 - [ ] Excel import for questions (deferred to B3.4b — column format pending client confirmation)
-- [x] Audio file management (storage buckets created, `sections.audio_url`, per-section play counter enforcing `sections.max_audio_plays`)
+- [x] Audio file management (storage buckets created, audio lives as `{type:"audio", url}` blocks inside `sections.materials`; per-audio play counters tracked in `attempt_section_state.audio_play_counts` jsonb map; cap value section-wide via `sections.max_audio_plays`)
 
 #### Attempt Management
 - [x] Start exam attempt
@@ -453,7 +453,7 @@ Create two buckets in the new Supabase project:
 
 | Bucket | Purpose |
 |--------|---------|
-| `audio` | Listening exam audio files (`.mp3`, `.m4a`) — referenced by `exams.audio_url` |
+| `audio` | Listening exam audio files (`.mp3`, `.m4a`) — referenced by `{type:"audio", url}` blocks inside `sections.materials` |
 | `images` | Image assets for questions (`.png`, `.jpg`, `.webp`) — referenced inside `questions.question_data` |
 
 ---
@@ -847,21 +847,25 @@ Response carries `data.createdCounts: { questions: N }`.
       "content": "That sounds great! {{gap:5}} would you like to go?..."
     }
   ],
-  "audioUrl": null,
   "maxAudioPlays": null,
   "position": 5
 }
 ```
 
 **Matching section example** (KET Listening Part 5 — 5 questions sharing one
-A–H option pool, rendered as a table):
+A–H option pool, rendered as a table; audio lives in `materials`):
 ```json
 {
   "partLabel": "Part 5",
   "type": "matching",
   "instructions": "You will hear Larry talking to Cara about a friend's birthday. What present will each person give?",
-  "materials": [],
-  "audioUrl": "https://[project].supabase.co/storage/v1/object/sign/audio/ket-l-p5.mp3",
+  "materials": [
+    {
+      "type": "audio",
+      "label": "Track 1",
+      "url": "https://[project].supabase.co/storage/v1/object/sign/audio/ket-l-p5.mp3"
+    }
+  ],
   "maxAudioPlays": 3
 }
 ```
@@ -988,9 +992,9 @@ with correct-answer fields stripped from each `question_data`.
           "id": "uuid",
           "position": 1,
           "partLabel": "Part 1",
+          "type": "multiple_choice",
           "instructions": "For each question, choose the correct answer.",
           "materials": [],
-          "audioUrl": null,
           "maxAudioPlays": null,
           "questions": [
             {
@@ -1459,7 +1463,7 @@ maichienglish-be/
 │   ├── auth_service.py             # Password reset code lifecycle (B3.6)
 │   ├── user_service.py             # User CRUD + authenticate
 │   ├── exam_service.py             # Exam CRUD (no passage/audio fields — those live on sections)
-│   ├── section_service.py          # Section CRUD; owns materials JSONB + audio_url + max_audio_plays
+│   ├── section_service.py          # Section CRUD; owns materials JSONB (text/image/audio typed blocks) + max_audio_plays
 │   ├── question_service.py         # Scoped to section_id; per-section position
 │   ├── attempt_service.py          # Attempts + grading + per-section audio counter via attempt_section_state
 │   ├── subscription_service.py

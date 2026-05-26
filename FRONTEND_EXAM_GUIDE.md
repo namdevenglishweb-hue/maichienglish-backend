@@ -48,7 +48,7 @@
 - **Student fetches an exam to take it**: `POST /api/attempts` returns the **full nested tree** with correct answers stripped. Don't fetch the exam separately.
 - **Admin fetches the same tree** for editing: `GET /api/exams/{id}?include=sections`. Correct answers are visible.
 - Question types: `multiple_choice` / `fill_blank` / `matching` — see [§8](#8-question-types-in-detail). All three share the **same** data shape and grading path; `matching` is a **rendering hint** signaled by `section.type === 'matching'`.
-- Listening: each section has its **own** `audioUrl` + `maxAudioPlays`; replay is gated per section, tracked per attempt.
+- Listening: audio lives inside `section.materials` (`type: "audio"` entries with `url`). Each audio has its **own** per-attempt counter, all sharing the section-wide cap value `section.maxAudioPlays`.
 - Passages may contain `{{gap:N}}` markers — replace with input boxes bound to the question at `position = N` within that section.
 - **Display question numbers** (Q1 … Q70) are computed at render time from section position + question index — see [§10](#10-display-question-numbering). Stored `question.position` restarts at 1 per section.
 
@@ -104,8 +104,8 @@ Exam
  └─ sections[]                       (Part 1, Part 2, ...)
      ├─ id, position, partLabel, instructions
      ├─ type                         (rendering hint — see below; nullable)
-     ├─ materials[]                  (passage entries — see §9)
-     ├─ audioUrl, maxAudioPlays      (listening only)
+     ├─ materials[]                  (typed blocks: text / image / audio — see §9)
+     ├─ maxAudioPlays                (section-wide cap value, applied per audio material)
      └─ questions[]
          ├─ id, position             (per-section; referenced by {{gap:N}})
          ├─ questionType             (multiple_choice | fill_blank | matching)
@@ -280,8 +280,10 @@ const result = await api<{section: Section; createdCounts: {questions: number}}>
     body: JSON.stringify({
       partLabel: 'Part 2',
       type: 'matching',
-      audioUrl: 'https://...mp3',
       maxAudioPlays: 3,
+      materials: [
+        {type: 'audio', label: 'Track 1', url: 'https://...mp3'},
+      ],
       questions: [/* up to 100 matching questions */],
     }),
   },
@@ -384,16 +386,19 @@ const start = await api<AttemptStart>('/api/attempts', {
 const {attemptId, exam, startedAt} = start;
 // exam.sections[*].questions[*].questionData has NO correct_index/correct_answers/correct_pairs
 
-// 3. (Listening only) Play the audio. Each play hits the server to bump the counter.
+// 3. (Listening only) Play each audio material. Each play hits the server
+//    to bump that audio's own counter (cap shared via section.maxAudioPlays).
 for (const section of exam.sections) {
-  if (!section.audioUrl) continue;
-  // before <audio src={section.audioUrl}>.play():
-  const play = await api<AudioPlay>(
-    `/api/attempts/${attemptId}/sections/${section.id}/audio-play`,
-    {method: 'POST'},
-  );
-  // play = {audioPlayCount, maxAudioPlays, remainingPlays}
-  // 403 with "Audio play limit reached" if past cap.
+  section.materials.forEach(async (m, materialIndex) => {
+    if (m.type !== 'audio') return;
+    // before <audio src={m.url}>.play():
+    const play = await api<AudioPlay>(
+      `/api/attempts/${attemptId}/sections/${section.id}/audio-play?materialIndex=${materialIndex}`,
+      {method: 'POST'},
+    );
+    // play = {materialIndex, audioPlayCount, maxPlays, remainingPlays}
+    // 403 with "Audio play limit reached" if past cap (counter rolls back).
+  });
 }
 
 // 4. Collect answers in memory as the student progresses.
@@ -807,7 +812,7 @@ Errors come back as `{"detail": "<msg>"}`. The HTTP status is what you branch on
 
 | Status | Meaning | Common causes |
 |---|---|---|
-| `400` | Bad request | `Attempt already submitted`, `No fields to update`, `Section has no audio`, `Cannot publish exam with no active questions`, Pydantic validation errors |
+| `400` | Bad request | `Attempt already submitted`, `No fields to update`, `Material at index N is not audio`, `Cannot publish exam with no active questions`, Pydantic validation errors |
 | `401` | Unauthorized | Missing/expired/invalid bearer token. Refresh via `/api/auth/refresh` |
 | `403` | Forbidden | RBAC denial, tier limit, audio cap, non-owner |
 | `404` | Not found | Exam/section/question/attempt doesn't exist *or* exists-but-unpublished and caller isn't privileged (we deliberately conflate to avoid leaking existence) |
@@ -1022,7 +1027,7 @@ A: 422s are FastAPI's auto-generated validation errors — they carry per-field 
 A: The login response returns `token.expiresIn` in seconds. Track `Date.now() + expiresIn * 1000` and refresh ~1 minute before expiry, or refresh reactively on any 401.
 
 **Q: Where do I get the audio file URLs?**
-A: Backend returns ready-to-use URLs in `section.audioUrl`. They point at Supabase Storage in the `audio` bucket. Pass straight to `<audio src={...}>`.
+A: Inside `section.materials`, at every entry where `type === 'audio'`. The `url` field is ready-to-use (Supabase Storage signed URL from the `audio` bucket). Pass straight to `<audio src={...}>`. Always call `POST /api/attempts/{aid}/sections/{sid}/audio-play?materialIndex=<index>` BEFORE `.play()` to gate against the cap.
 
 **Q: My admin form lets editors set `{{gap:N}}` markers — should I validate alignment client-side?**
 A: Recommended. Parse all `{{gap:N}}` markers in materials → check each N maps to an existing `questions[].position` in the section. Catch mismatches before save.
