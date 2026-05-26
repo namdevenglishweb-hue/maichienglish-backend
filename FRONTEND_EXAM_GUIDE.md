@@ -29,7 +29,7 @@
 6. [Student flow — take an exam](#6-student-flow--take-an-exam)
 7. [Parent flow — view children's attempts](#7-parent-flow--view-childrens-attempts)
 8. [Question types in detail](#8-question-types-in-detail)
-9. [`materials` and `{{gap:N}}` rendering](#9-materials-and-gapn-rendering)
+9. [`materials` — typed content blocks](#9-materials--typed-content-blocks)
 10. [Display question numbering](#10-display-question-numbering)
 11. [Listening audio replay cap](#11-listening-audio-replay-cap)
 12. [Mid-attempt vs post-submit stripping](#12-mid-attempt-vs-post-submit-stripping)
@@ -305,68 +305,129 @@ await api(`/api/questions/${qid}`, {
 await api(`/api/sections/${sid}`, {method: 'DELETE'});
 ```
 
-### 5.3 Batch update / delete
+### 5.3 Endpoint summary (admin)
 
-For admin tools that mutate many rows (e.g. "renumber all sections", "delete 10 selected questions"), use the batch endpoints. Up to **100 items** per call, **all-or-nothing transaction** — one bad id rolls back the whole batch.
+Successful responses: `200 OK` for GET/PUT, `201 Created` for POST that creates a resource, `204 No Content` for DELETE. Auth: every endpoint requires `Authorization: Bearer <token>`. Admin-only endpoints additionally check `role === 'admin'`. Common errors are listed in [§14](#14-error-responses-and-status-codes).
 
-```ts
-// Batch update questions
-await api<{items: Question[]}>('/api/questions/batch', {
-  method: 'PUT',
-  body: JSON.stringify({
-    updates: [
-      {id: 'uuid-1', points: 2},
-      {id: 'uuid-2', question_type: 'fill_blank',
-       question_data: {correct_answers: ['nine'], case_sensitive: false}},
-    ],
-  }),
-});
-
-// Batch soft-delete sections
-await api('/api/sections/batch-delete', {
-  method: 'POST',
-  body: JSON.stringify({ids: ['uuid-1', 'uuid-2']}),
-});
-
-// Batch hard-delete (CASCADEs)
-await api('/api/sections/batch-delete?hard=true', {
-  method: 'POST',
-  body: JSON.stringify({ids: ['uuid-1', 'uuid-2']}),
-});
-```
-
-Same shape for `/api/questions/batch-delete`.
-
-**Endpoint summary (admin)**
-
-| Method | Path | Purpose |
-|---|---|---|
-| `GET`    | `/api/exams?published=&level=&skill=` | List exams (admin can include unpublished) |
-| `GET`    | `/api/exams/{id}?include=sections` | Get exam, optionally with full section tree |
-| `POST`   | `/api/exams` | Create exam (optionally with nested sections+questions) |
-| `PUT`    | `/api/exams/{id}` | Patch exam fields |
-| `POST`   | `/api/exams/{id}/publish` | Publish (gated) |
-| `POST`   | `/api/exams/{id}/unpublish` | Unpublish |
-| `DELETE` | `/api/exams/{id}` | Soft-delete |
-| `DELETE` | `/api/exams/{id}/hard` | Hard-delete (CASCADE) |
-| `GET`    | `/api/exams/{eid}/sections` | List sections of an exam |
-| `POST`   | `/api/exams/{eid}/sections` | Create section (optionally with nested questions) |
-| `GET`    | `/api/sections/{sid}?include=questions` | Get section, optionally with questions |
-| `PUT`    | `/api/sections/{sid}` | Patch section |
-| `DELETE` | `/api/sections/{sid}` | Soft-delete section |
-| `DELETE` | `/api/sections/{sid}/hard` | Hard-delete section (CASCADE) |
-| `PUT`    | `/api/sections/batch` | Batch update up to 100 sections (one txn) |
-| `POST`   | `/api/sections/batch-delete[?hard=true]` | Batch delete up to 100 sections |
-| `GET`    | `/api/sections/{sid}/questions` | List questions of a section |
-| `POST`   | `/api/sections/{sid}/questions` | Create question |
-| `GET`    | `/api/questions/{qid}` | Get a single question |
-| `PUT`    | `/api/questions/{qid}` | Patch question |
-| `DELETE` | `/api/questions/{qid}` | Soft-delete question |
-| `DELETE` | `/api/questions/{qid}/hard` | Hard-delete question (CASCADE) |
-| `PUT`    | `/api/questions/batch` | Batch update up to 100 questions (one txn) |
-| `POST`   | `/api/questions/batch-delete[?hard=true]` | Batch delete up to 100 questions |
+| Method | Path | Body | Response | Detailed in |
+|---|---|---|---|---|
+| `GET`    | `/api/exams` | — | `{items: ExamView[]}` | [§5.4 query params](#54-query-parameters) |
+| `GET`    | `/api/exams/{id}` | — | `{exam: ExamView}` (optional nested `sections`) | [§5.4 `?include=`](#54-query-parameters) |
+| `POST`   | `/api/exams` | `ExamCreate` (optional nested `sections[]` → `questions[]`) | `{exam: ExamView}` + optional `createdCounts` | [§5.1 nested example](#51-nested-create-fastest-path-for-a-full-exam) |
+| `PUT`    | `/api/exams/{id}` | `ExamUpdate` (partial) | `{exam: ExamView}` | [§5.2 granular CRUD](#52-granular-crud--single-record-edits) |
+| `POST`   | `/api/exams/{id}/publish` | — | `{exam: ExamView}` | requires ≥1 section + ≥1 active question → else `400` |
+| `POST`   | `/api/exams/{id}/unpublish` | — | `{exam: ExamView}` | hides from students; data preserved |
+| `DELETE` | `/api/exams/{id}` | — | `204` | soft delete; sets `deleted_at`, forces `is_published=false` |
+| `DELETE` | `/api/exams/{id}/hard` | — | `204` | hard delete; CASCADEs sections/questions/attempts/answers |
+| `GET`    | `/api/exams/{eid}/sections` | — | `{items: SectionView[]}` | — |
+| `POST`   | `/api/exams/{eid}/sections` | `SectionCreate` (optional nested `questions[]`) | `{section: SectionView}` + optional `createdCounts` | [§5.1 nested example](#51-nested-create-fastest-path-for-a-full-exam) |
+| `GET`    | `/api/sections/{sid}` | — | `{section: SectionView}` (optional nested `questions`) | [§5.4 `?include=`](#54-query-parameters) |
+| `PUT`    | `/api/sections/{sid}` | `SectionUpdate` (partial) | `{section: SectionView}` | — |
+| `DELETE` | `/api/sections/{sid}` | — | `204` | soft delete |
+| `DELETE` | `/api/sections/{sid}/hard` | — | `204` | hard delete; CASCADEs questions/answers/state |
+| `PUT`    | `/api/sections/batch` | `SectionBatchUpdateRequest` (≤100 items) | `{items: SectionView[]}` | [§5.5 batch ops](#55-batch-operations--full-bodies) |
+| `POST`   | `/api/sections/batch-delete` | `{ids: string[]}` (≤100) | `204` | [§5.5 batch ops](#55-batch-operations--full-bodies), `?hard=true` opt |
+| `GET`    | `/api/sections/{sid}/questions` | — | `{items: QuestionView[]}` | — |
+| `POST`   | `/api/sections/{sid}/questions` | `QuestionCreate` | `{question: QuestionView}` | [§8 question types](#8-question-types-in-detail) |
+| `GET`    | `/api/questions/{qid}` | — | `{question: QuestionView}` | — |
+| `PUT`    | `/api/questions/{qid}` | `QuestionUpdate` (partial) | `{question: QuestionView}` | changing `question_type` requires new `question_data` |
+| `DELETE` | `/api/questions/{qid}` | — | `204` | soft delete |
+| `DELETE` | `/api/questions/{qid}/hard` | — | `204` | hard delete; CASCADEs answers |
+| `PUT`    | `/api/questions/batch` | `QuestionBatchUpdateRequest` (≤100 items) | `{items: QuestionView[]}` | [§5.5 batch ops](#55-batch-operations--full-bodies) |
+| `POST`   | `/api/questions/batch-delete` | `{ids: string[]}` (≤100) | `204` | [§5.5 batch ops](#55-batch-operations--full-bodies), `?hard=true` opt |
 
 > **Note on field naming**: request bodies for `POST/PUT /api/exams` and `POST /api/sections/{sid}/questions` currently use **snake_case** (`question_type`, `question_data`, `duration_minutes`), while bodies for `POST/PUT /api/sections` and all response payloads use **camelCase**. This will be normalized — for now, follow the examples in this doc.
+
+### 5.4 Query parameters
+
+| Param | Endpoints | Allowed values | Behavior |
+|---|---|---|---|
+| `level` | `GET /api/exams` | `primary`, `secondary`, `KET`, `PET`, `IELTS` | Filter exams by level. Omit → all levels. |
+| `skill` | `GET /api/exams` | `listening`, `reading` | Filter exams by skill. Omit → all skills. |
+| `published` | `GET /api/exams` | `true`, `false` | **Admin/teacher only** — force-filter unpublished. Students/parents always see `published=true` regardless of what they send. |
+| `include` | `GET /api/exams/{id}` | `sections` | When `sections`, embed `data.exam.sections[]` with nested `questions[]`. Correct-answer fields stripped for non-privileged callers. Omit → only top-level exam fields. |
+| `include` | `GET /api/sections/{id}` | `questions` | When `questions`, embed `data.section.questions[]`. Same strip rule. |
+| `materialIndex` | `POST /api/attempts/{aid}/sections/{sid}/audio-play` | int ≥ 0 | **Required**. 0-based index of the audio material inside `section.materials`. Each audio has its own counter; the cap value is shared via `section.maxAudioPlays`. |
+| `hard` | `POST /api/sections/batch-delete`, `POST /api/questions/batch-delete` | `true`, `false` (default) | When `true`, performs hard delete (CASCADE). Default soft delete. |
+
+Multiple values: `include` accepts comma-separated (`?include=sections,foo`) — currently only `sections` / `questions` are recognized; unknown tokens are ignored silently.
+
+### 5.5 Batch operations — full bodies
+
+All four batch endpoints are **all-or-nothing transactions**: if any item fails validation or its target ID doesn't exist, the whole batch rolls back with a 4xx — no partial application. Cap: **100 items per request**, exceeding returns `422`.
+
+#### `PUT /api/sections/batch`
+
+```jsonc
+// Request body
+{
+  "updates": [
+    {"id": "uuid-1", "instructions": "Updated rubric"},
+    {"id": "uuid-2", "partLabel": "Part 2", "position": 2, "type": "matching"},
+    {"id": "uuid-3", "maxAudioPlays": 2}
+  ]
+}
+```
+
+Each item: `id` (required, UUID) + any subset of `SectionUpdate` fields (`partLabel`, `type`, `instructions`, `materials`, `maxAudioPlays`, `position`). Items with no patch fields are rejected.
+
+**Response 200:**
+```jsonc
+{
+  "status": 200,
+  "data": { "items": [/* updated SectionView[] in input order */] }
+}
+```
+
+**Errors:**
+- `404` — any `id` doesn't exist or is soft-deleted → whole batch rolls back.
+- `400` — any item fails validation (e.g. invalid `materials` shape) → whole batch rolls back, `detail` names the offending index.
+- `422` — body shape invalid (more than 100 items, missing `updates` key, etc.).
+
+#### `POST /api/sections/batch-delete[?hard=true]`
+
+```jsonc
+// Request body
+{"ids": ["uuid-1", "uuid-2", "uuid-3"]}
+```
+
+- Default (no query): **soft** delete (sets `deleted_at`).
+- `?hard=true`: **hard** delete (DB `DELETE` row, CASCADEs through questions/answers/attempt state).
+
+**Response:** `204 No Content`.
+
+**Errors:**
+- `404` — any `id` doesn't exist (soft delete) or is already gone (hard delete) → whole batch rolls back.
+
+#### `PUT /api/questions/batch`
+
+```jsonc
+// Request body
+{
+  "updates": [
+    {"id": "uuid-1", "points": 2},
+    {
+      "id": "uuid-2",
+      "question_type": "fill_blank",
+      "question_data": {"correct_answers": ["nine"], "case_sensitive": false}
+    }
+  ]
+}
+```
+
+Each item: `id` + any subset of `QuestionUpdate` fields. **Changing `question_type` requires also sending a matching `question_data` in the same item** (else `400`).
+
+**Response 200:** `{status: 200, data: {items: QuestionView[]}}` in input order.
+
+#### `POST /api/questions/batch-delete[?hard=true]`
+
+Same shape and semantics as section batch-delete.
+
+```jsonc
+{"ids": ["uuid-1", "uuid-2"]}
+```
+
+Hard delete CASCADEs through `answers`.
 
 ---
 
@@ -435,13 +496,87 @@ const detail = await api<AttemptDetail>(`/api/attempts/${attemptId}`);
 
 ## 7. Parent flow — view children's attempts
 
-A parent never takes an exam (`POST /api/attempts` returns 403 for `role=parent`). They only view their linked children's attempts.
+A parent never takes an exam (`POST /api/attempts` returns 403 for `role=parent`). They only view their linked children's attempts. The router enforces `role === 'parent'` at the package level — students/admins calling these endpoints get `403`.
 
-| Method | Path | Purpose |
-|---|---|---|
-| `GET` | `/api/parents/me/children` | List students linked to the parent |
-| `GET` | `/api/parents/me/children/{sid}/attempts` | Child's attempt history |
-| `GET` | `/api/parents/me/children/{sid}/attempts/{aid}` | Single attempt detail (same shape as student detail) |
+| Method | Path | Body | Response |
+|---|---|---|---|
+| `GET` | `/api/parents/me/children` | — | `{items: ChildView[]}` |
+| `GET` | `/api/parents/me/children/{student_id}/attempts` | — | `{items: AttemptHistoryItem[]}` |
+| `GET` | `/api/parents/me/children/{student_id}/attempts/{attempt_id}` | — | `AttemptDetail` (same shape as student `GET /api/attempts/{id}`) |
+
+### 7.1 List linked children
+
+```http
+GET /api/parents/me/children
+Authorization: Bearer <parent token>
+```
+
+```jsonc
+// Response 200
+{
+  "status": 200,
+  "data": {
+    "items": [
+      {
+        "id": "uuid-of-student-1",
+        "email": "student1@example.com",
+        "fullName": "Nguyen Van B",
+        "phone": "0909876543",
+        "createdAt": "2026-05-15T10:30:00Z"
+      },
+      // ... more children if linked
+    ]
+  }
+}
+```
+
+Empty list if the parent has no linked students. Use this to populate a "select child" dropdown before showing their attempts.
+
+### 7.2 List a child's attempts
+
+```http
+GET /api/parents/me/children/{student_id}/attempts
+Authorization: Bearer <parent token>
+```
+
+Returns the same shape as `GET /api/attempts/history` — newest first, capped at 100. If `student_id` is not linked to this parent → `403`.
+
+```jsonc
+// Response 200
+{
+  "status": 200,
+  "data": {
+    "items": [
+      {
+        "id": "uuid-of-attempt",
+        "examId": "uuid-of-exam",
+        "examTitle": "KET Reading Practice 01",
+        "examLevel": "KET",
+        "examSkill": "reading",
+        "score": 8.5,
+        "totalPoints": 10,
+        "percentage": 85,
+        "timeSpentSeconds": 1800,
+        "startedAt": "2026-05-12T10:00:00Z",
+        "submittedAt": "2026-05-12T10:30:00Z"
+      }
+    ]
+  }
+}
+```
+
+### 7.3 Get a specific attempt for a child
+
+```http
+GET /api/parents/me/children/{student_id}/attempts/{attempt_id}
+Authorization: Bearer <parent token>
+```
+
+Same response shape as `GET /api/attempts/{id}` (see [§6 step 6](#6-student-flow--take-an-exam)) — `data.attempt`, `data.exam` (top-level metadata only), and `data.answers[]` flat list grouped by section position. Correct-answer fields are visible because attempts viewable by parents are always submitted ones.
+
+**Errors:**
+- `403 "Forbidden"` — `student_id` is not a child of this parent (or `role !== 'parent'`).
+- `404 "Attempt not found"` — attempt id doesn't exist OR belongs to a student not linked to this parent (we conflate to avoid leaking existence).
 
 ---
 
