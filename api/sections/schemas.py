@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 from api.common import MAX_BATCH_SIZE
 from api.questions.schemas import QuestionCreate
 
-SectionTypeLiteral = Literal["multiple_choice", "fill_blank", "matching"]
+SectionTypeLiteral = Literal["multiple_choice", "fill_blank", "matching", "multiple_choice_shared"]
 
 
 class TextMaterial(BaseModel):

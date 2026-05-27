@@ -119,7 +119,7 @@ Exam
 |---|---|
 | `level` | `primary`, `secondary`, `KET`, `PET`, `IELTS` |
 | `skill` | `listening`, `reading` |
-| `section.type` | `multiple_choice`, `fill_blank`, `matching`, or `null` |
+| `section.type` | `multiple_choice`, `fill_blank`, `matching`, `multiple_choice_shared`, or `null` |
 | `questionType` | `multiple_choice`, `fill_blank`, `matching` |
 
 **Identity** — all IDs are UUID strings.
@@ -128,8 +128,13 @@ Exam
 
 **`section.type` — the rendering signal** — same enum as `questionType`. Set it when every question in the section is the same type and you want the FE to pick a section-wide layout:
 - `'multiple_choice'` or `'fill_blank'` → vertical list, render each question independently
-- `'matching'` → **shared-options table**: all questions render as rows under one shared option header (KET Listening Part 5, Reading Part 2 campsites). Each row is still a separate scoring item.
+- `'matching'` → **shared-options table (many options)**: stems × options A–H, rendered as large table (KET Listening P5 "connect/nối" — 5 stems × 8 options)
+- `'multiple_choice_shared'` → **shared-options table (few options)**: compact table, several MC questions sharing the same 2–4 options (KET Reading P2 campsites — 7 stems × 3 options A/B/C). Data shape identical to MC; only layout differs.
 - `null` → mixed or no preference; FE falls back to rendering each question on its own
+
+**`matching` vs `multiple_choice_shared`**: both render as a shared-options table, both use MC data shape (`{stem, options, correct_index}`). The distinction is semantic + layout density:
+- `matching` = "nối" — typically many options (5–8), think drag-and-drop / letter-picking
+- `multiple_choice_shared` = "chọn" — typically few options (2–4), think radio columns
 
 `type` is a **soft hint** — the server doesn't enforce that questions within a typed section actually match. Treat it as guidance, not a guarantee.
 
@@ -976,6 +981,7 @@ Drop-in for a TS project. These mirror the Pydantic schemas exactly.
 export type Level = 'primary' | 'secondary' | 'KET' | 'PET' | 'IELTS';
 export type Skill = 'listening' | 'reading';
 export type QuestionType = 'multiple_choice' | 'fill_blank' | 'matching';
+export type SectionType = QuestionType | 'multiple_choice_shared';
 export type Role = 'student' | 'teacher' | 'admin' | 'parent';
 export type Tier = 'free' | 'basic' | 'pro' | 'ultra';
 
@@ -1033,9 +1039,12 @@ export interface Section {
   id: string;
   position: number;
   partLabel: string | null;
-  /** Rendering hint — when 'matching', render this section as a single
-   *  shared-options table; otherwise render each question independently. */
-  type: QuestionType | null;
+  /** Rendering hint:
+   *  'matching' → shared-options table (many options, connect/nối)
+   *  'multiple_choice_shared' → compact shared-header table (few options)
+   *  'multiple_choice' / 'fill_blank' → vertical list
+   *  null → mixed / default */
+  type: SectionType | null;
   instructions: string | null;
   materials: Material[];
   /** Section-wide cap value applied INDEPENDENTLY to each audio material. */

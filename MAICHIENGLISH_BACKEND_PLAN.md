@@ -305,12 +305,18 @@ one of those block types — there's no separate `audio_url` column.
   **independently** to every audio material in this section. Counters are
   per-material but the cap value is shared (e.g. `max=3` and 2 audios → each
   audio can be played up to 3 times independently). Null = unlimited.
-- `type` is a **rendering hint** for the frontend. Same enum as
-  `questions.question_type`. Tells the UI whether to render the section as a
-  vertical list (`multiple_choice`, `fill_blank`) or a shared-options table
-  (`matching` — see §3.6). Nullable: leave `NULL` for sections with mixed or
+- `type` is a **rendering hint** for the frontend. Tells the UI which layout
+  to use for this section. Nullable: leave `NULL` for sections with mixed or
   no question types. Not enforced against actual question types in the
   section — soft hint only.
+  - `'multiple_choice'` — vertical list, each question with its own options
+  - `'fill_blank'` — text inputs / gap fills
+  - `'matching'` — shared-options table, many stems × many options A–H
+    (KET Listening P5 "connect/nối" layout — see §3.6)
+  - `'multiple_choice_shared'` — compact shared-header table, many MC
+    questions sharing the same few options (e.g. KET Reading P2: 7
+    questions × 3 options A/B/C). Data shape identical to MC; only
+    rendering differs from standalone `multiple_choice`.
 
 ```sql
 CREATE TABLE public.sections (
@@ -319,7 +325,7 @@ CREATE TABLE public.sections (
   position          int  NOT NULL,                     -- 1-based order within exam
   part_label        text,                              -- e.g. "Part 1"
   type              text                               -- rendering hint; soft
-                      CHECK (type IN ('multiple_choice', 'fill_blank', 'matching')),
+                      CHECK (type IN ('multiple_choice', 'fill_blank', 'matching', 'multiple_choice_shared')),
   instructions      text,                              -- rubric shown to student
   materials         jsonb NOT NULL DEFAULT '[]'::jsonb,  -- typed blocks (text/image/audio)
   max_audio_plays   int,                               -- cap value; null = unlimited

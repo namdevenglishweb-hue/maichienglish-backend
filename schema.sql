@@ -97,7 +97,7 @@ CREATE TABLE public.sections (
   position          int  NOT NULL,
   part_label        text,
   type              text                                          -- FE rendering hint; soft
-                      CHECK (type IN ('multiple_choice', 'fill_blank', 'matching')),
+                      CHECK (type IN ('multiple_choice', 'fill_blank', 'matching', 'multiple_choice_shared')),
   instructions      text,
   materials         jsonb NOT NULL DEFAULT '[]'::jsonb,
   max_audio_plays   int,                                          -- cap value; null = unlimited

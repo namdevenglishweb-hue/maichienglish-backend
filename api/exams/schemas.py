@@ -78,7 +78,7 @@ class ExamSectionPreview(BaseModel):
     id: str
     position: int
     partLabel: Optional[str] = None
-    type: Optional[Literal["multiple_choice", "fill_blank", "matching"]] = Field(
+    type: Optional[Literal["multiple_choice", "fill_blank", "matching", "multiple_choice_shared"]] = Field(
         default=None,
         description="FE rendering hint; 'matching' signals shared-options table layout.",
     )

@@ -133,7 +133,7 @@ _SELECT_COLS = """
     max_audio_plays, created_at, updated_at, deleted_at
 """
 
-_ALLOWED_TYPES = {"multiple_choice", "fill_blank", "matching"}
+_ALLOWED_TYPES = {"multiple_choice", "fill_blank", "matching", "multiple_choice_shared"}
 
 
 class SectionService:
