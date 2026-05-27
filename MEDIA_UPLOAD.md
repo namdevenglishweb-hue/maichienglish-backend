@@ -114,9 +114,9 @@ the database and storage.
 {
   "stem": "How did the woman travel?",
   "options": [
-    {"image_url": "https://xxx.supabase.co/storage/v1/object/public/images/car-abc123.png"},
-    {"image_url": "https://xxx.supabase.co/storage/v1/object/public/images/train-def456.png"},
-    {"image_url": "https://xxx.supabase.co/storage/v1/object/public/images/bus-ghi789.png"}
+    {"image_url": "https://xxx.supabase.co/storage/v1/object/public/images/c3a1b2d4-5678-9abc-def0-111111111111.png"},
+    {"image_url": "https://xxx.supabase.co/storage/v1/object/public/images/d4e5f6a7-1234-5678-abcd-222222222222.png"},
+    {"image_url": "https://xxx.supabase.co/storage/v1/object/public/images/e8f9a0b1-abcd-ef01-2345-333333333333.png"}
   ],
   "correct_index": 2
 }
@@ -139,10 +139,15 @@ the database and storage.
 Two buckets (already created per
 [DEPLOYMENT.md](DEPLOYMENT.md) §3.1):
 
-| Bucket | Content | Access policy |
-|--------|---------|---------------|
-| `audio` | Listening audio files | **public-read** (see [§9](#9-bucket-access-policy)) |
-| `images` | Question/section images | **public-read** |
+| Bucket | Content | Current policy | Required policy |
+|--------|---------|----------------|-----------------|
+| `audio` | Listening audio files | **private** (as initially created) | **public-read** (see [§9](#9-bucket-access-policy)) |
+| `images` | Question/section images | **private** | **public-read** |
+
+> **Action required before first upload**: toggle both buckets from
+> private to public on the Supabase Dashboard. See [§9.2](#92-setup-one-time-supabase-dashboard)
+> for step-by-step. Without this, `publicUrl` returns 400/404 and the
+> whole flow breaks.
 
 ### 3.2 Path convention
 
@@ -256,7 +261,17 @@ Authorization: Bearer <admin-token>
 | 400 | `Cannot determine file extension from filename "noext"` | Missing extension |
 | 503 | `Storage service unavailable` | Supabase API down |
 
-### 5.2 Batch upload (future — not v1)
+### 5.2 Delete file (v1: Dashboard only)
+
+The `StorageService` interface includes a `delete_file()` method (§6.2)
+but **v1 does not expose a DELETE endpoint**. Admins who need to remove
+a file can do so via the Supabase Dashboard → Storage → select file →
+Delete.
+
+A future `DELETE /api/admin/upload/{bucket}/{path}` endpoint may be
+added when orphan cleanup or admin file management becomes a priority.
+
+### 5.3 Batch upload (future — not v1)
 
 For bulk exam import (Excel + zip of audio/images), a batch variant may
 be added later:
@@ -334,7 +349,12 @@ class StorageService(ABC):
 
 
 def get_storage_service() -> StorageService:
-    """Factory — returns the configured provider adapter."""
+    """Factory — returns the configured provider adapter.
+
+    Controlled by STORAGE_PROVIDER env var (default "supabase").
+    Add to config/settings.py:
+        storage_provider: str = Field(default="supabase", alias="STORAGE_PROVIDER")
+    """
     from config.settings import get_settings
     settings = get_settings()
     provider = getattr(settings, 'storage_provider', 'supabase')
@@ -371,7 +391,12 @@ class SupabaseStorageAdapter(StorageService):
         file_id = str(uuid.uuid4())
         path = f"{file_id}{ext}"                        # "a1b2c3d4.mp3"
 
-        # Supabase Storage API: create signed upload URL
+        # Supabase Storage REST API: create signed upload URL.
+        # Docs: https://supabase.com/docs/reference/api (Storage section).
+        # SDK equivalent: storage.from_(bucket).createSignedUploadUrl(path).
+        # NOTE: verify exact endpoint + expiresIn field name against current
+        # Supabase API version during implementation — minor differences
+        # between versions have been observed.
         api_url = f"{self.base_url}/storage/v1/object/upload/sign/{bucket}/{path}"
         async with httpx.AsyncClient() as client:
             resp = await client.post(
@@ -449,6 +474,10 @@ async def request_upload(
 ## 7. Frontend integration guide
 
 ### 7.1 Upload a file
+
+> **Prerequisite**: [§9.2 setup](#92-setup-one-time-supabase-dashboard)
+> must be completed first (buckets toggled to public). Without it, the
+> HEAD verify in step 3 will fail with 400/404.
 
 ```ts
 interface UploadResult {
@@ -618,7 +647,7 @@ The file itself is never seen by the server — only metadata.
 
 | Bucket | Allowed MIME types | File extensions |
 |---|---|---|
-| `audio` | `audio/mpeg`, `audio/mp4`, `audio/x-m4a`, `audio/wav`, `audio/webm` | `.mp3`, `.m4a`, `.wav`, `.webm` |
+| `audio` | `audio/mpeg`, `audio/mp4`, `audio/x-m4a`, `audio/m4a`, `audio/wav`, `audio/webm` | `.mp3`, `.m4a`, `.wav`, `.webm` |
 | `images` | `image/png`, `image/jpeg`, `image/webp` | `.png`, `.jpg`, `.jpeg`, `.webp` |
 
 Reject anything not in the whitelist → `400` with diagnostic.
@@ -647,7 +676,7 @@ round-trips:
 
 ```ts
 const LIMITS = {
-  audio: {maxBytes: 50 * 1024 * 1024, accept: ['audio/mpeg', 'audio/mp4', 'audio/x-m4a', 'audio/wav']},
+  audio: {maxBytes: 50 * 1024 * 1024, accept: ['audio/mpeg', 'audio/mp4', 'audio/x-m4a', 'audio/m4a', 'audio/wav', 'audio/webm']},
   images: {maxBytes: 10 * 1024 * 1024, accept: ['image/png', 'image/jpeg', 'image/webp']},
 };
 
@@ -672,16 +701,24 @@ function validateFile(file: File, bucket: 'audio' | 'images'): string | null {
 
 ### 9.2 Setup (one-time, Supabase Dashboard)
 
-For each bucket (`audio`, `images`):
+Two steps, both required. Without step A the `publicUrl` path returns
+400/404; without step B the RLS layer blocks anonymous reads.
 
-1. Supabase Dashboard → **Storage** → select bucket
-2. **Policies** tab → **New Policy**
-3. Add a `SELECT` (read) policy that allows public access:
+**Step A — toggle bucket to public** (changes URL routing):
+
+For each bucket (`audio`, `images`):
+1. Supabase Dashboard → **Storage** → click the bucket name
+2. Click the **⚙️ settings** icon (or three-dot menu) → **Make public**
+3. Confirm. The `/object/public/{bucket}/...` URL prefix now serves
+   files without auth.
+
+> This is a **change from initial setup** — [DEPLOYMENT.md §3.1](DEPLOYMENT.md)
+> created both buckets as private. Toggle them now.
+
+**Step B — add RLS read policy** (allows `anon`/`authenticated` SELECT):
 
 ```sql
--- Policy name: "Public read access"
--- Applies to: SELECT
--- Target roles: anon, authenticated
+-- Run in Supabase SQL Editor (once per project, covers both buckets):
 CREATE POLICY "Public read access"
   ON storage.objects FOR SELECT
   USING (bucket_id IN ('audio', 'images'));
@@ -789,6 +826,7 @@ starts empty.
 | `api/admin/schemas.py` | Add `UploadRequest` + `UploadResponse` schemas |
 | `api/admin/routes.py` | Add `POST /upload` endpoint |
 | `config/settings.py` | Add `STORAGE_PROVIDER` env var (default `"supabase"`) |
+| `requirements.txt` | Add `httpx>=0.28,<1` (used by Supabase adapter for REST calls) |
 
 **No database migration needed** — upload flow uses existing JSONB fields.
 No new tables.
@@ -819,7 +857,7 @@ interface UploadResult {
 const UPLOAD_LIMITS = {
   audio: {
     maxBytes: 50 * 1024 * 1024,
-    allowedTypes: ['audio/mpeg', 'audio/mp4', 'audio/x-m4a', 'audio/wav', 'audio/webm'],
+    allowedTypes: ['audio/mpeg', 'audio/mp4', 'audio/x-m4a', 'audio/m4a', 'audio/wav', 'audio/webm'],
   },
   images: {
     maxBytes: 10 * 1024 * 1024,
