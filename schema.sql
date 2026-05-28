@@ -146,6 +146,9 @@ CREATE UNIQUE INDEX questions_section_id_position_active_key
 -- ------------------------------------------------------------
 -- attempts — one row per exam attempt. Per-section state (audio plays,
 -- resume) lives on attempt_section_state.
+--   `is_abandoned` (set by POST /attempts/{id}/abandon) finalizes the
+--   attempt with score=0 while freeing the "1 active globally" slot.
+--   The partial unique index below enforces that rule at the DB layer.
 -- ------------------------------------------------------------
 CREATE TABLE public.attempts (
   id                   uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -155,9 +158,16 @@ CREATE TABLE public.attempts (
   total_points         numeric(6,2),
   percentage           numeric(5,2),
   time_spent_seconds   int,
+  is_abandoned         boolean NOT NULL DEFAULT false,
   started_at           timestamptz NOT NULL DEFAULT now(),
   submitted_at         timestamptz
 );
+
+-- At most ONE active (= not submitted, not abandoned) attempt per user.
+-- Race-condition safe: concurrent INSERTs hit the index and one fails.
+CREATE UNIQUE INDEX attempts_one_active_per_user
+  ON public.attempts (user_id)
+  WHERE submitted_at IS NULL AND NOT is_abandoned;
 
 
 -- ------------------------------------------------------------
@@ -183,7 +193,10 @@ CREATE INDEX idx_attempt_section_state_attempt
 
 
 -- ------------------------------------------------------------
--- answers — one row per question per attempt; stores graded result
+-- answers — one row per question per attempt; stores graded result.
+--   UNIQUE (attempt_id, question_id) enables UPSERT semantics used by
+--   PATCH /attempts/{id}/answers (mid-attempt save, is_correct=NULL)
+--   and POST /attempts/{id}/submit (overwrite with graded values).
 -- ------------------------------------------------------------
 CREATE TABLE public.answers (
   id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -192,7 +205,8 @@ CREATE TABLE public.answers (
   student_answer  jsonb,
   is_correct      boolean,
   points_earned   int NOT NULL DEFAULT 0,
-  created_at      timestamptz NOT NULL DEFAULT now()
+  created_at      timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (attempt_id, question_id)
 );
 
 

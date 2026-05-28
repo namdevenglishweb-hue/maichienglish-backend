@@ -10,6 +10,12 @@ class AlreadyExistsError(ServiceError):
     """Resource already exists."""
 
 
+class ConflictError(ServiceError):
+    """Request conflicts with current resource state (HTTP 409). Used when
+    the conflict is *stateful* rather than uniqueness-driven (e.g. the user
+    has an active attempt for a different exam than the one requested)."""
+
+
 class ValidationError(ServiceError):
     """Input failed validation."""
 

@@ -71,21 +71,61 @@ class AttemptView(BaseModel):
     totalPoints: Optional[float] = None
     percentage: Optional[float] = None
     timeSpentSeconds: Optional[int] = None
+    isAbandoned: bool = False
     startedAt: Optional[str] = None
     submittedAt: Optional[str] = None
 
 
+class SavedAnswerView(BaseModel):
+    """A previously-saved (ungraded) answer returned at resume."""
+
+    questionId: str
+    studentAnswer: Any = None
+
+
 class AttemptStartResponseData(BaseModel):
+    """Payload returned by POST /api/attempts (Case A new, Case B resume).
+
+    `isResume` lets the FE distinguish: false → fresh start (201 wire
+    status), true → resume of an existing in-progress attempt (200 wire
+    status). `savedAnswers` is empty in the new case and populated with
+    previously-saved answers in the resume case.
+    """
+
     attemptId: str
+    isResume: bool = False
     exam: AttemptExamView
+    savedAnswers: list[SavedAnswerView] = Field(default_factory=list)
     startedAt: Optional[str] = None
 
 
 class AttemptStartResponse(BaseModel):
-    """Wrapped POST /api/attempts response."""
+    """Wrapped POST /api/attempts response.
+
+    Wire `status` carries 201 (new) or 200 (resume) and matches the HTTP
+    status code FastAPI returns. See ATTEMPT_LIFECYCLE.md §4.1."""
 
     status: int = 201
     data: AttemptStartResponseData
+
+
+class ActiveAttemptData(BaseModel):
+    """Summary of the user's current in-progress attempt."""
+
+    attemptId: str
+    examId: str
+    examTitle: str
+    examLevel: str
+    examSkill: str
+    startedAt: Optional[str] = None
+    savedAnswerCount: int = 0
+
+
+class ActiveAttemptResponse(BaseModel):
+    """Wrapped GET /api/attempts/active response."""
+
+    status: int = 200
+    data: ActiveAttemptData
 
 
 class AnswerInput(BaseModel):
@@ -93,8 +133,55 @@ class AnswerInput(BaseModel):
     studentAnswer: Any = None  # int / str / list — depends on question type
 
 
+class AttemptSaveRequest(BaseModel):
+    """Body for PATCH /api/attempts/{attempt_id}/answers (manual save)."""
+
+    answers: list[AnswerInput] = Field(default_factory=list)
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "answers": [
+                    {"questionId": "uuid-q1", "studentAnswer": 2},
+                    {"questionId": "uuid-q2", "studentAnswer": "nine"},
+                    {"questionId": "uuid-q5", "studentAnswer": None},
+                ]
+            }
+        }
+    }
+
+
+class AttemptSaveResponseData(BaseModel):
+    savedCount: int
+    totalQuestions: int
+    message: str = "Answers saved"
+
+
+class AttemptSaveResponse(BaseModel):
+    """Wrapped PATCH /api/attempts/{attempt_id}/answers response."""
+
+    status: int = 200
+    data: AttemptSaveResponseData
+
+
+class AttemptAbandonResponseData(BaseModel):
+    attemptId: str
+    message: str = "Attempt abandoned"
+
+
+class AttemptAbandonResponse(BaseModel):
+    """Wrapped POST /api/attempts/{attempt_id}/abandon response."""
+
+    status: int = 200
+    data: AttemptAbandonResponseData
+
+
 class AttemptSubmitRequest(BaseModel):
-    """Body for POST /api/attempts/{attempt_id}/submit."""
+    """Body for POST /api/attempts/{attempt_id}/submit.
+
+    Body answers MERGE with previously-saved ones — body overrides, saved
+    answers not in body are kept and graded. `answers: []` is valid and
+    grades against the saved set."""
 
     answers: list[AnswerInput] = Field(default_factory=list)
     timeSpentSeconds: Optional[int] = Field(default=None, ge=0)
@@ -174,6 +261,7 @@ class AttemptHistoryItem(BaseModel):
     totalPoints: Optional[float] = None
     percentage: Optional[float] = None
     timeSpentSeconds: Optional[int] = None
+    isAbandoned: bool = False
     startedAt: Optional[str] = None
     submittedAt: Optional[str] = None
 

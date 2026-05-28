@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
 from dependencies import get_current_user
 from services.attempt_service import (
@@ -7,6 +7,7 @@ from services.attempt_service import (
     attempt_service,
 )
 from services.exceptions import (
+    ConflictError,
     NotFoundError,
     PermissionDeniedError,
     ValidationError,
@@ -14,7 +15,11 @@ from services.exceptions import (
 from services.user_service import user_service
 
 from .schemas import (
+    ActiveAttemptData,
+    ActiveAttemptResponse,
     AnswerView,
+    AttemptAbandonResponse,
+    AttemptAbandonResponseData,
     AttemptDetailData,
     AttemptDetailExam,
     AttemptDetailResponse,
@@ -22,6 +27,9 @@ from .schemas import (
     AttemptHistoryData,
     AttemptHistoryItem,
     AttemptHistoryResponse,
+    AttemptSaveRequest,
+    AttemptSaveResponse,
+    AttemptSaveResponseData,
     AttemptStartRequest,
     AttemptStartResponse,
     AttemptStartResponseData,
@@ -31,6 +39,7 @@ from .schemas import (
     AttemptView,
     AudioPlayResponse,
     AudioPlayResponseData,
+    SavedAnswerView,
 )
 
 router = APIRouter(prefix="/api/attempts", tags=["Attempts"])
@@ -55,6 +64,7 @@ def _attempt_to_view(a: dict) -> AttemptView:
         totalPoints=a["total_points"],
         percentage=a["percentage"],
         timeSpentSeconds=a["time_spent_seconds"],
+        isAbandoned=a.get("is_abandoned", False),
         startedAt=a["started_at"],
         submittedAt=a["submitted_at"],
     )
@@ -63,17 +73,24 @@ def _attempt_to_view(a: dict) -> AttemptView:
 @router.post(
     "",
     response_model=AttemptStartResponse,
+    # Default to 201 Created; resume path overrides to 200 OK via the
+    # injected Response object (see ATTEMPT_LIFECYCLE.md §4.1).
     status_code=status.HTTP_201_CREATED,
 )
 async def start_attempt(
-    request: AttemptStartRequest, current_user: dict = Depends(get_current_user)
+    request: AttemptStartRequest,
+    response: Response,
+    current_user: dict = Depends(get_current_user),
 ):
-    """Start a new exam attempt.
+    """Start or resume an exam attempt (idempotent).
 
-    - Blocked for `role=parent` (they don't take exams).
-    - Enforces tier monthly attempt limit (Free 5, Basic 50, Pro/Ultra unlimited).
-    - Returns the exam nested as `sections[] → questions[]` with correct
-      answers stripped.
+    Three outcomes (see ATTEMPT_LIFECYCLE.md §4.1):
+      - 201 Case A — no active attempt → create new (consumes quota).
+      - 200 Case B — active attempt for the SAME exam → resume.
+      - 409 Case C — active attempt for a DIFFERENT exam → conflict
+        (plain `{detail}` envelope; FE refreshes /active and re-decides).
+
+    Blocked for `role=parent`. Enforces tier limit only on Case A.
     """
     if current_user.get("role") == "parent":
         raise HTTPException(
@@ -88,16 +105,102 @@ async def start_attempt(
         )
     except NotFoundError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ConflictError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except AttemptLimitExceededError as e:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
 
+    wire_status = (
+        status.HTTP_200_OK if result["is_resume"] else status.HTTP_201_CREATED
+    )
+    response.status_code = wire_status
+
     return AttemptStartResponse(
-        status=201,
+        status=wire_status,
         data=AttemptStartResponseData(
             attemptId=result["attempt"]["id"],
+            isResume=result["is_resume"],
             exam=AttemptExamView(**result["exam"]),
+            savedAnswers=[SavedAnswerView(**sa) for sa in result["saved_answers"]],
             startedAt=result["attempt"]["started_at"],
         ),
+    )
+
+
+@router.get("/active", response_model=ActiveAttemptResponse)
+async def get_active_attempt(current_user: dict = Depends(get_current_user)):
+    """Return the user's single in-progress attempt (if any).
+
+    Single source of truth for the FE's `activeAttempt` cache. Returns 404
+    with `{detail: "No active attempt"}` when nothing is in progress —
+    semantically correct: there is no resource to return.
+    """
+    user = await _resolve_user(current_user)
+    active = await attempt_service.get_active_attempt(user_id=user["id"])
+    if active is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="No active attempt"
+        )
+    return ActiveAttemptResponse(data=ActiveAttemptData(**active))
+
+
+@router.patch(
+    "/{attempt_id}/answers", response_model=AttemptSaveResponse
+)
+async def save_answers(
+    attempt_id: str,
+    request: AttemptSaveRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Manual save (no grading). UPSERTs answer rows with `is_correct=NULL`.
+
+    Idempotent — sending the same payload twice is a no-op (last write wins).
+    Shape of `studentAnswer` is NOT validated here; full validation runs on
+    submit. See ATTEMPT_LIFECYCLE.md §4.3.
+    """
+    user = await _resolve_user(current_user)
+    try:
+        result = await attempt_service.save_answers(
+            attempt_id=attempt_id,
+            user_id=user["id"],
+            answers=[a.model_dump() for a in request.answers],
+        )
+    except NotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except PermissionDeniedError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+    except ValidationError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    return AttemptSaveResponse(data=AttemptSaveResponseData(**result))
+
+
+@router.post(
+    "/{attempt_id}/abandon", response_model=AttemptAbandonResponse
+)
+async def abandon_attempt(
+    attempt_id: str, current_user: dict = Depends(get_current_user)
+):
+    """Mark the attempt as abandoned (score=0; submitted_at=now()).
+
+    Frees the "1 active globally" slot so the student can start a new
+    attempt — but the abandoned attempt still counts toward monthly quota
+    (anti-abuse). See ATTEMPT_LIFECYCLE.md §4.5.
+    """
+    user = await _resolve_user(current_user)
+    try:
+        attempt = await attempt_service.abandon_attempt(
+            attempt_id=attempt_id, user_id=user["id"]
+        )
+    except NotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except PermissionDeniedError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+    except ValidationError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    return AttemptAbandonResponse(
+        data=AttemptAbandonResponseData(attemptId=attempt["id"]),
     )
 
 
@@ -109,7 +212,8 @@ async def submit_attempt(
     request: AttemptSubmitRequest,
     current_user: dict = Depends(get_current_user),
 ):
-    """Submit answers and finalize the attempt. Owner only.
+    """Submit + finalize. Body answers MERGE with previously-saved ones
+    (body wins, saved ones not in body are kept). Owner only.
 
     Grading runs over every active question in every active section of the exam.
     """
@@ -199,6 +303,7 @@ async def get_history(current_user: dict = Depends(get_current_user)):
                     totalPoints=r["total_points"],
                     percentage=r["percentage"],
                     timeSpentSeconds=r["time_spent_seconds"],
+                    isAbandoned=r.get("is_abandoned", False),
                     startedAt=r["started_at"],
                     submittedAt=r["submitted_at"],
                 )

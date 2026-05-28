@@ -2,7 +2,10 @@ import json
 import logging
 from typing import Any, Optional
 
+import asyncpg
+
 from services.exceptions import (
+    ConflictError,
     NotFoundError,
     PermissionDeniedError,
     ValidationError,
@@ -30,6 +33,7 @@ def _row_to_attempt(row) -> dict[str, Any]:
         "total_points": float(row["total_points"]) if row["total_points"] is not None else None,
         "percentage": float(row["percentage"]) if row["percentage"] is not None else None,
         "time_spent_seconds": row["time_spent_seconds"],
+        "is_abandoned": row["is_abandoned"],
         "started_at": row["started_at"].isoformat() if row["started_at"] else None,
         "submitted_at": row["submitted_at"].isoformat() if row["submitted_at"] else None,
     }
@@ -38,14 +42,14 @@ def _row_to_attempt(row) -> dict[str, Any]:
 # Unqualified column list — for INSERT/UPDATE RETURNING (no table alias).
 _ATTEMPT_COLS = """
     id, user_id, exam_id, score, total_points, percentage,
-    time_spent_seconds, started_at, submitted_at
+    time_spent_seconds, is_abandoned, started_at, submitted_at
 """
 
 # Same columns aliased with `a.` — required for SELECTs that JOIN exams,
 # otherwise `id` is ambiguous against `e.id`.
 _ATTEMPT_COLS_A = """
     a.id, a.user_id, a.exam_id, a.score, a.total_points, a.percentage,
-    a.time_spent_seconds, a.started_at, a.submitted_at
+    a.time_spent_seconds, a.is_abandoned, a.started_at, a.submitted_at
 """
 
 
@@ -68,68 +72,65 @@ class AttemptService:
             self._db_pool = get_db_pool()
         return self._db_pool
 
-    async def start_attempt(self, user_id: str, exam_id: str) -> dict[str, Any]:
-        """Create a new attempt + return exam nested as sections → questions.
+    # ------------------------------------------------------------------ #
+    # Internal helpers                                                   #
+    # ------------------------------------------------------------------ #
 
-        Correct-answer fields are stripped from every question_data.
+    async def _fetch_active_attempt(self, conn, user_id: str):
+        """Return the user's single active (= not submitted, not abandoned)
+        attempt row, or None. Enforced 1-per-user by partial unique index
+        `attempts_one_active_per_user`."""
+        return await conn.fetchrow(
+            f"""
+            SELECT {_ATTEMPT_COLS}
+            FROM public.attempts
+            WHERE user_id = $1
+              AND submitted_at IS NULL
+              AND NOT is_abandoned
+            """,
+            user_id,
+        )
 
-        Raises:
-            NotFoundError: exam doesn't exist or isn't published.
-            AttemptLimitExceededError: user hit their tier's monthly cap.
-        """
-        async with self.db.acquire() as conn:
-            async with conn.transaction():
-                exam = await conn.fetchrow(
-                    """
-                    SELECT id, title, level, skill, duration_minutes,
-                           description, is_published
-                    FROM public.exams
-                    WHERE id = $1 AND deleted_at IS NULL
-                    """,
-                    exam_id,
-                )
-                if not exam or not exam["is_published"]:
-                    logger.warning("start_attempt: exam %s not found or not published", exam_id)
-                    raise NotFoundError(f"Exam {exam_id} not found")
+    async def _fetch_exam_tree(self, conn, exam_id: str) -> dict[str, Any]:
+        """Load exam metadata + sections + questions for the student-facing
+        attempt view. Correct-answer fields are stripped from every question."""
+        exam = await conn.fetchrow(
+            """
+            SELECT id, title, level, skill, duration_minutes, description
+            FROM public.exams
+            WHERE id = $1 AND deleted_at IS NULL
+            """,
+            exam_id,
+        )
+        # Caller is expected to have already validated existence — defensive.
+        if not exam:
+            raise NotFoundError(f"Exam {exam_id} not found")
 
-                await self._enforce_tier_limit(conn, user_id)
+        section_rows = await conn.fetch(
+            """
+            SELECT id, position, part_label, type, instructions,
+                   materials, max_audio_plays
+            FROM public.sections
+            WHERE exam_id = $1 AND deleted_at IS NULL
+            ORDER BY position ASC, created_at ASC
+            """,
+            exam_id,
+        )
+        section_ids = [r["id"] for r in section_rows]
+        if section_ids:
+            qrows = await conn.fetch(
+                """
+                SELECT id, section_id, position, question_type,
+                       question_data, points
+                FROM public.questions
+                WHERE section_id = ANY($1::uuid[]) AND deleted_at IS NULL
+                ORDER BY position ASC, created_at ASC
+                """,
+                section_ids,
+            )
+        else:
+            qrows = []
 
-                row = await conn.fetchrow(
-                    f"""
-                    INSERT INTO public.attempts (user_id, exam_id)
-                    VALUES ($1, $2)
-                    RETURNING {_ATTEMPT_COLS}
-                    """,
-                    user_id,
-                    exam_id,
-                )
-
-                section_rows = await conn.fetch(
-                    """
-                    SELECT id, position, part_label, type, instructions,
-                           materials, max_audio_plays
-                    FROM public.sections
-                    WHERE exam_id = $1 AND deleted_at IS NULL
-                    ORDER BY position ASC, created_at ASC
-                    """,
-                    exam_id,
-                )
-                section_ids = [r["id"] for r in section_rows]
-                if section_ids:
-                    qrows = await conn.fetch(
-                        """
-                        SELECT id, section_id, position, question_type,
-                               question_data, points
-                        FROM public.questions
-                        WHERE section_id = ANY($1::uuid[]) AND deleted_at IS NULL
-                        ORDER BY position ASC, created_at ASC
-                        """,
-                        section_ids,
-                    )
-                else:
-                    qrows = []
-
-        # Group questions under their section, strip correct fields.
         q_by_section: dict[str, list[dict[str, Any]]] = {}
         for q in qrows:
             sid = str(q["section_id"])
@@ -159,22 +160,193 @@ class AttemptService:
             for s in section_rows
         ]
 
-        total_questions = sum(len(s["questions"]) for s in sections_payload)
+        return {
+            "id": str(exam["id"]),
+            "title": exam["title"],
+            "level": exam["level"],
+            "skill": exam["skill"],
+            "durationMinutes": exam["duration_minutes"],
+            "description": exam["description"],
+            "sections": sections_payload,
+        }
+
+    async def _fetch_saved_answers(
+        self, conn, attempt_id: str, exam_id: str
+    ) -> list[dict[str, Any]]:
+        """Return previously-saved answers for this attempt, filtered to
+        questions still present in the exam tree (defense-in-depth against
+        admin hard-deletes between save and resume — see ATTEMPT_LIFECYCLE.md
+        §4.1 Case B note + §7 edge case #6)."""
+        rows = await conn.fetch(
+            """
+            SELECT a.question_id, a.student_answer
+            FROM public.answers a
+            JOIN public.questions q ON q.id = a.question_id
+            JOIN public.sections s ON s.id = q.section_id
+            WHERE a.attempt_id = $1
+              AND s.exam_id = $2
+              AND s.deleted_at IS NULL
+              AND q.deleted_at IS NULL
+            """,
+            attempt_id,
+            exam_id,
+        )
+        return [
+            {
+                "questionId": str(r["question_id"]),
+                "studentAnswer": _coerce_jsonb(r["student_answer"]),
+            }
+            for r in rows
+        ]
+
+    # ------------------------------------------------------------------ #
+    # Public API                                                         #
+    # ------------------------------------------------------------------ #
+
+    async def start_attempt(self, user_id: str, exam_id: str) -> dict[str, Any]:
+        """Idempotent start. Three outcomes (see ATTEMPT_LIFECYCLE.md §4.1):
+
+          - Case A: no active attempt → INSERT new, consume quota, isResume=False.
+          - Case B: active attempt for the SAME exam → return existing
+            + savedAnswers (no quota consumed), isResume=True.
+          - Case C: active attempt for a DIFFERENT exam → ConflictError (409).
+
+        Race-safe: a concurrent INSERT loser triggers `UniqueViolationError`
+        on the `attempts_one_active_per_user` partial unique index. We catch
+        it, re-fetch the now-existing active attempt, and re-dispatch as
+        Case B or Case C.
+
+        Raises:
+            NotFoundError: exam doesn't exist or isn't published.
+            ConflictError: active attempt is for a different exam (Case C).
+            AttemptLimitExceededError: user hit their tier's monthly cap.
+        """
+        async with self.db.acquire() as conn:
+            async with conn.transaction():
+                # Pre-check active attempt — fast path for both resume and
+                # conflict, and avoids touching the exam table when we
+                # already know we're going to bail.
+                active = await self._fetch_active_attempt(conn, user_id)
+                if active is not None:
+                    if str(active["exam_id"]) == exam_id:
+                        return await self._build_resume_payload(conn, active)
+                    raise ConflictError(
+                        "You have an unfinished attempt for another exam"
+                    )
+
+                # No active attempt — verify exam, enforce quota, INSERT.
+                exam = await conn.fetchrow(
+                    """
+                    SELECT id, is_published
+                    FROM public.exams
+                    WHERE id = $1 AND deleted_at IS NULL
+                    """,
+                    exam_id,
+                )
+                if not exam or not exam["is_published"]:
+                    logger.warning(
+                        "start_attempt: exam %s not found or not published",
+                        exam_id,
+                    )
+                    raise NotFoundError(f"Exam {exam_id} not found")
+
+                await self._enforce_tier_limit(conn, user_id)
+
+                try:
+                    row = await conn.fetchrow(
+                        f"""
+                        INSERT INTO public.attempts (user_id, exam_id)
+                        VALUES ($1, $2)
+                        RETURNING {_ATTEMPT_COLS}
+                        """,
+                        user_id,
+                        exam_id,
+                    )
+                except asyncpg.exceptions.UniqueViolationError:
+                    # Lost the race against a concurrent POST /attempts.
+                    # Re-fetch the now-existing active attempt and resolve.
+                    logger.info(
+                        "start_attempt: race detected for user %s, re-resolving",
+                        user_id,
+                    )
+                    active = await self._fetch_active_attempt(conn, user_id)
+                    if active is None:
+                        # Extremely unlikely — winner submitted/abandoned
+                        # between our INSERT and SELECT. Surface as conflict
+                        # so the FE refreshes /active and retries.
+                        raise ConflictError(
+                            "Conflicting attempt; please retry"
+                        ) from None
+                    if str(active["exam_id"]) == exam_id:
+                        return await self._build_resume_payload(conn, active)
+                    raise ConflictError(
+                        "You have an unfinished attempt for another exam"
+                    ) from None
+
+                exam_tree = await self._fetch_exam_tree(conn, exam_id)
+
+        total_questions = sum(len(s["questions"]) for s in exam_tree["sections"])
         logger.info(
             "Started attempt %s for user %s on exam %s (%d sections, %d questions)",
-            row["id"], user_id, exam_id, len(sections_payload), total_questions,
+            row["id"], user_id, exam_id, len(exam_tree["sections"]), total_questions,
         )
         return {
+            "is_resume": False,
             "attempt": _row_to_attempt(row),
-            "exam": {
-                "id": str(exam["id"]),
-                "title": exam["title"],
-                "level": exam["level"],
-                "skill": exam["skill"],
-                "durationMinutes": exam["duration_minutes"],
-                "description": exam["description"],
-                "sections": sections_payload,
-            },
+            "exam": exam_tree,
+            "saved_answers": [],
+        }
+
+    async def _build_resume_payload(self, conn, active_row) -> dict[str, Any]:
+        """Construct the Case B (resume) response from an existing active
+        attempt row. Quota is NOT touched."""
+        exam_id = str(active_row["exam_id"])
+        attempt_id = str(active_row["id"])
+        exam_tree = await self._fetch_exam_tree(conn, exam_id)
+        saved = await self._fetch_saved_answers(conn, attempt_id, exam_id)
+        logger.info(
+            "Resumed attempt %s (user %s, exam %s, %d saved answers)",
+            attempt_id, active_row["user_id"], exam_id, len(saved),
+        )
+        return {
+            "is_resume": True,
+            "attempt": _row_to_attempt(active_row),
+            "exam": exam_tree,
+            "saved_answers": saved,
+        }
+
+    async def get_active_attempt(self, user_id: str) -> Optional[dict[str, Any]]:
+        """Return a summary of the user's single active attempt, or None.
+
+        Powers GET /api/attempts/active — the FE's single source of truth
+        for "is there an attempt in progress?" (see ATTEMPT_LIFECYCLE.md
+        §4.2 and §6.1)."""
+        async with self.db.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT a.id, a.exam_id, a.started_at,
+                       e.title AS exam_title, e.level AS exam_level,
+                       e.skill AS exam_skill,
+                       (SELECT COUNT(*) FROM public.answers ans
+                          WHERE ans.attempt_id = a.id)::int AS saved_answer_count
+                FROM public.attempts a
+                JOIN public.exams e ON e.id = a.exam_id
+                WHERE a.user_id = $1
+                  AND a.submitted_at IS NULL
+                  AND NOT a.is_abandoned
+                """,
+                user_id,
+            )
+        if not row:
+            return None
+        return {
+            "attemptId": str(row["id"]),
+            "examId": str(row["exam_id"]),
+            "examTitle": row["exam_title"],
+            "examLevel": row["exam_level"],
+            "examSkill": row["exam_skill"],
+            "startedAt": row["started_at"].isoformat() if row["started_at"] else None,
+            "savedAnswerCount": row["saved_answer_count"],
         }
 
     async def _enforce_tier_limit(self, conn, user_id: str) -> None:
@@ -215,6 +387,164 @@ class AttemptService:
                 f"Monthly attempt limit reached ({plan.attempts_monthly} attempts)"
             )
 
+    async def save_answers(
+        self,
+        attempt_id: str,
+        user_id: str,
+        answers: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """UPSERT mid-attempt answers without grading (PATCH /attempts/{id}/answers).
+
+        Each row is stored with `is_correct = NULL` and `points_earned = 0`
+        to signal "saved but ungraded". Submit later overwrites these with
+        graded values.
+
+        Per ATTEMPT_LIFECYCLE.md §4.3, we validate the `questionId` belongs
+        to this attempt's exam; we do NOT validate the shape of
+        `studentAnswer` (deferred to grading on submit).
+
+        Raises:
+            NotFoundError: attempt or referenced question missing.
+            PermissionDeniedError: caller is not the owner.
+            ValidationError: attempt already submitted or abandoned.
+        """
+        async with self.db.acquire() as conn:
+            async with conn.transaction():
+                attempt = await conn.fetchrow(
+                    f"""
+                    SELECT {_ATTEMPT_COLS}
+                    FROM public.attempts
+                    WHERE id = $1
+                    """,
+                    attempt_id,
+                )
+                if not attempt:
+                    raise NotFoundError(f"Attempt {attempt_id} not found")
+                if str(attempt["user_id"]) != user_id:
+                    raise PermissionDeniedError("Not the owner of this attempt")
+                if attempt["is_abandoned"]:
+                    raise ValidationError("Attempt is abandoned")
+                if attempt["submitted_at"] is not None:
+                    raise ValidationError("Attempt already submitted")
+
+                # Validate every questionId belongs to this attempt's exam.
+                if answers:
+                    question_ids = [a["questionId"] for a in answers]
+                    valid_rows = await conn.fetch(
+                        """
+                        SELECT q.id::text AS qid
+                        FROM public.questions q
+                        JOIN public.sections s ON s.id = q.section_id
+                        WHERE q.id = ANY($1::uuid[])
+                          AND s.exam_id = $2
+                          AND s.deleted_at IS NULL
+                          AND q.deleted_at IS NULL
+                        """,
+                        question_ids,
+                        attempt["exam_id"],
+                    )
+                    valid_qids = {r["qid"] for r in valid_rows}
+                    missing = [qid for qid in question_ids if qid not in valid_qids]
+                    if missing:
+                        raise NotFoundError(
+                            f"Question(s) not in this attempt's exam: {missing[:3]}"
+                            + (" …" if len(missing) > 3 else "")
+                        )
+
+                    for a in answers:
+                        sa = a.get("studentAnswer")
+                        await conn.execute(
+                            """
+                            INSERT INTO public.answers
+                                (attempt_id, question_id, student_answer,
+                                 is_correct, points_earned)
+                            VALUES ($1, $2, $3::jsonb, NULL, 0)
+                            ON CONFLICT (attempt_id, question_id) DO UPDATE
+                            SET student_answer = EXCLUDED.student_answer,
+                                is_correct = NULL,
+                                points_earned = 0
+                            """,
+                            attempt_id,
+                            a["questionId"],
+                            json.dumps(sa) if sa is not None else None,
+                        )
+
+                # For the response — how many total questions in this exam,
+                # and how many have a saved answer row now.
+                total_questions = await conn.fetchval(
+                    """
+                    SELECT COUNT(*) FROM public.questions q
+                    JOIN public.sections s ON s.id = q.section_id
+                    WHERE s.exam_id = $1
+                      AND s.deleted_at IS NULL
+                      AND q.deleted_at IS NULL
+                    """,
+                    attempt["exam_id"],
+                )
+                saved_count = await conn.fetchval(
+                    """
+                    SELECT COUNT(*) FROM public.answers
+                    WHERE attempt_id = $1
+                    """,
+                    attempt_id,
+                )
+
+        logger.info(
+            "save_answers: attempt %s saved %d new (total saved now %d/%d)",
+            attempt_id, len(answers), saved_count, total_questions,
+        )
+        return {
+            "savedCount": saved_count,
+            "totalQuestions": total_questions,
+        }
+
+    async def abandon_attempt(
+        self, attempt_id: str, user_id: str
+    ) -> dict[str, Any]:
+        """Permanently mark the attempt as abandoned (score=0). Frees the
+        "1 active globally" slot but still counts toward the monthly quota.
+
+        Raises:
+            NotFoundError: attempt missing.
+            PermissionDeniedError: caller is not the owner.
+            ValidationError: attempt already submitted or already abandoned.
+        """
+        async with self.db.acquire() as conn:
+            async with conn.transaction():
+                attempt = await conn.fetchrow(
+                    f"""
+                    SELECT {_ATTEMPT_COLS}
+                    FROM public.attempts
+                    WHERE id = $1
+                    """,
+                    attempt_id,
+                )
+                if not attempt:
+                    raise NotFoundError(f"Attempt {attempt_id} not found")
+                if str(attempt["user_id"]) != user_id:
+                    raise PermissionDeniedError("Not the owner of this attempt")
+                if attempt["is_abandoned"]:
+                    raise ValidationError("Attempt already abandoned")
+                if attempt["submitted_at"] is not None:
+                    raise ValidationError("Attempt already submitted")
+
+                row = await conn.fetchrow(
+                    f"""
+                    UPDATE public.attempts
+                    SET is_abandoned = true,
+                        submitted_at = now(),
+                        score = 0,
+                        total_points = 0,
+                        percentage = 0
+                    WHERE id = $1
+                    RETURNING {_ATTEMPT_COLS}
+                    """,
+                    attempt_id,
+                )
+
+        logger.info("Abandoned attempt %s for user %s", attempt_id, user_id)
+        return _row_to_attempt(row)
+
     async def submit_attempt(
         self,
         attempt_id: str,
@@ -222,7 +552,12 @@ class AttemptService:
         answers: list[dict[str, Any]],
         time_spent_seconds: Optional[int] = None,
     ) -> dict[str, Any]:
-        """Grade + persist answers across all sections, finalize the attempt."""
+        """Grade + persist answers across all sections, finalize the attempt.
+
+        Merges request body with any previously-saved answers (PATCH
+        /answers): body answers override saved ones; saved answers not in
+        the body are kept and graded as-is.
+        """
         async with self.db.acquire() as conn:
             async with conn.transaction():
                 attempt = await conn.fetchrow(
@@ -242,10 +577,25 @@ class AttemptService:
                         user_id, attempt_id,
                     )
                     raise PermissionDeniedError("Not the owner of this attempt")
+                if attempt["is_abandoned"]:
+                    raise ValidationError("Attempt is abandoned")
                 if attempt["submitted_at"] is not None:
                     raise ValidationError("Attempt already submitted")
 
-                answers_by_qid = {a["questionId"]: a["studentAnswer"] for a in answers}
+                # Merge saved answers with body answers — body wins.
+                saved_rows = await conn.fetch(
+                    """
+                    SELECT question_id::text AS qid, student_answer
+                    FROM public.answers
+                    WHERE attempt_id = $1
+                    """,
+                    attempt_id,
+                )
+                merged: dict[str, Any] = {
+                    r["qid"]: _coerce_jsonb(r["student_answer"]) for r in saved_rows
+                }
+                for a in answers:
+                    merged[a["questionId"]] = a["studentAnswer"]
 
                 qrows = await conn.fetch(
                     """
@@ -261,7 +611,6 @@ class AttemptService:
 
                 total_points = 0
                 earned = 0
-                answer_inserts = []
                 for q in qrows:
                     qid = str(q["id"])
                     qtype = q["question_type"]
@@ -269,27 +618,27 @@ class AttemptService:
                     qpoints = q["points"]
                     total_points += qpoints
 
-                    student_answer = answers_by_qid.get(qid)
+                    student_answer = merged.get(qid)
                     is_correct = grade_question(qtype, qdata, student_answer)
                     points_earned = qpoints if is_correct else 0
                     earned += points_earned
 
-                    answer_inserts.append(
-                        (q["id"], student_answer, is_correct, points_earned)
-                    )
-
-                for q_uuid, sa, ic, pe in answer_inserts:
                     await conn.execute(
                         """
                         INSERT INTO public.answers
-                            (attempt_id, question_id, student_answer, is_correct, points_earned)
+                            (attempt_id, question_id, student_answer,
+                             is_correct, points_earned)
                         VALUES ($1, $2, $3::jsonb, $4, $5)
+                        ON CONFLICT (attempt_id, question_id) DO UPDATE
+                        SET student_answer = EXCLUDED.student_answer,
+                            is_correct     = EXCLUDED.is_correct,
+                            points_earned  = EXCLUDED.points_earned
                         """,
                         attempt_id,
-                        q_uuid,
-                        json.dumps(sa) if sa is not None else None,
-                        ic,
-                        pe,
+                        q["id"],
+                        json.dumps(student_answer) if student_answer is not None else None,
+                        is_correct,
+                        points_earned,
                     )
 
                 percentage = (earned / total_points * 100) if total_points > 0 else 0
@@ -425,8 +774,8 @@ class AttemptService:
             NotFoundError: attempt missing, section missing, section not in
                 this attempt's exam, or no material at `material_index`.
             PermissionDeniedError: user is not the owner.
-            ValidationError: attempt already submitted, or the material at
-                `material_index` is not type=audio.
+            ValidationError: attempt already submitted or abandoned, or the
+                material at `material_index` is not type=audio.
             AudioPlayLimitExceededError: cap reached for this material.
         """
         if material_index < 0:
@@ -436,7 +785,7 @@ class AttemptService:
             async with conn.transaction():
                 attempt = await conn.fetchrow(
                     """
-                    SELECT id, user_id, exam_id, submitted_at
+                    SELECT id, user_id, exam_id, is_abandoned, submitted_at
                     FROM public.attempts
                     WHERE id = $1
                     """,
@@ -446,6 +795,8 @@ class AttemptService:
                     raise NotFoundError(f"Attempt {attempt_id} not found")
                 if str(attempt["user_id"]) != user_id:
                     raise PermissionDeniedError("Not the owner of this attempt")
+                if attempt["is_abandoned"]:
+                    raise ValidationError("Attempt is abandoned")
                 if attempt["submitted_at"] is not None:
                     raise ValidationError("Attempt already submitted")
 
