@@ -208,3 +208,7 @@ Thumbs.db
 
 # Claude Code local state
 .claude/
+
+# Project docs — kept local-only; README.md stays tracked for GitHub.
+*.md
+!README.md
