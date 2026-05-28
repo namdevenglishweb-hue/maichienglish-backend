@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from dependencies import require_admin
 from services.exceptions import AlreadyExistsError, NotFoundError, ValidationError
+from services.storage_service import get_storage_service
 from services.subscription_service import subscription_service
 from services.user_service import user_service
 
@@ -26,6 +27,9 @@ from .schemas import (
     AdminUserSubscriptionView,
     AdminUserView,
     PaginationView,
+    UploadRequest,
+    UploadResponse,
+    UploadResponseData,
 )
 
 
@@ -192,4 +196,48 @@ async def admin_update_subscription(
                 creditsRemaining=sub["credits_remaining"],
             )
         ),
+    )
+
+
+@router.post("/upload", response_model=UploadResponse, status_code=200)
+async def admin_request_upload(request: UploadRequest):
+    """Issue a signed URL for direct browser-to-storage upload.
+
+    See MEDIA_UPLOAD.md. Validation happens in `UploadRequest`'s
+    model_validator (returns 422). Storage transport failures map to
+    503; any other adapter exception maps to 500.
+    """
+    storage = get_storage_service()
+    try:
+        result = await storage.create_signed_upload(
+            bucket=request.bucket,
+            content_type=request.contentType,
+            file_size_bytes=request.fileSizeBytes,
+        )
+    except Exception as e:
+        status_code = getattr(e, "status_code", None) or getattr(e, "code", None)
+        try:
+            status_code = int(status_code) if status_code is not None else None
+        except (TypeError, ValueError):
+            status_code = None
+        if status_code is not None and 500 <= status_code < 600:
+            logger.warning("storage unreachable: %s", e)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Storage service unavailable",
+            )
+        logger.exception("storage error")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Storage error",
+        )
+
+    return UploadResponse(
+        data=UploadResponseData(
+            uploadUrl=result.upload_url,
+            publicUrl=result.public_url,
+            token=result.token,
+            path=result.path,
+            bucket=result.bucket,
+        )
     )

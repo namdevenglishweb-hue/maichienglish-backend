@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     supabase_service_role_key: Optional[str] = Field(
         default=None, alias="SUPABASE_SERVICE_ROLE_KEY"
     )
+    storage_provider: str = Field(default="supabase", alias="STORAGE_PROVIDER")
 
     @property
     def cors_origins_list(self) -> list[str]:

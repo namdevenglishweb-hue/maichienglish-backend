@@ -23,7 +23,8 @@ maichienglish-be/
 ├── PROJECT_STRUCTURE.md             # ✅ This file — repo map
 ├── DEPLOYMENT.md                    # ✅ Step-by-step: GitHub setup, Supabase setup, Render setup, ongoing deploys, migrations, rollback, troubleshooting
 ├── FRONTEND_EXAM_GUIDE.md           # ✅ FE-facing integration spec for exam subsystem (auth recap, data model, full endpoint catalog, question types + studentAnswer shapes, {{gap:N}} rendering, shared-options detection, audio cap, RBAC, TS types, FAQ)
-└── MAICHIENGLISH_BACKEND_PLAN.md    # ✅ Backend spec + HLD (source of truth for schema, API, decisions)
+├── MAICHIENGLISH_BACKEND_PLAN.md    # ✅ Backend spec + HLD (source of truth for schema, API, decisions)
+└── MEDIA_UPLOAD.md                  # ✅ Media upload spec — signed-URL flow, Supabase Storage setup, adapter pattern, validation rules. Source of truth for POST /api/admin/upload.
 ```
 
 ## Configuration
@@ -55,8 +56,8 @@ api/
 │
 ├── admin/
 │   ├── __init__.py                  # ✅ Re-exports `router`
-│   ├── routes.py                    # ✅ GET /users (paginated list, role filter), POST /users, DELETE /users/{id}, POST /users/{id}/reset-password, PUT /users/{student_id}/parent, PUT /subscriptions/{user_id} (all require_admin)
-│   └── schemas.py                   # ✅ AdminCreateUserRequest (includes parentId), AdminResetPasswordRequest, AdminLinkParentRequest, AdminUpdateSubscriptionRequest, AdminUserListResponse, AdminUserSubscriptionView (nested in AdminUserView), PaginationView + response wrappers
+│   ├── routes.py                    # ✅ GET /users (paginated list, role filter), POST /users, DELETE /users/{id}, POST /users/{id}/reset-password, PUT /users/{student_id}/parent, PUT /subscriptions/{user_id}, POST /upload (signed-URL flow for Supabase Storage — all require_admin)
+│   └── schemas.py                   # ✅ AdminCreateUserRequest (includes parentId), AdminResetPasswordRequest, AdminLinkParentRequest, AdminUpdateSubscriptionRequest, AdminUserListResponse, AdminUserSubscriptionView (nested in AdminUserView), PaginationView, UploadRequest (camelCase + model_validator cross-checks bucket/contentType/size) + UploadResponse/UploadResponseData + response wrappers
 │
 ├── exams/
 │   ├── __init__.py                  # ✅ Re-exports `router`
@@ -102,7 +103,12 @@ services/
 ├── question_service.py              # ✅ Question CRUD scoped to section_id (per-section position); per-type validation (matching reuses MC validator). Single + bulk_update_questions + bulk_delete_questions. Excel import lands in B3.4b.
 ├── attempt_service.py               # ✅ Start (enforces tier limit; returns nested exam→sections→questions), submit + auto-grade across all sections, history queries, record_audio_play (per-section: upserts attempt_section_state, enforces sections.max_audio_plays). Custom AttemptLimitExceededError + AudioPlayLimitExceededError extend PermissionDeniedError.
 ├── subscription_service.py          # ✅ get_by_user_id, update_tier (validates tier + logs), list_plans serializer. Attempt-limit enforcement lives in attempt_service; period-reset is not yet implemented (period boundary still equals subscriptions.current_period_start from creation).
-└── subscription_plans.py            # ✅ PlanTier enum, SubscriptionPlan + PlanFeature dataclasses, SUBSCRIPTION_PLANS dict (Free / Basic / Pro / Ultra)
+├── subscription_plans.py            # ✅ PlanTier enum, SubscriptionPlan + PlanFeature dataclasses, SUBSCRIPTION_PLANS dict (Free / Basic / Pro / Ultra)
+├── storage_service.py               # ✅ Provider-agnostic media upload — StorageService ABC + UploadResult dataclass + EXT_FOR_MIME/ALLOWED_TYPES/SIZE_LIMITS shared constants + get_storage_service() factory (driven by STORAGE_PROVIDER env). See MEDIA_UPLOAD.md.
+└── adapters/
+    ├── __init__.py                  # ✅ Empty package marker
+    ├── supabase_storage.py          # ✅ SupabaseStorageAdapter — wraps supabase-py v2 SDK (sync) with asyncio.to_thread() so create_signed_upload_url / remove don't block the event loop. Derives extension from contentType (not filename).
+    └── s3_storage.py                # ✅ Stub — raises NotImplementedError until S3 is needed.
 ```
 
 ## Data Models (SQLAlchemy ORM — optional)
@@ -151,7 +157,8 @@ migrations/
 ├── 0004_exam_sections.sql           # ✅ Introduce sections layer + attempt_section_state. Drops exams.audio_url/passage/max_audio_plays + questions.exam_id + attempts.audio_play_count. Breaking change — dev DB only; run init_schema.py --drop -y for fresh setup.
 ├── 0005_section_type.sql            # ✅ Add `sections.type` (rendering hint: multiple_choice/fill_blank/matching, nullable). No data migration needed for matching shape change (prior shape never shipped). Idempotent.
 ├── 0006_materials_typed_blocks.sql  # ✅ Drop `sections.audio_url` (audio moves into `materials` JSONB as typed block). Replace `attempt_section_state.audio_play_count` (scalar) with `audio_play_counts jsonb` keyed by material_index for per-audio counters. Idempotent.
-└── 0007_partial_unique_positions.sql # ✅ Hotfix: replace plain UNIQUE(exam_id, position) / UNIQUE(section_id, position) with PARTIAL unique indexes filtered by `deleted_at IS NULL`. Soft-deleted rows no longer block position reuse (was causing 500 UniqueViolation on POST /sections after admin soft-deletes any position). Idempotent.
+├── 0007_partial_unique_positions.sql # ✅ Hotfix: replace plain UNIQUE(exam_id, position) / UNIQUE(section_id, position) with PARTIAL unique indexes filtered by `deleted_at IS NULL`. Soft-deleted rows no longer block position reuse (was causing 500 UniqueViolation on POST /sections after admin soft-deletes any position). Idempotent.
+└── 0008_storage_rls_policy.sql      # ✅ RLS SELECT policy on storage.objects for the `audio` + `images` buckets — anon/authenticated can read public bucket files; INSERT/UPDATE/DELETE remain restricted to service_role. Required for the FE HEAD verify in the upload flow. Idempotent.
 ```
 
 ```

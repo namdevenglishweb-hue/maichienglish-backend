@@ -136,18 +136,14 @@ the database and storage.
 
 ### 3.1 Supabase Storage buckets
 
-Two buckets (already created per
-[DEPLOYMENT.md](DEPLOYMENT.md) §3.1):
+Two buckets, **already created + configured** on the Supabase Dashboard:
 
-| Bucket | Content | Current policy | Required policy |
-|--------|---------|----------------|-----------------|
-| `audio` | Listening audio files | **private** (as initially created) | **public-read** (see [§9](#9-bucket-access-policy)) |
-| `images` | Question/section images | **private** | **public-read** |
+| Bucket | Content | Public | File size limit | MIME whitelist |
+|--------|---------|--------|-----------------|----------------|
+| `audio` | Listening audio files | ✅ | 50 MB | `audio/mpeg, audio/mp4, audio/x-m4a, audio/m4a, audio/wav, audio/webm` |
+| `images` | Question/section images | ✅ | 10 MB | `image/png, image/jpeg, image/webp` |
 
-> **Action required before first upload**: toggle both buckets from
-> private to public on the Supabase Dashboard. See [§9.2](#92-setup-one-time-supabase-dashboard)
-> for step-by-step. Without this, `publicUrl` returns 400/404 and the
-> whole flow breaks.
+The only remaining setup is the RLS read policy — see [§9.2 Step C](#92-setup-one-time-supabase-dashboard).
 
 ### 3.2 Path convention
 
@@ -261,13 +257,20 @@ Authorization: Bearer <admin-token>
 {
   "status": 200,
   "data": {
-    "uploadUrl": "https://xxx.supabase.co/storage/v1/object/upload/sign/audio/a1b2c3d4.mp3?token=...",
+    "uploadUrl": "https://xxx.supabase.co/storage/v1/object/upload/sign/audio/a1b2c3d4.mp3?token=eyJ...",
     "publicUrl": "https://xxx.supabase.co/storage/v1/object/public/audio/a1b2c3d4.mp3",
+    "token": "eyJ...",                  // same token as in uploadUrl query string
     "path": "a1b2c3d4.mp3",
     "bucket": "audio"
   }
 }
 ```
+
+> **Note on `token`**: this is the bearer token extracted from `uploadUrl`'s
+> query string. It's surfaced as a top-level field so FE using
+> `@supabase/supabase-js` can call `uploadToSignedUrl(path, token, file)`
+> directly without parsing `uploadUrl`. FE using raw `fetch` PUT can ignore
+> `token` and just hit `uploadUrl`.
 
 > **Note on TTL**: Supabase signed upload URL TTL is **fixed at 2 hours**
 > (set by Supabase, not configurable via `createSignedUploadUrl()`). We do
@@ -281,11 +284,27 @@ Authorization: Bearer <admin-token>
 | Status | Detail | Cause |
 |---|---|---|
 | 403 | `Admin access required` | Caller is not admin |
-| 422 | (Pydantic shape) | Bad request body (missing field, wrong type) |
-| 400 | `Invalid contentType "audio/foo" for bucket "audio"` | MIME not in whitelist |
-| 400 | `File size 60000000 exceeds limit of 52428800 bytes for bucket "audio"` | Too large |
-| 503 | `Storage service unavailable` | Supabase 5xx, timeout, or connection error |
-| 500 | `Storage error` | Supabase 4xx (token invalid, quota exceeded, etc. — server-side misconfig) |
+| 422 | (Pydantic shape) | Bad request body (missing field, wrong type, **invalid contentType for bucket**, **file size over limit**, **contentType has no extension mapping**) — all validator failures collapse to 422 because they all come from Pydantic's `model_validator` |
+| 503 | `Storage service unavailable` | Supabase 5xx, network timeout, or connection error |
+| 500 | `Storage error` | Supabase 4xx (service key invalid, bucket missing, quota exceeded, etc. — server-side misconfig) |
+
+> **Note**: validation errors return **422**, not 400, because they're raised
+> from Pydantic's `model_validator(mode='after')`. FastAPI converts validator
+> `ValueError` → 422 with structured `detail` array (one entry per failure).
+> Sample:
+> ```jsonc
+> {
+>   "detail": [
+>     {
+>       "loc": ["body"],
+>       "msg": "Value error, Invalid contentType \"audio/foo\" for bucket \"audio\"; allowed: ['audio/m4a', 'audio/mp4', ...]",
+>       "type": "value_error"
+>     }
+>   ]
+> }
+> ```
+> FE error handlers should treat 422 from this endpoint the same as 400
+> for the purpose of "show error to user".
 
 **Error mapping rules** (server-side):
 
@@ -302,7 +321,16 @@ except SupabaseStorageError as e:        # SDK-specific exception
 
 **Request validation** is done via Pydantic `model_validator(mode='after')`
 on `UploadRequest` (not a separate helper function). Validation logic
-co-located with the schema:
+co-located with the schema.
+
+> **Naming convention**: this schema uses **camelCase Python attribute
+> names** (`contentType`, `fileSizeBytes`) rather than the Pythonic
+> snake_case + `alias_generator=to_camel`. This matches the convention
+> in `api/sections/schemas.py` (`partLabel`, `maxAudioPlays`) which uses
+> direct camelCase attrs. The older `api/exams/schemas.py` and
+> `api/questions/schemas.py` use snake_case in request bodies —
+> normalizing those to camelCase is a known follow-up. New endpoints
+> follow the camelCase-attr convention.
 
 ```python
 class UploadRequest(BaseModel):
@@ -421,6 +449,10 @@ class UploadResult:
     """Returned by create_signed_upload — everything FE needs."""
     upload_url: str       # signed PUT URL (Supabase fixes TTL at 2h)
     public_url: str       # permanent URL to store in DB
+    token: str            # token extracted from upload_url query — saves FE
+                          # the URL.parse step when using @supabase/supabase-js
+                          # SDK's uploadToSignedUrl(path, token, file).
+                          # Empty string for providers that don't expose a token.
     path: str             # storage path within bucket
     bucket: str           # bucket name
 
@@ -486,9 +518,21 @@ The SDK handles auth, endpoint paths, response shape differences across
 API versions, and edge cases like the upload protocol (whether to use
 PUT + `Authorization` header vs query token, `x-upsert` behavior, etc.).
 
+**Important: SDK is sync, but our route is async.** `create_client()` returns
+a synchronous `Client` that uses `requests` under the hood. Calling its
+methods directly from `async def` would block the FastAPI event loop —
+every concurrent upload-URL request would queue serially. We wrap each
+SDK call in `asyncio.to_thread()` so it runs in a worker thread.
+
+> The SDK does expose an `AsyncClient` (via `acreate_client`) but its
+> storage support has been limited/unstable across versions. Sync +
+> `to_thread()` is the safer, version-agnostic pattern.
+
 ```python
 # services/adapters/supabase_storage.py
 
+import asyncio
+import logging
 import uuid
 
 from supabase import Client, create_client
@@ -499,9 +543,15 @@ from services.storage_service import (
     UploadResult,
 )
 
+logger = logging.getLogger(__name__)
+
 
 class SupabaseStorageAdapter(StorageService):
-    """Supabase Storage implementation via the official supabase-py SDK."""
+    """Supabase Storage implementation via the official supabase-py SDK.
+
+    Sync SDK calls are dispatched via asyncio.to_thread() so they
+    don't block the FastAPI event loop.
+    """
 
     def __init__(self, settings):
         self.base_url = settings.supabase_url
@@ -520,7 +570,10 @@ class SupabaseStorageAdapter(StorageService):
         # (field names verified for supabase-py v2.x; older versions
         # used 'signed_url' — pin the SDK version in requirements.txt).
         # TTL is fixed at 2 hours by Supabase, not configurable here.
-        result = self.client.storage.from_(bucket).create_signed_upload_url(path)
+        result = await asyncio.to_thread(
+            self.client.storage.from_(bucket).create_signed_upload_url,
+            path,
+        )
 
         # The SDK's signedUrl is typically a full absolute URL already.
         # Defensive fallback if a future SDK returns just a path.
@@ -528,17 +581,26 @@ class SupabaseStorageAdapter(StorageService):
         if not signed.startswith("http"):
             signed = f"{self.base_url}/storage/v1{signed}"
 
+        # The SDK also returns a `token` extracted from the URL query string.
+        # We pass it through so FE using @supabase/supabase-js can call
+        # uploadToSignedUrl(path, token, file) without parsing the URL.
+        token = result.get("token") or ""
+
         public_url = f"{self.base_url}/storage/v1/object/public/{bucket}/{path}"
 
         return UploadResult(
             upload_url=signed,
             public_url=public_url,
+            token=token,
             path=path,
             bucket=bucket,
         )
 
     async def delete_file(self, bucket, path):
-        self.client.storage.from_(bucket).remove([path])
+        await asyncio.to_thread(
+            self.client.storage.from_(bucket).remove,
+            [path],
+        )
 ```
 
 ### 6.4 S3 adapter (future — stub)
@@ -562,13 +624,15 @@ class S3StorageAdapter(StorageService):
 ### 6.5 Route (provider-agnostic, validation in schema)
 
 ```python
-# api/admin/routes.py (addition)
-
-from services.storage_service import get_storage_service
+# api/admin/routes.py (additions — top-of-file imports elided)
+# Required: logging, fastapi.HTTPException, fastapi.status, Depends
+# Plus: dependencies.require_admin
+# Plus: services.storage_service.get_storage_service
+# Plus: .schemas.UploadRequest, UploadResponse, UploadResponseData
 
 @router.post("/upload", response_model=UploadResponse, status_code=200)
 async def request_upload(
-    request: UploadRequest,    # Pydantic validates body + cross-fields
+    request: UploadRequest,    # Pydantic validates body + cross-fields (see §5.1)
     admin: dict = Depends(require_admin),
 ):
     """Generate a signed upload URL for direct browser-to-storage upload."""
@@ -579,25 +643,42 @@ async def request_upload(
             content_type=request.contentType,
             file_size_bytes=request.fileSizeBytes,
         )
-    except (httpx.TimeoutException, httpx.ConnectError) as e:
-        logger.warning("storage unreachable: %s", e)
-        raise HTTPException(503, "Storage service unavailable")
-    except Exception as e:                       # supabase-py errors
-        logger.exception("storage error")
-        raise HTTPException(500, "Storage error")
+    except Exception as e:
+        # We catch broadly because:
+        # - supabase-py exception hierarchy varies across versions
+        # - We don't want to add httpx/requests as a direct dep just
+        #   to catch transport-level exceptions
+        # - 5xx + connection errors → 503 (transient, retryable)
+        # - everything else → 500 (likely misconfig — service key wrong,
+        #   bucket doesn't exist, quota hit, etc.)
+        status_code = getattr(e, "status_code", None) or getattr(e, "code", None)
+        if status_code and 500 <= int(status_code) < 600:
+            logger.warning("storage unreachable: %s", e)
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "Storage service unavailable",
+            )
+        logger.exception("storage error: %s", e)
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "Storage error",
+        )
 
     return UploadResponse(
         status=200,
         data=UploadResponseData(
             uploadUrl=result.upload_url,
             publicUrl=result.public_url,
+            token=result.token,
             path=result.path,
             bucket=result.bucket,
         ),
     )
 ```
 
-→ Route does not import the Supabase SDK or any provider-specific code.
+→ Route does not import the Supabase SDK, `httpx`, or `requests`. The
+catch is intentionally broad because supabase-py's exception types vary
+across versions — narrowing risks missing legitimate errors.
 All validation lives in the `UploadRequest` Pydantic schema (see §5.1).
 
 ---
@@ -622,6 +703,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 interface UploadResult {
   uploadUrl: string;
   publicUrl: string;
+  token: string;
   path: string;
   bucket: 'audio' | 'images';
 }
@@ -641,13 +723,11 @@ async function uploadFile(
     }),
   });
 
-  // 2. Extract token from the signed URL and upload via SDK
-  const token = new URL(result.uploadUrl).searchParams.get('token');
-  if (!token) throw new Error('Signed URL missing token');
-
+  // 2. Upload via SDK using path + token (no URL parsing needed —
+  //    BE already extracted them for us)
   const {error} = await supabase.storage
     .from(bucket)
-    .uploadToSignedUrl(result.path, token, file);
+    .uploadToSignedUrl(result.path, result.token, file);
   if (error) throw new Error(`Upload failed: ${error.message}`);
 
   // 3. Verify file exists (defensive — uploadToSignedUrl resolves on success
@@ -807,7 +887,7 @@ The file itself is never seen by the server — only metadata.
 | `audio` | `audio/mpeg`, `audio/mp4`, `audio/x-m4a`, `audio/m4a`, `audio/wav`, `audio/webm` | `.mp3`, `.m4a`, `.wav`, `.webm` |
 | `images` | `image/png`, `image/jpeg`, `image/webp` | `.png`, `.jpg`, `.jpeg`, `.webp` |
 
-Reject anything not in the whitelist → `400` with diagnostic.
+Reject anything not in the whitelist → `422` (Pydantic validator — see [§5.1](#51-request-signed-upload-url)).
 
 ### 8.2 File size limits
 
@@ -816,7 +896,7 @@ Reject anything not in the whitelist → `400` with diagnostic.
 | `audio` | **50 MB** | KET listening audio ~3-5 min = ~5-10 MB at 128kbps. 50 MB gives ample headroom. |
 | `images` | **10 MB** | KET images are diagrams/forms, typically < 1 MB. 10 MB covers high-res scans. |
 
-Reject oversized → `400` with size info.
+Reject oversized → `422` (Pydantic validator — see [§5.1](#51-request-signed-upload-url)).
 
 ### 8.3 Path generation (extension derived from contentType)
 
@@ -825,14 +905,16 @@ Reject oversized → `400` with size info.
   messages, never used to construct the path.
 - Extension comes from the `EXT_FOR_MIME` mapping (see §3.2) — lookup
   by `contentType`. If `contentType` isn't in the map, reject with
-  400 (the Pydantic validator catches this before reaching the adapter).
+  422 (the Pydantic validator catches this before reaching the adapter).
 - Final path: `{uuid4()}{EXT_FOR_MIME[contentType]}` — e.g.
   `a1b2c3d4-5678-9abc-def0-123456789abc.mp3`.
 
-This eliminates the `evil.exe + contentType=audio/mpeg` attack — even
-if admin sends an executable as `audio/mpeg`, the stored path gets
-`.mp3` extension. (Supabase's `Restrict file uploads` MIME enforcement
-catches the content mismatch on actual PUT.)
+This makes the stored path **always** match the declared MIME type —
+admin can never trick the server into saving with a misleading
+extension like `.exe`. The actual binary content is **not** sniffed,
+however — Supabase's `Restrict file uploads` checks the `Content-Type`
+upload header (not magic bytes). See [edge case 8](#12-edge-cases--decisions)
+for the residual risk + a future hardening path (`python-magic`).
 
 ### 8.4 Client-side pre-validation (recommended)
 
@@ -866,12 +948,13 @@ function validateFile(file: File, bucket: 'audio' | 'images'): string | null {
 
 ### 9.2 Setup (one-time, Supabase Dashboard)
 
-If buckets don't exist yet, create them with the right settings from the
-start (UI lets you set everything in the New Bucket dialog):
+Current state: both buckets exist and are already public + size-limited +
+MIME-whitelisted (see [§3.1](#31-supabase-storage-buckets)). Only Step C
+below is still pending.
 
-**Step A — create bucket `audio`** (if not exists):
+**Step A — bucket `audio`** (already done — reference for future re-setup):
 
-Supabase Dashboard → **Storage** → **+ New bucket** → fill:
+Supabase Dashboard → **Storage** → **+ New bucket** (or **Edit bucket**):
 
 | Field | Value |
 |---|---|
@@ -881,7 +964,7 @@ Supabase Dashboard → **Storage** → **+ New bucket** → fill:
 | Allowed MIME types | `audio/mpeg, audio/mp4, audio/x-m4a, audio/m4a, audio/wav, audio/webm` |
 | File size limit | `50 MB` |
 
-**Step B — create bucket `images`** (same flow):
+**Step B — bucket `images`** (already done — same flow):
 
 | Field | Value |
 |---|---|
@@ -891,7 +974,7 @@ Supabase Dashboard → **Storage** → **+ New bucket** → fill:
 | Allowed MIME types | `image/png, image/jpeg, image/webp` |
 | File size limit | `10 MB` |
 
-**Step C — RLS policy for SELECT** (one-time, covers both buckets):
+**Step C — RLS policy for SELECT** (⚠️ **still needed** — covers both buckets):
 
 Open **SQL Editor** → run:
 
@@ -904,7 +987,7 @@ CREATE POLICY "Public read access for exam media"
 Upload remains restricted — only `service_role` (used by BE's signed URL
 flow) can write. No RLS policy for INSERT is needed for public users.
 
-**If buckets already exist**: click the bucket → **Edit bucket** button
+**If bucket config drifts**: click the bucket → **Edit bucket** button
 (top-right) → adjust the same fields as the create dialog. The Public
 toggle, MIME whitelist, and size limit can all be changed after creation.
 
@@ -995,7 +1078,7 @@ starts empty.
 | 5 | Two admins upload files with the same original filename | No conflict — server generates unique UUID paths. Both uploads succeed independently. |
 | 6 | Admin uploads a 50MB audio file | Accepted by validation. FE shows progress bar. Direct-to-storage avoids Render memory pressure. |
 | 7 | Non-admin tries `POST /api/admin/upload` | 403 `"Admin access required"` — same as all admin endpoints. |
-| 8 | Admin tries to upload a `.exe` file as "audio" | `contentType` validation rejects at BE: `400 "Invalid contentType ... for bucket audio"`. Even if admin spoofs `contentType: audio/mpeg`, the stored path uses `.mp3` extension (derived from MIME, not filename — §8.3); Supabase's `Restrict file uploads` MIME enforcement then rejects the actual binary content. |
+| 8 | Admin tries to upload a `.exe` file as "audio" | If admin honestly sends `contentType: application/x-msdownload`, BE validator rejects at 422. If admin **spoofs** `contentType: audio/mpeg`, BE accepts and signed URL is issued; Supabase's `Restrict file uploads` allow-list also checks the `Content-Type` HEADER (not the file's magic bytes), so the spoofed binary uploads successfully as `a1b2c3d4.mp3`. The file would be served with `Content-Type: audio/mpeg` — browsers won't execute it. **Defense-in-depth note**: v1 trusts admin uploads. If hosting admin-uploaded files for end-users becomes a security concern, add server-side magic-byte sniffing as a future enhancement (`python-magic` library) before issuing the signed URL or in a post-upload verify step. |
 | 9 | Admin uploads then wants to replace file at same URL | Not possible — UUID paths are unique. Upload new file → get new URL → update materials/question data → old file becomes orphan. |
 | 10 | Storage bucket is full (Supabase free tier: 1GB) | Supabase returns error on upload → FE gets non-200 from PUT. Show "Storage full — contact admin". Upgrade Supabase plan or clean orphans. |
 
@@ -1012,10 +1095,15 @@ starts empty.
 | `api/admin/schemas.py` | Add `UploadRequest` (with `model_validator`) + `UploadResponse` schemas |
 | `api/admin/routes.py` | Add `POST /api/admin/upload` endpoint |
 | `config/settings.py` | Add `STORAGE_PROVIDER` env var (default `"supabase"`) |
+| `.env.example` | Add `STORAGE_PROVIDER=supabase` line so new devs know it exists |
 | `requirements.txt` | Add `supabase>=2.0,<3` (official Python SDK) |
 
 **No database migration needed** — upload flow uses existing JSONB fields.
 No new tables.
+
+**No new env vars required at runtime** — `STORAGE_PROVIDER` defaults
+to `"supabase"`, and `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` are
+already present (used by other parts of the app).
 
 ---
 
@@ -1034,6 +1122,9 @@ interface UploadRequest {
 interface UploadResult {
   uploadUrl: string;         // signed PUT URL (Supabase fixes TTL at 2 hours)
   publicUrl: string;         // permanent URL to store in DB
+  token: string;             // bearer token (same as in uploadUrl query); use
+                             // with @supabase/supabase-js
+                             // .uploadToSignedUrl(path, token, file)
   path: string;              // storage path, e.g. "a1b2c3d4.mp3"
   bucket: 'audio' | 'images';
 }

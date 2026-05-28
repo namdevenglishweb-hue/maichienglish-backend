@@ -93,10 +93,11 @@ Follow these in order. After step 3.4 you have a working production URL.
      python scripts/init_schema.py
      ```
      This runs the same SQL via asyncpg. Add `--drop` to wipe existing tables first (dev only — destructive).
-5. Create Storage buckets: **Storage → New bucket** twice:
-   - `audio` (private)
-   - `images` (private)
-6. **Don't forget** to also enable RLS on all 7 tables manually after step 4 if you didn't tick "Run and enable RLS" — see [Troubleshooting](#8-troubleshooting).
+5. Create Storage buckets — **Storage → New bucket** twice. Set everything in the dialog (UI lets you do it in one step; see [MEDIA_UPLOAD.md §9.2](MEDIA_UPLOAD.md#92-setup-one-time-supabase-dashboard) for the full table):
+   - `audio` — Public ✅, Restrict file uploads ✅, MIME `audio/mpeg, audio/mp4, audio/x-m4a, audio/m4a, audio/wav, audio/webm`, size limit `50 MB`
+   - `images` — Public ✅, Restrict file uploads ✅, MIME `image/png, image/jpeg, image/webp`, size limit `10 MB`
+6. Apply the storage RLS policy so anon/authenticated can read public bucket files. **SQL Editor** → paste [`migrations/0008_storage_rls_policy.sql`](migrations/0008_storage_rls_policy.sql) → Run. Without this, the FE HEAD verify in the upload flow returns 400/404.
+7. **Don't forget** to also enable RLS on all 7 application tables manually after step 4 if you didn't tick "Run and enable RLS" — see [Troubleshooting](#8-troubleshooting).
 
 ### 3.2 GitHub repo + secrets
 
@@ -130,11 +131,14 @@ Follow these in order. After step 3.4 you have a working production URL.
 3. **Apply** the Blueprint. Render creates the service but **the first build will fail** — environment variables aren't set yet. That's expected.
 4. Open the service → **Environment** tab → add these (each line marked `sync: false` in `render.yaml` must be set manually):
 
-   | Variable | Source |
-   |----------|--------|
-   | `DATABASE_URL` | Supabase Session pooler (from step 3.1) |
-   | `JWT_SECRET_KEY` | Generate locally: `python -c "import secrets; print(secrets.token_urlsafe(48))"` |
-   | (others — set only if you override defaults) | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `CORS_ORIGINS`, `CORS_ORIGIN_REGEX` |
+   | Variable | Required? | Source |
+   |----------|-----------|--------|
+   | `DATABASE_URL` | required | Supabase Session pooler (from step 3.1) |
+   | `JWT_SECRET_KEY` | required | Generate locally: `python -c "import secrets; print(secrets.token_urlsafe(48))"` |
+   | `SUPABASE_URL` | required | Supabase Dashboard → Project Settings → API (used by media upload — `POST /api/admin/upload`) |
+   | `SUPABASE_SERVICE_ROLE_KEY` | required | Same page (do NOT use the anon key) |
+   | `STORAGE_PROVIDER` | optional | Default `supabase`. Change only when an S3 adapter ships. |
+   | `CORS_ORIGINS`, `CORS_ORIGIN_REGEX` | optional | Override only if defaults don't match your FE origin |
 
 5. **Save Changes** → Render kicks off a fresh build. Watch the **Logs** tab.
 6. Once status reads **Live**, copy the public URL (e.g. `https://maichienglish-api.onrender.com`) → put it in your password manager.

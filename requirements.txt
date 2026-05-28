@@ -6,3 +6,4 @@ email-validator>=2.0,<3
 asyncpg>=0.31,<1
 pyjwt>=2.12,<3
 bcrypt>=4.2,<5
+supabase>=2.0,<3

@@ -1,6 +1,6 @@
 from typing import Literal, Optional
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, model_validator
 
 
 class AdminCreateUserRequest(BaseModel):
@@ -163,3 +163,73 @@ class AdminUpdateSubscriptionResponse(BaseModel):
 
     status: int = 200
     data: AdminUpdateSubscriptionResponseData
+
+
+class UploadRequest(BaseModel):
+    """Body for POST /api/admin/upload — see MEDIA_UPLOAD.md §5.1."""
+
+    bucket: Literal["audio", "images"] = Field(
+        ..., description="Target storage bucket"
+    )
+    filename: str = Field(
+        ...,
+        min_length=1,
+        description="Original filename (used only for error messages — extension is derived from contentType)",
+    )
+    contentType: str = Field(
+        ..., min_length=1, description="MIME type — validated against the bucket's whitelist"
+    )
+    fileSizeBytes: int = Field(
+        ..., ge=1, description="File size in bytes — validated against the bucket's size limit"
+    )
+
+    @model_validator(mode="after")
+    def _cross_validate(self) -> "UploadRequest":
+        from services.storage_service import ALLOWED_TYPES, EXT_FOR_MIME, SIZE_LIMITS
+
+        allowed = ALLOWED_TYPES[self.bucket]
+        if self.contentType not in allowed:
+            raise ValueError(
+                f'Invalid contentType "{self.contentType}" for bucket "{self.bucket}"; '
+                f"allowed: {sorted(allowed)}"
+            )
+        if self.contentType not in EXT_FOR_MIME:
+            raise ValueError(
+                f'No extension mapping for contentType "{self.contentType}"'
+            )
+        limit = SIZE_LIMITS[self.bucket]
+        if self.fileSizeBytes > limit:
+            raise ValueError(
+                f"File size {self.fileSizeBytes} exceeds limit of {limit} bytes "
+                f'for bucket "{self.bucket}"'
+            )
+        return self
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "bucket": "audio",
+                "filename": "ket-listening-p5.mp3",
+                "contentType": "audio/mpeg",
+                "fileSizeBytes": 3500000,
+            }
+        }
+    }
+
+
+class UploadResponseData(BaseModel):
+    uploadUrl: str = Field(..., description="Signed PUT URL (Supabase fixes TTL at 2h)")
+    publicUrl: str = Field(..., description="Permanent URL to persist in DB")
+    token: str = Field(
+        ...,
+        description="Bearer token from uploadUrl query; usable with @supabase/supabase-js .uploadToSignedUrl()",
+    )
+    path: str = Field(..., description="Storage path within the bucket")
+    bucket: Literal["audio", "images"]
+
+
+class UploadResponse(BaseModel):
+    """Wrapped POST /api/admin/upload response."""
+
+    status: int = 200
+    data: UploadResponseData
