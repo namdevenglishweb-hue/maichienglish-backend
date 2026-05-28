@@ -511,22 +511,25 @@ def get_storage_service() -> StorageService:
         return SupabaseStorageAdapter(settings)
 ```
 
-### 6.3 Supabase adapter (current — uses official `supabase-py` SDK)
+### 6.3 Supabase adapter (current — uses `storage3` directly)
 
-We use the official `supabase-py` SDK (v2.x) instead of raw HTTP calls.
-The SDK handles auth, endpoint paths, response shape differences across
-API versions, and edge cases like the upload protocol (whether to use
-PUT + `Authorization` header vs query token, `x-upsert` behavior, etc.).
+We use `storage3` (the Supabase Storage sub-package, pinned at `2.19.x`)
+directly instead of the full `supabase` umbrella. The umbrella package
+pulls `pyiceberg` (data-lake library with a C extension) which fails
+to build on `python:3.14-slim` for lack of `libc6-dev` headers — and
+we don't need Auth/Realtime/Functions anyway. The SDK still handles
+auth headers, endpoint paths, response shape differences, and upload
+protocol edge cases so we don't reverse-engineer the REST API.
 
-**Important: SDK is sync, but our route is async.** `create_client()` returns
-a synchronous `Client` that uses `requests` under the hood. Calling its
-methods directly from `async def` would block the FastAPI event loop —
-every concurrent upload-URL request would queue serially. We wrap each
-SDK call in `asyncio.to_thread()` so it runs in a worker thread.
+**Important: SDK is sync, but our route is async.** `create_client()`
+returns a synchronous `SyncStorageClient` that uses `requests`/`httpx`
+under the hood. Calling its methods directly from `async def` would
+block the FastAPI event loop — every concurrent upload-URL request
+would queue serially. We wrap each SDK call in `asyncio.to_thread()`
+so it runs in a worker thread.
 
-> The SDK does expose an `AsyncClient` (via `acreate_client`) but its
-> storage support has been limited/unstable across versions. Sync +
-> `to_thread()` is the safer, version-agnostic pattern.
+> `storage3` also exposes an `AsyncStorageClient`, but the sync +
+> `to_thread()` pattern is version-agnostic and easier to reason about.
 
 ```python
 # services/adapters/supabase_storage.py
@@ -535,7 +538,7 @@ import asyncio
 import logging
 import uuid
 
-from supabase import Client, create_client
+from storage3 import SyncStorageClient, create_client
 
 from services.storage_service import (
     EXT_FOR_MIME,
@@ -547,17 +550,21 @@ logger = logging.getLogger(__name__)
 
 
 class SupabaseStorageAdapter(StorageService):
-    """Supabase Storage implementation via the official supabase-py SDK.
+    """Supabase Storage implementation via the `storage3` SDK (sub-package
+    of supabase-py — we depend on it directly to avoid the umbrella
+    pulling pyiceberg).
 
     Sync SDK calls are dispatched via asyncio.to_thread() so they
     don't block the FastAPI event loop.
     """
 
     def __init__(self, settings):
-        self.base_url = settings.supabase_url
-        self.client: Client = create_client(
-            settings.supabase_url,
-            settings.supabase_service_role_key,
+        self.base_url = settings.supabase_url.rstrip("/")
+        key = settings.supabase_service_role_key
+        self.client: SyncStorageClient = create_client(
+            f"{self.base_url}/storage/v1",
+            {"apikey": key, "Authorization": f"Bearer {key}"},
+            is_async=False,
         )
 
     async def create_signed_upload(self, bucket, content_type, file_size_bytes):
@@ -566,12 +573,10 @@ class SupabaseStorageAdapter(StorageService):
         file_id = str(uuid.uuid4())
         path = f"{file_id}{ext}"
 
-        # SDK method — returns dict with 'signedUrl', 'token', 'path'
-        # (field names verified for supabase-py v2.x; older versions
-        # used 'signed_url' — pin the SDK version in requirements.txt).
+        # SDK returns dict with 'signedUrl', 'signed_url', 'token', 'path'.
         # TTL is fixed at 2 hours by Supabase, not configurable here.
         result = await asyncio.to_thread(
-            self.client.storage.from_(bucket).create_signed_upload_url,
+            self.client.from_(bucket).create_signed_upload_url,
             path,
         )
 
@@ -581,9 +586,9 @@ class SupabaseStorageAdapter(StorageService):
         if not signed.startswith("http"):
             signed = f"{self.base_url}/storage/v1{signed}"
 
-        # The SDK also returns a `token` extracted from the URL query string.
-        # We pass it through so FE using @supabase/supabase-js can call
-        # uploadToSignedUrl(path, token, file) without parsing the URL.
+        # Token from the URL query string — passed through so FE using
+        # @supabase/supabase-js can call uploadToSignedUrl(path, token, file)
+        # without parsing the URL.
         token = result.get("token") or ""
 
         public_url = f"{self.base_url}/storage/v1/object/public/{bucket}/{path}"
@@ -598,7 +603,7 @@ class SupabaseStorageAdapter(StorageService):
 
     async def delete_file(self, bucket, path):
         await asyncio.to_thread(
-            self.client.storage.from_(bucket).remove,
+            self.client.from_(bucket).remove,
             [path],
         )
 ```
@@ -1096,7 +1101,7 @@ starts empty.
 | `api/admin/routes.py` | Add `POST /api/admin/upload` endpoint |
 | `config/settings.py` | Add `STORAGE_PROVIDER` env var (default `"supabase"`) |
 | `.env.example` | Add `STORAGE_PROVIDER=supabase` line so new devs know it exists |
-| `requirements.txt` | Add `supabase>=2.0,<3` (official Python SDK) |
+| `requirements.txt` | Add `storage3>=2.19,<2.20` (Supabase Storage Python SDK — sub-package of supabase-py; we use `storage3` directly because the umbrella `supabase` package pulls `pyiceberg`, a data-lake library with a C extension that fails to build on `python:3.14-slim`. We don't use Auth/Realtime/Functions/Iceberg.) |
 
 **No database migration needed** — upload flow uses existing JSONB fields.
 No new tables.

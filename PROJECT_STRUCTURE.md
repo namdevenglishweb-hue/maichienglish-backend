@@ -12,11 +12,11 @@
 ```
 maichienglish-be/
 ├── main.py                          # ✅ FastAPI app entry — lifespan inits DB pool, uses setup_logging(), mounts auth/users/subscriptions/admin/exams/sections/questions/attempts/parents routers, exposes /health and /db-ping
-├── requirements.txt                 # ✅ Pinned deps: fastapi, uvicorn, pydantic, pydantic-settings, email-validator, asyncpg, pyjwt, bcrypt
+├── requirements.txt                 # ✅ Pinned deps: fastapi, uvicorn, pydantic, pydantic-settings, email-validator, asyncpg, pyjwt, bcrypt, storage3 (Supabase Storage SDK — pinned to 2.19.x to avoid pulling pyiceberg/data-lake deps via the full `supabase` umbrella)
 ├── Dockerfile                       # ✅ Python 3.14-slim, non-root appuser, EXPOSE 8000, HEALTHCHECK on /health
 ├── render.yaml                      # ✅ Render web service: docker runtime, Singapore region, free plan, autoDeploy:false (deploy triggered by GHA after CI passes), healthCheckPath /health
 ├── schema.sql                       # ✅ Initial Postgres schema (Exam → Section → Question, attempt_section_state). Paste into Supabase SQL Editor on first setup. Source of truth: MAICHIENGLISH_BACKEND_PLAN.md §3
-├── .env.example                     # ✅ Template for DATABASE_URL, DEBUG, CORS_ORIGINS, CORS_ORIGIN_REGEX, JWT_*, ADMIN_* (seed-only)
+├── .env.example                     # ✅ Template for DATABASE_URL, DEBUG, CORS_ORIGINS, CORS_ORIGIN_REGEX, JWT_*, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY (required for media upload), STORAGE_PROVIDER (optional, default supabase), ADMIN_* (seed-only)
 ├── .env                             # ⏳ Local secrets (gitignored)
 ├── .gitignore                       # ✅ Ignore .env, __pycache__, .venv, .pytest_cache, IDE files
 ├── README.md                        # ✅ Project intro + quickstart
@@ -32,7 +32,7 @@ maichienglish-be/
 ```
 config/
 ├── __init__.py                      # ✅ Empty package marker
-├── settings.py                      # ✅ Pydantic `Settings(BaseSettings)` — app_name, port, DATABASE_URL, DEBUG, CORS_ORIGINS, CORS_ORIGIN_REGEX, JWT_*, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY; cached via @lru_cache; warns when JWT secret is still default
+├── settings.py                      # ✅ Pydantic `Settings(BaseSettings)` — app_name, port, DATABASE_URL, DEBUG, CORS_ORIGINS, CORS_ORIGIN_REGEX, JWT_*, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, STORAGE_PROVIDER (default "supabase"); cached via @lru_cache; warns when JWT secret is still default
 ├── database.py                      # ✅ asyncpg pool lifecycle — init_db_pool / close_db_pool / get_db_pool
 └── logging.py                       # ✅ `setup_logging()` — stdout handler, common format, quiets httpx/uvicorn.access
 ```
@@ -107,7 +107,7 @@ services/
 ├── storage_service.py               # ✅ Provider-agnostic media upload — StorageService ABC + UploadResult dataclass + EXT_FOR_MIME/ALLOWED_TYPES/SIZE_LIMITS shared constants + get_storage_service() factory (driven by STORAGE_PROVIDER env). See MEDIA_UPLOAD.md.
 └── adapters/
     ├── __init__.py                  # ✅ Empty package marker
-    ├── supabase_storage.py          # ✅ SupabaseStorageAdapter — wraps supabase-py v2 SDK (sync) with asyncio.to_thread() so create_signed_upload_url / remove don't block the event loop. Derives extension from contentType (not filename).
+    ├── supabase_storage.py          # ✅ SupabaseStorageAdapter — wraps `storage3` SDK directly (sync, version-pinned at 2.19.x; full `supabase` umbrella pulls pyiceberg which fails to build on python:3.14-slim). Uses asyncio.to_thread() so create_signed_upload_url / remove don't block the event loop. Derives extension from contentType (not filename).
     └── s3_storage.py                # ✅ Stub — raises NotImplementedError until S3 is needed.
 ```
 
@@ -158,7 +158,8 @@ migrations/
 ├── 0005_section_type.sql            # ✅ Add `sections.type` (rendering hint: multiple_choice/fill_blank/matching, nullable). No data migration needed for matching shape change (prior shape never shipped). Idempotent.
 ├── 0006_materials_typed_blocks.sql  # ✅ Drop `sections.audio_url` (audio moves into `materials` JSONB as typed block). Replace `attempt_section_state.audio_play_count` (scalar) with `audio_play_counts jsonb` keyed by material_index for per-audio counters. Idempotent.
 ├── 0007_partial_unique_positions.sql # ✅ Hotfix: replace plain UNIQUE(exam_id, position) / UNIQUE(section_id, position) with PARTIAL unique indexes filtered by `deleted_at IS NULL`. Soft-deleted rows no longer block position reuse (was causing 500 UniqueViolation on POST /sections after admin soft-deletes any position). Idempotent.
-└── 0008_storage_rls_policy.sql      # ✅ RLS SELECT policy on storage.objects for the `audio` + `images` buckets — anon/authenticated can read public bucket files; INSERT/UPDATE/DELETE remain restricted to service_role. Required for the FE HEAD verify in the upload flow. Idempotent.
+├── 0008_section_type_mc_shared.sql  # ✅ Extend `sections.type` CHECK to include `multiple_choice_shared` (KET Reading Part 2-style: many MC questions sharing the same few options, rendered as compact shared-header table). Data shape unchanged — rendering hint only. Idempotent.
+└── 0009_storage_rls_policy.sql      # ✅ RLS SELECT policy on storage.objects for the `audio` + `images` buckets — anon/authenticated can read public bucket files; INSERT/UPDATE/DELETE remain restricted to service_role. Required for the FE HEAD verify in the upload flow. Idempotent.
 ```
 
 ```
