@@ -205,14 +205,23 @@ async def admin_request_upload(request: UploadRequest):
 
     See MEDIA_UPLOAD.md. Validation happens in `UploadRequest`'s
     model_validator (returns 422). Storage transport failures map to
-    503; any other adapter exception maps to 500.
+    503; missing env vars / adapter init failures map to 503 (so the
+    response carries CORS headers — an unhandled RuntimeError out of
+    the route bypasses CORSMiddleware and the browser surfaces it as
+    a CORS error instead of the real 500).
     """
-    storage = get_storage_service()
     try:
+        storage = get_storage_service()
         result = await storage.create_signed_upload(
             bucket=request.bucket,
             content_type=request.contentType,
             file_size_bytes=request.fileSizeBytes,
+        )
+    except RuntimeError as e:
+        logger.exception("storage adapter init failed")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Storage service not configured",
         )
     except Exception as e:
         status_code = getattr(e, "status_code", None) or getattr(e, "code", None)
