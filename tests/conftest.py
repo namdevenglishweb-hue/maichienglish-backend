@@ -146,17 +146,24 @@ async def db(db_pool):
 async def client(db):
     """httpx.AsyncClient bound to the FastAPI app via ASGI transport.
 
-    Drives the lifespan via `asgi-lifespan` so any startup hooks run.
-    `init_db_pool()` is a no-op because `db_pool` already set `_pool`.
-    Importing `main` inside the fixture defers app construction until
-    after env vars + the pool are in place.
+    Deliberately does NOT run the FastAPI lifespan. Reason:
+    - `db_pool` fixture already published its pool to
+      `config.database._pool`, so `init_db_pool()` would be a no-op.
+    - Each service (user_service, auth_service, attempt_service, …) is
+      a module-level singleton that CACHES `self._db_pool` on first
+      access. Running the lifespan teardown would call
+      `close_db_pool()` → close + None — but the cached references on
+      the services keep pointing at the closed pool. Subsequent
+      requests then fail with `pool is closed`.
+    - Skipping lifespan keeps the pool alive for the whole session.
+      The only thing our lifespan does is the pool init/close, both of
+      which the test infrastructure already handles.
     """
     from main import app
 
-    async with LifespanManager(app):
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as c:
-            yield c
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
 
 
 # ---------------------------------------------------------------------------
