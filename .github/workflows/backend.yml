@@ -67,5 +67,18 @@ jobs:
             -H "Content-Type: application/json" \
             "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/deploys"
 
-  # Sprint 2 will add a Postgres service to the `test` job for integration tests
-  # (service layer + auth flow). Linting (ruff + mypy) is also pending.
+  # Sprint 2 will add a second `integration` job below with:
+  #   services:
+  #     postgres:
+  #       image: postgres:17-alpine
+  #       env: { POSTGRES_PASSWORD: test }
+  #       ports: ['5432:5432']
+  #       options: >-
+  #         --health-cmd pg_isready --health-interval 10s
+  #   steps:
+  #     - run: python scripts/init_schema.py
+  #     - env:
+  #         MAICHI_TEST_DB: '1'          # opt-in flag honored by tests/conftest.py
+  #         DATABASE_URL: postgresql://postgres:test@localhost:5432/postgres
+  #       run: pytest -m integration --cov
+  # Linting (ruff + mypy) is also pending.

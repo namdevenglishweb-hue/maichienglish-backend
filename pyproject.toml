@@ -6,6 +6,12 @@ addopts = [
     "--strict-markers",
     "--strict-config",
 ]
+markers = [
+    # Tests touching a real Postgres. Auto-skipped unless MAICHI_TEST_DB=1
+    # — see the collection hook in tests/conftest.py. CI sets the env in
+    # the integration test job; local dev runs unit tests by default.
+    "integration: requires a live Postgres (Sprint 2+); opt-in via MAICHI_TEST_DB=1",
+]
 filterwarnings = [
     "error",
     # bcrypt 4.x emits a DeprecationWarning about the deprecated __about__ module
