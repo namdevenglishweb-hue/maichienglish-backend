@@ -1,0 +1,14 @@
+-r requirements.txt
+
+# Test runner + async support
+pytest>=8,<9
+pytest-asyncio>=0.24,<1
+
+# Coverage measurement
+pytest-cov>=5,<7
+
+# Async HTTP client (used for FastAPI TestClient async transport in later sprints)
+httpx>=0.28,<1
+
+# Freeze time for JWT exp / password reset code TTL tests
+freezegun>=1.5,<2

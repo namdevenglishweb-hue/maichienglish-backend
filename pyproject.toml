@@ -1,0 +1,34 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+]
+filterwarnings = [
+    "error",
+    # bcrypt 4.x emits a DeprecationWarning about the deprecated __about__ module
+    # — third-party noise, not actionable from our code.
+    "ignore::DeprecationWarning:bcrypt",
+    "ignore::DeprecationWarning:passlib",
+]
+
+[tool.coverage.run]
+source = ["api", "config", "dependencies", "services", "utils"]
+omit = [
+    "tests/*",
+    ".venv/*",
+    "migrations/*",
+    "scripts/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]

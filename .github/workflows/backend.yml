@@ -33,10 +33,31 @@ jobs:
           DATABASE_URL: "postgresql://user:pass@localhost:5432/db"
         run: python -c "import main; print('app:', main.app.title)"
 
+  test:
+    name: Pytest (no-DB unit + schema + mocked adapter)
+    runs-on: ubuntu-latest
+    needs: smoke
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run pytest
+        run: pytest --cov
+
   deploy:
     name: Trigger Render deploy
     runs-on: ubuntu-latest
-    needs: smoke
+    needs: test
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
       - name: Call Render Deploy API
@@ -46,4 +67,5 @@ jobs:
             -H "Content-Type: application/json" \
             "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/deploys"
 
-  # When real tests + linting land in B3, add ruff/mypy/pytest jobs before `deploy`.
+  # Sprint 2 will add a Postgres service to the `test` job for integration tests
+  # (service layer + auth flow). Linting (ruff + mypy) is also pending.
