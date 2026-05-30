@@ -123,8 +123,8 @@ async def test_A3_start_strips_correct_index_from_mc_questions(make_user, make_e
         user_id=user["id"], exam_id=exam["id"]
     )
     q = result["exam"]["sections"][0]["questions"][0]
-    assert "correct_index" not in q["question_data"]
-    assert q["question_data"]["options"]  # options still present
+    assert "correct_index" not in q["questionData"]
+    assert q["questionData"]["options"]  # options still present
 
 
 async def test_A4_start_strips_correct_index_from_matching_questions(make_user, make_exam):
@@ -135,7 +135,7 @@ async def test_A4_start_strips_correct_index_from_matching_questions(make_user, 
         user_id=user["id"], exam_id=exam["id"]
     )
     q = result["exam"]["sections"][0]["questions"][0]
-    assert "correct_index" not in q["question_data"]
+    assert "correct_index" not in q["questionData"]
 
 
 async def test_A5_start_strips_correct_answers_from_fill_blank(make_user, make_exam):
@@ -146,8 +146,8 @@ async def test_A5_start_strips_correct_answers_from_fill_blank(make_user, make_e
         user_id=user["id"], exam_id=exam["id"]
     )
     q = result["exam"]["sections"][0]["questions"][0]
-    assert "correct_answers" not in q["question_data"]
-    assert "case_sensitive" not in q["question_data"]
+    assert "correct_answers" not in q["questionData"]
+    assert "case_sensitive" not in q["questionData"]
 
 
 async def test_A6_start_consumes_quota(make_user, make_exam, db_pool):
@@ -273,7 +273,7 @@ async def test_B3_resume_returns_saved_answers_from_db(
     resumed = await attempt_service.start_attempt(
         user_id=user["id"], exam_id=exam["id"]
     )
-    saved_qids = {a["question_id"] for a in resumed["saved_answers"]}
+    saved_qids = {a["questionId"] for a in resumed["saved_answers"]}
     assert saved_qids == {q1_id, q2_id}
 
 
@@ -315,8 +315,8 @@ async def test_B5_resume_keeps_correct_fields_stripped(make_user, make_exam):
     )
 
     qs = resumed["exam"]["sections"][0]["questions"]
-    assert "correct_index" not in qs[0]["question_data"]
-    assert "correct_answers" not in qs[1]["question_data"]
+    assert "correct_index" not in qs[0]["questionData"]
+    assert "correct_answers" not in qs[1]["questionData"]
 
 
 async def test_B6_resume_returns_original_started_at(make_user, make_exam):
@@ -364,7 +364,7 @@ async def test_B7_resume_filters_saved_answers_for_hard_deleted_questions(
     resumed = await attempt_service.start_attempt(
         user_id=user["id"], exam_id=exam["id"]
     )
-    saved_qids = {a["question_id"] for a in resumed["saved_answers"]}
+    saved_qids = {a["questionId"] for a in resumed["saved_answers"]}
     assert saved_qids == {q2["id"]}
 
 
@@ -397,7 +397,7 @@ async def test_B8_resume_filters_saved_answers_for_soft_deleted_questions(
     resumed = await attempt_service.start_attempt(
         user_id=user["id"], exam_id=exam["id"]
     )
-    saved_qids = {a["question_id"] for a in resumed["saved_answers"]}
+    saved_qids = {a["questionId"] for a in resumed["saved_answers"]}
     assert q1["id"] not in saved_qids
     assert q2["id"] in saved_qids
 

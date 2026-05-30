@@ -86,7 +86,12 @@ async def db_pool():
     `client` (no duplicate pool init/close churn).
     """
     dsn = os.environ.get("MAICHI_TEST_DATABASE_URL") or os.environ["DATABASE_URL"]
-    pool = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=5)
+    # max_size=20 because the race-condition tests (Z6 in
+    # test_attempt_service_start.py) fire 50 concurrent start_attempt calls.
+    # Small pool + many waiters has caused occasional TRUNCATE deadlocks in
+    # CI between tests, since lingering session state from gather()'d coroutines
+    # can hold AccessShareLock against the next test's TRUNCATE.
+    pool = await asyncpg.create_pool(dsn=dsn, min_size=2, max_size=20)
 
     async with pool.acquire() as conn:
         drop_sql = (
@@ -109,18 +114,31 @@ async def db_pool():
 
 @pytest_asyncio.fixture
 async def db(db_pool):
-    """Per-test isolation: TRUNCATE all data tables before yield.
+    """Per-test isolation via DELETE on a separate (non-pool) connection.
 
-    Faster than reapplying schema (~5ms vs ~500ms) and sufficient for
-    integration tests that don't mutate schema. UUID primary keys mean
-    we don't need RESTART IDENTITY.
+    TRUNCATE was deadlocking in CI: pool connections from the previous
+    test sometimes still hold AccessShareLock on data tables when the
+    next test's TRUNCATE asks for AccessExclusiveLock on the same set,
+    while we (the TRUNCATE caller) hold AccessShareLock on another set
+    via FK validation. Postgres detects the cycle and aborts us.
+
+    Two changes to remove the failure surface:
+      1. DELETE instead of TRUNCATE — only takes RowExclusiveLock,
+         doesn't conflict with the pool's idle AccessShareLocks.
+      2. Run on a dedicated `asyncpg.connect()` outside the app pool,
+         so we don't share catalog/prepared-statement state with any
+         coroutine still in flight from the previous test.
+
+    Iterating `_DATA_TABLES` in declared (children → parents) order
+    makes ON DELETE CASCADE happy without explicit ordering. ~10ms.
     """
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            "TRUNCATE "
-            + ", ".join(f"public.{t}" for t in _DATA_TABLES)
-            + " CASCADE"
-        )
+    dsn = os.environ.get("MAICHI_TEST_DATABASE_URL") or os.environ["DATABASE_URL"]
+    cleanup_conn = await asyncpg.connect(dsn)
+    try:
+        for table in _DATA_TABLES:
+            await cleanup_conn.execute(f"DELETE FROM public.{table}")
+    finally:
+        await cleanup_conn.close()
     yield db_pool
 
 
