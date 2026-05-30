@@ -27,6 +27,11 @@ filterwarnings = [
     # — third-party noise, not actionable from our code.
     "ignore::DeprecationWarning:bcrypt",
     "ignore::DeprecationWarning:passlib",
+    # pytest-asyncio 0.26.x calls `asyncio.get_event_loop_policy()` which Python
+    # 3.14 deprecated (removal in 3.16). Locally on 3.11 the warning is silent;
+    # in CI on 3.14 it fires and our `error` filter promotes it to a failure.
+    # Newer pytest-asyncio (1.x line) fixes this but is a major bump — defer.
+    "ignore:'asyncio.get_event_loop_policy' is deprecated:DeprecationWarning",
 ]
 
 [tool.coverage.run]
