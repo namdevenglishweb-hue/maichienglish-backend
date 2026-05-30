@@ -1,5 +1,9 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Put the project root on sys.path so tests can `import api`, `import services`,
+# `import utils` without needing `python -m pytest` or installing the package.
+# (Bare `pytest` doesn't add CWD; `python -m pytest` does — pythonpath unifies both.)
+pythonpath = ["."]
 asyncio_mode = "auto"
 # Share one event loop across all async fixtures + tests so the
 # session-scoped db_pool fixture (in conftest.py) can persist across

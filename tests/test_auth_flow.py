@@ -7,8 +7,6 @@ Docker setup).
 
 import pytest
 
-from tests.conftest import auth_headers
-
 pytestmark = pytest.mark.integration
 
 
@@ -160,7 +158,7 @@ async def test_refresh_rejects_token_for_deleted_user(client, make_user):
 # ===========================================================================
 
 
-async def test_verify_returns_claims_for_valid_access_token(client, make_user):
+async def test_verify_returns_claims_for_valid_access_token(client, make_user, auth_headers):
     user = await make_user(
         email="gina@maichienglish.test",
         password="gina-pw",

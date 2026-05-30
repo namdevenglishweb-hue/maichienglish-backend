@@ -184,8 +184,10 @@ async def make_user(db):
     return _make
 
 
-def auth_headers(email: str, role: str = "student", tier: str = "free") -> dict:
-    """Build an `Authorization: Bearer <jwt>` header dict for a known user.
+@pytest.fixture
+def auth_headers():
+    """Factory fixture — `auth_headers(email, role=..., tier=...)` returns
+    a Bearer header dict signed by the same JWT secret the app uses.
 
     The user must already exist in the DB for endpoints that look it up
     via `get_by_email` (e.g. /api/users/me, /api/auth/refresh). For
@@ -194,5 +196,8 @@ def auth_headers(email: str, role: str = "student", tier: str = "free") -> dict:
     """
     from utils.jwt_utils import create_access_token
 
-    token = create_access_token(email=email, role=role, tier=tier)
-    return {"Authorization": f"Bearer {token}"}
+    def _make(email: str, role: str = "student", tier: str = "free") -> dict:
+        token = create_access_token(email=email, role=role, tier=tier)
+        return {"Authorization": f"Bearer {token}"}
+
+    return _make
