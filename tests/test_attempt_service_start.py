@@ -83,7 +83,7 @@ async def _count_attempts(db_pool, user_id: str) -> int:
 
 
 async def test_A1_start_with_no_active_creates_new(make_user, make_exam):
-    user = await make_user(email="a1@x.test", password="x")
+    user = await make_user(email="a1@x.com", password="x")
     exam = await _make_simple_exam(make_exam)
 
     result = await attempt_service.start_attempt(
@@ -97,7 +97,7 @@ async def test_A1_start_with_no_active_creates_new(make_user, make_exam):
 
 
 async def test_A2_start_returns_full_exam_tree(make_user, make_exam):
-    user = await make_user(email="a2@x.test", password="x")
+    user = await make_user(email="a2@x.com", password="x")
     exam = await make_exam(
         sections=[
             {"type": "multiple_choice", "questions": [_MC_Q, _MC_Q, _MC_Q]},
@@ -116,7 +116,7 @@ async def test_A2_start_returns_full_exam_tree(make_user, make_exam):
 
 
 async def test_A3_start_strips_correct_index_from_mc_questions(make_user, make_exam):
-    user = await make_user(email="a3@x.test", password="x")
+    user = await make_user(email="a3@x.com", password="x")
     exam = await make_exam(sections=[{"questions": [_MC_Q]}])
 
     result = await attempt_service.start_attempt(
@@ -128,7 +128,7 @@ async def test_A3_start_strips_correct_index_from_mc_questions(make_user, make_e
 
 
 async def test_A4_start_strips_correct_index_from_matching_questions(make_user, make_exam):
-    user = await make_user(email="a4@x.test", password="x")
+    user = await make_user(email="a4@x.com", password="x")
     exam = await make_exam(sections=[{"questions": [_MATCHING_Q]}])
 
     result = await attempt_service.start_attempt(
@@ -139,7 +139,7 @@ async def test_A4_start_strips_correct_index_from_matching_questions(make_user, 
 
 
 async def test_A5_start_strips_correct_answers_from_fill_blank(make_user, make_exam):
-    user = await make_user(email="a5@x.test", password="x")
+    user = await make_user(email="a5@x.com", password="x")
     exam = await make_exam(sections=[{"questions": [_FILL_Q]}])
 
     result = await attempt_service.start_attempt(
@@ -152,7 +152,7 @@ async def test_A5_start_strips_correct_answers_from_fill_blank(make_user, make_e
 
 async def test_A6_start_consumes_quota(make_user, make_exam, db_pool):
     """Free tier: 1 attempt before + new start → 2 total."""
-    user = await make_user(email="a6@x.test", password="x", tier="free")
+    user = await make_user(email="a6@x.com", password="x", tier="free")
     exam = await _make_simple_exam(make_exam)
 
     before = await _count_attempts(db_pool, user["id"])
@@ -163,7 +163,7 @@ async def test_A6_start_consumes_quota(make_user, make_exam, db_pool):
 
 
 async def test_A7_start_returns_empty_saved_answers(make_user, make_exam):
-    user = await make_user(email="a7@x.test", password="x")
+    user = await make_user(email="a7@x.com", password="x")
     exam = await _make_simple_exam(make_exam)
 
     result = await attempt_service.start_attempt(
@@ -175,7 +175,7 @@ async def test_A7_start_returns_empty_saved_answers(make_user, make_exam):
 async def test_A8_start_sets_started_at_recent(make_user, make_exam, db_pool):
     import uuid
 
-    user = await make_user(email="a8@x.test", password="x")
+    user = await make_user(email="a8@x.com", password="x")
     exam = await _make_simple_exam(make_exam)
 
     before = datetime.now(timezone.utc)
@@ -195,7 +195,7 @@ async def test_A8_start_sets_started_at_recent(make_user, make_exam, db_pool):
 async def test_A9_start_records_correct_user_and_exam_id(make_user, make_exam, db_pool):
     import uuid
 
-    user = await make_user(email="a9@x.test", password="x")
+    user = await make_user(email="a9@x.com", password="x")
     exam = await _make_simple_exam(make_exam)
 
     result = await attempt_service.start_attempt(
@@ -216,7 +216,7 @@ async def test_A9_start_records_correct_user_and_exam_id(make_user, make_exam, d
 
 
 async def test_B1_start_returns_existing_active_attempt(make_user, make_exam):
-    user = await make_user(email="b1@x.test", password="x")
+    user = await make_user(email="b1@x.com", password="x")
     exam = await _make_simple_exam(make_exam)
 
     first = await attempt_service.start_attempt(
@@ -231,7 +231,7 @@ async def test_B1_start_returns_existing_active_attempt(make_user, make_exam):
 
 
 async def test_B2_resume_does_not_consume_quota(make_user, make_exam, db_pool):
-    user = await make_user(email="b2@x.test", password="x")
+    user = await make_user(email="b2@x.com", password="x")
     exam = await _make_simple_exam(make_exam)
 
     await attempt_service.start_attempt(user_id=user["id"], exam_id=exam["id"])
@@ -251,7 +251,7 @@ async def test_B3_resume_returns_saved_answers_from_db(
     import json
     import uuid
 
-    user = await make_user(email="b3@x.test", password="x")
+    user = await make_user(email="b3@x.com", password="x")
     exam = await make_exam(sections=[{"questions": [_MC_Q, _FILL_Q]}])
     first = await attempt_service.start_attempt(
         user_id=user["id"], exam_id=exam["id"]
@@ -283,7 +283,7 @@ async def test_B4_resume_omits_unsaved_questions_from_saved_answers(
     import json
     import uuid
 
-    user = await make_user(email="b4@x.test", password="x")
+    user = await make_user(email="b4@x.com", password="x")
     exam = await make_exam(sections=[{"questions": [_MC_Q, _FILL_Q, _MATCHING_Q]}])
     first = await attempt_service.start_attempt(
         user_id=user["id"], exam_id=exam["id"]
@@ -306,7 +306,7 @@ async def test_B4_resume_omits_unsaved_questions_from_saved_answers(
 
 
 async def test_B5_resume_keeps_correct_fields_stripped(make_user, make_exam):
-    user = await make_user(email="b5@x.test", password="x")
+    user = await make_user(email="b5@x.com", password="x")
     exam = await make_exam(sections=[{"questions": [_MC_Q, _FILL_Q]}])
 
     await attempt_service.start_attempt(user_id=user["id"], exam_id=exam["id"])
@@ -320,7 +320,7 @@ async def test_B5_resume_keeps_correct_fields_stripped(make_user, make_exam):
 
 
 async def test_B6_resume_returns_original_started_at(make_user, make_exam):
-    user = await make_user(email="b6@x.test", password="x")
+    user = await make_user(email="b6@x.com", password="x")
     exam = await _make_simple_exam(make_exam)
 
     first = await attempt_service.start_attempt(
@@ -342,7 +342,7 @@ async def test_B7_resume_filters_saved_answers_for_hard_deleted_questions(
     import json
     import uuid
 
-    user = await make_user(email="b7@x.test", password="x")
+    user = await make_user(email="b7@x.com", password="x")
     exam = await make_exam(sections=[{"questions": [_MC_Q, _FILL_Q]}])
     first = await attempt_service.start_attempt(
         user_id=user["id"], exam_id=exam["id"]
@@ -374,7 +374,7 @@ async def test_B8_resume_filters_saved_answers_for_soft_deleted_questions(
     import json
     import uuid
 
-    user = await make_user(email="b8@x.test", password="x")
+    user = await make_user(email="b8@x.com", password="x")
     exam = await make_exam(sections=[{"questions": [_MC_Q, _FILL_Q]}])
     first = await attempt_service.start_attempt(
         user_id=user["id"], exam_id=exam["id"]
@@ -410,7 +410,7 @@ async def test_B8_resume_filters_saved_answers_for_soft_deleted_questions(
 async def test_K1_start_different_exam_with_active_raises_conflict(
     make_user, make_exam
 ):
-    user = await make_user(email="k1@x.test", password="x")
+    user = await make_user(email="k1@x.com", password="x")
     exam1 = await _make_simple_exam(make_exam)
     exam2 = await _make_simple_exam(make_exam)
 
@@ -424,7 +424,7 @@ async def test_K1_start_different_exam_with_active_raises_conflict(
 async def test_K2_conflict_does_not_create_new_attempt(
     make_user, make_exam, db_pool
 ):
-    user = await make_user(email="k2@x.test", password="x")
+    user = await make_user(email="k2@x.com", password="x")
     exam1 = await _make_simple_exam(make_exam)
     exam2 = await _make_simple_exam(make_exam)
 
@@ -441,7 +441,7 @@ async def test_K2_conflict_does_not_create_new_attempt(
 async def test_K3_conflict_does_not_consume_quota(make_user, make_exam, db_pool):
     """Even with quota-exhausted user, conflict must NOT raise quota error
     — conflict takes precedence (path returns before quota check)."""
-    user = await make_user(email="k3@x.test", password="x", tier="free")
+    user = await make_user(email="k3@x.com", password="x", tier="free")
     exam1 = await _make_simple_exam(make_exam)
     exam2 = await _make_simple_exam(make_exam)
 
@@ -455,7 +455,7 @@ async def test_K3_conflict_does_not_consume_quota(make_user, make_exam, db_pool)
 async def test_K4_conflict_error_message_does_not_leak_active_exam_id(
     make_user, make_exam
 ):
-    user = await make_user(email="k4@x.test", password="x")
+    user = await make_user(email="k4@x.com", password="x")
     exam1 = await _make_simple_exam(make_exam)
     exam2 = await _make_simple_exam(make_exam)
 
@@ -478,7 +478,7 @@ async def test_K4_conflict_error_message_does_not_leak_active_exam_id(
 async def test_Z1_two_concurrent_same_exam_both_get_same_attempt_id(
     make_user, make_exam, db_pool
 ):
-    user = await make_user(email="z1@x.test", password="x")
+    user = await make_user(email="z1@x.com", password="x")
     exam = await _make_simple_exam(make_exam)
 
     r1, r2 = await asyncio.gather(
@@ -501,7 +501,7 @@ async def test_Z2_two_concurrent_different_exams_one_wins_one_409(
     commits. The latter is a known recovery-in-failed-txn limitation of
     the current service code; the DB-level invariant is what matters.
     """
-    user = await make_user(email="z2@x.test", password="x")
+    user = await make_user(email="z2@x.com", password="x")
     exam1 = await _make_simple_exam(make_exam)
     exam2 = await _make_simple_exam(make_exam)
 
@@ -522,7 +522,7 @@ async def test_Z4_unique_violation_for_same_exam_resolves_to_case_b(
     Asserts DB state, not gather() shape — see Z2 docstring for the
     underlying service-code limitation that makes shape unreliable.
     """
-    user = await make_user(email="z4@x.test", password="x")
+    user = await make_user(email="z4@x.com", password="x")
     exam = await _make_simple_exam(make_exam)
 
     await asyncio.gather(
@@ -538,7 +538,7 @@ async def test_Z5_unique_violation_for_different_exam_resolves_to_case_c(
 ):
     """Z2 already covers the gather case; this one re-asserts via a
     seed+race pattern (helps detect ordering bugs in the recovery branch)."""
-    user = await make_user(email="z5@x.test", password="x")
+    user = await make_user(email="z5@x.com", password="x")
     exam1 = await _make_simple_exam(make_exam)
     exam2 = await _make_simple_exam(make_exam)
 
@@ -557,7 +557,7 @@ async def test_Z6_high_concurrency_same_user_same_exam(
     user. Some calls may surface the recovery-path error described in
     Z2; the DB constraint is what protects the user from a stray 2nd
     attempt being created."""
-    user = await make_user(email="z6@x.test", password="x")
+    user = await make_user(email="z6@x.com", password="x")
     exam = await _make_simple_exam(make_exam)
 
     await asyncio.gather(
@@ -580,7 +580,7 @@ async def test_Z6_high_concurrency_same_user_same_exam(
 async def test_Q1_free_tier_5_attempts_then_6th_blocked(
     make_user, make_exam, make_attempt
 ):
-    user = await make_user(email="q1@x.test", password="x", tier="free")
+    user = await make_user(email="q1@x.com", password="x", tier="free")
     # Seed 5 prior attempts (mix of submitted + abandoned, NO active)
     base_exam = await _make_simple_exam(make_exam)
     for _ in range(3):
@@ -596,7 +596,7 @@ async def test_Q1_free_tier_5_attempts_then_6th_blocked(
 
 
 async def test_Q2_basic_tier_allows_50th(make_user, make_exam, make_attempt):
-    user = await make_user(email="q2@x.test", password="x", tier="basic")
+    user = await make_user(email="q2@x.com", password="x", tier="basic")
     base = await _make_simple_exam(make_exam)
     for _ in range(49):
         await make_attempt(user["id"], base["id"], state="submitted")
@@ -609,7 +609,7 @@ async def test_Q2_basic_tier_allows_50th(make_user, make_exam, make_attempt):
 
 
 async def test_Q3_basic_tier_blocks_51st(make_user, make_exam, make_attempt):
-    user = await make_user(email="q3@x.test", password="x", tier="basic")
+    user = await make_user(email="q3@x.com", password="x", tier="basic")
     base = await _make_simple_exam(make_exam)
     for _ in range(50):
         await make_attempt(user["id"], base["id"], state="submitted")
@@ -622,7 +622,7 @@ async def test_Q3_basic_tier_blocks_51st(make_user, make_exam, make_attempt):
 
 
 async def test_Q4_pro_tier_unlimited(make_user, make_exam, make_attempt):
-    user = await make_user(email="q4@x.test", password="x", tier="pro")
+    user = await make_user(email="q4@x.com", password="x", tier="pro")
     base = await _make_simple_exam(make_exam)
     for _ in range(100):
         await make_attempt(user["id"], base["id"], state="submitted")
@@ -635,7 +635,7 @@ async def test_Q4_pro_tier_unlimited(make_user, make_exam, make_attempt):
 
 
 async def test_Q5_ultra_tier_unlimited(make_user, make_exam, make_attempt):
-    user = await make_user(email="q5@x.test", password="x", tier="ultra")
+    user = await make_user(email="q5@x.com", password="x", tier="ultra")
     base = await _make_simple_exam(make_exam)
     for _ in range(100):
         await make_attempt(user["id"], base["id"], state="submitted")
@@ -650,7 +650,7 @@ async def test_Q5_ultra_tier_unlimited(make_user, make_exam, make_attempt):
 async def test_Q6_abandoned_attempts_count_toward_quota(
     make_user, make_exam, make_attempt
 ):
-    user = await make_user(email="q6@x.test", password="x", tier="free")
+    user = await make_user(email="q6@x.com", password="x", tier="free")
     base = await _make_simple_exam(make_exam)
     for _ in range(5):
         await make_attempt(user["id"], base["id"], state="abandoned")
@@ -665,7 +665,7 @@ async def test_Q6_abandoned_attempts_count_toward_quota(
 async def test_Q7_submitted_attempts_count_toward_quota(
     make_user, make_exam, make_attempt
 ):
-    user = await make_user(email="q7@x.test", password="x", tier="free")
+    user = await make_user(email="q7@x.com", password="x", tier="free")
     base = await _make_simple_exam(make_exam)
     for _ in range(5):
         await make_attempt(user["id"], base["id"], state="submitted")
@@ -683,7 +683,7 @@ async def test_Q8_in_progress_attempt_counts_toward_quota(
     """If user has 1 in_progress for exam E + 4 submitted, calling start
     for SAME exam → Case B (resume), no quota check. Quota check only
     fires on Case A path."""
-    user = await make_user(email="q8@x.test", password="x", tier="free")
+    user = await make_user(email="q8@x.com", password="x", tier="free")
     base = await _make_simple_exam(make_exam)
     for _ in range(4):
         await make_attempt(user["id"], base["id"], state="submitted")
@@ -699,7 +699,7 @@ async def test_Q8_in_progress_attempt_counts_toward_quota(
 async def test_Q9_resume_does_not_increment_quota_counter_even_at_limit(
     make_user, make_exam, make_attempt
 ):
-    user = await make_user(email="q9@x.test", password="x", tier="free")
+    user = await make_user(email="q9@x.com", password="x", tier="free")
     base = await _make_simple_exam(make_exam)
     for _ in range(4):
         await make_attempt(user["id"], base["id"], state="submitted")
@@ -717,7 +717,7 @@ async def test_Q10_quota_only_counts_within_subscription_period(
     make_user, make_exam, make_attempt, set_subscription
 ):
     """Move period_start forward; older attempts excluded from quota count."""
-    user = await make_user(email="q10@x.test", password="x", tier="free")
+    user = await make_user(email="q10@x.com", password="x", tier="free")
     base = await _make_simple_exam(make_exam)
 
     # 5 old attempts (in the past)
@@ -763,7 +763,7 @@ async def test_Q12_canceled_subscription_status_blocks_start(
 ):
     from services.exceptions import PermissionDeniedError
 
-    user = await make_user(email="q12@x.test", password="x", tier="pro")
+    user = await make_user(email="q12@x.com", password="x", tier="pro")
     await set_subscription(user["id"], status="canceled")
     exam = await _make_simple_exam(make_exam)
 
@@ -779,7 +779,7 @@ async def test_Q12_canceled_subscription_status_blocks_start(
 
 
 async def test_E1_start_for_unpublished_exam_fails(make_user, make_exam):
-    user = await make_user(email="e1@x.test", password="x")
+    user = await make_user(email="e1@x.com", password="x")
     exam = await make_exam(published=False, sections=[{"questions": [_MC_Q]}])
 
     with pytest.raises(NotFoundError):
@@ -793,7 +793,7 @@ async def test_E2_start_for_soft_deleted_exam_fails(
 ):
     import uuid
 
-    user = await make_user(email="e2@x.test", password="x")
+    user = await make_user(email="e2@x.com", password="x")
     exam = await _make_simple_exam(make_exam)
     async with db_pool.acquire() as conn:
         await conn.execute(
@@ -808,7 +808,7 @@ async def test_E2_start_for_soft_deleted_exam_fails(
 
 
 async def test_E3_start_for_nonexistent_exam_fails(make_user):
-    user = await make_user(email="e3@x.test", password="x")
+    user = await make_user(email="e3@x.com", password="x")
     with pytest.raises(NotFoundError):
         await attempt_service.start_attempt(
             user_id=user["id"],
@@ -824,7 +824,7 @@ async def test_E4_start_for_unpublished_exam_with_existing_active_resumes(
     insulated from exam-state changes)."""
     import uuid
 
-    user = await make_user(email="e4@x.test", password="x")
+    user = await make_user(email="e4@x.com", password="x")
     exam = await _make_simple_exam(make_exam)
 
     first = await attempt_service.start_attempt(

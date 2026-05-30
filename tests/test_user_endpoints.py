@@ -16,7 +16,7 @@ pytestmark = pytest.mark.integration
 
 async def test_get_me_returns_profile_for_authenticated_user(client, make_user, auth_headers):
     user = await make_user(
-        email="self@maichienglish.test",
+        email="self@maichienglish.com",
         password="self-pw",
         full_name="Self Student",
         role="student",
@@ -45,7 +45,7 @@ async def test_get_me_returns_404_when_jwt_user_no_longer_in_db(client, make_use
     """JWT may outlive the user. /me must return 404, not crash."""
     from services.user_service import user_service
 
-    user = await make_user(email="ghost@maichienglish.test", password="x")
+    user = await make_user(email="ghost@maichienglish.com", password="x")
     headers = auth_headers(user["email"])
     await user_service.delete_user(user["id"])
 
@@ -60,7 +60,7 @@ async def test_get_me_returns_404_when_jwt_user_no_longer_in_db(client, make_use
 
 async def test_put_me_updates_fullname_and_phone(client, make_user, auth_headers):
     user = await make_user(
-        email="edit@maichienglish.test",
+        email="edit@maichienglish.com",
         password="x",
         full_name="Original Name",
         phone=None,
@@ -86,7 +86,7 @@ async def test_put_me_updates_fullname_and_phone(client, make_user, auth_headers
 async def test_put_me_partial_update_only_provided_fields(client, make_user, auth_headers):
     """`exclude_unset` semantics: omitted fields stay unchanged."""
     user = await make_user(
-        email="partial@maichienglish.test",
+        email="partial@maichienglish.com",
         password="x",
         full_name="Keep This Name",
         phone="0900000000",
@@ -105,7 +105,7 @@ async def test_put_me_partial_update_only_provided_fields(client, make_user, aut
 
 
 async def test_put_me_empty_body_returns_400(client, make_user, auth_headers):
-    user = await make_user(email="emptyput@maichienglish.test", password="x")
+    user = await make_user(email="emptyput@maichienglish.com", password="x")
     headers = auth_headers(user["email"])
 
     r = await client.put("/api/users/me", headers=headers, json={})
@@ -119,11 +119,11 @@ async def test_put_me_empty_body_returns_400(client, make_user, auth_headers):
 
 async def test_admin_list_users_pagination_and_role_filter(client, make_user, auth_headers):
     admin = await make_user(
-        email="lister@maichienglish.test", password="x", role="admin", tier="ultra"
+        email="lister@maichienglish.com", password="x", role="admin", tier="ultra"
     )
-    await make_user(email="s1@maichienglish.test", password="x", role="student")
-    await make_user(email="s2@maichienglish.test", password="x", role="student")
-    await make_user(email="t1@maichienglish.test", password="x", role="teacher")
+    await make_user(email="s1@maichienglish.com", password="x", role="student")
+    await make_user(email="s2@maichienglish.com", password="x", role="student")
+    await make_user(email="t1@maichienglish.com", password="x", role="teacher")
 
     headers = auth_headers(admin["email"], role="admin", tier="ultra")
 
@@ -133,15 +133,15 @@ async def test_admin_list_users_pagination_and_role_filter(client, make_user, au
     assert r.status_code == 200
     data = r.json()["data"]
     emails = [u["email"] for u in data["items"]]
-    assert "s1@maichienglish.test" in emails
-    assert "s2@maichienglish.test" in emails
-    assert "t1@maichienglish.test" not in emails
+    assert "s1@maichienglish.com" in emails
+    assert "s2@maichienglish.com" in emails
+    assert "t1@maichienglish.com" not in emails
     assert data["pagination"]["total"] == 2
 
 
 async def test_admin_list_users_rejects_non_admin(client, make_user, auth_headers):
     student = await make_user(
-        email="snoop@maichienglish.test", password="x", role="student"
+        email="snoop@maichienglish.com", password="x", role="student"
     )
     headers = auth_headers(student["email"], role="student")
 
@@ -151,7 +151,7 @@ async def test_admin_list_users_rejects_non_admin(client, make_user, auth_header
 
 async def test_admin_list_users_caps_limit_at_100(client, make_user, auth_headers):
     admin = await make_user(
-        email="capper@maichienglish.test", password="x", role="admin", tier="ultra"
+        email="capper@maichienglish.com", password="x", role="admin", tier="ultra"
     )
     headers = auth_headers(admin["email"], role="admin", tier="ultra")
 
@@ -166,7 +166,7 @@ async def test_admin_list_users_caps_limit_at_100(client, make_user, auth_header
 
 async def test_admin_create_student_with_subscription(client, make_user, auth_headers):
     admin = await make_user(
-        email="creator@maichienglish.test", password="x", role="admin", tier="ultra"
+        email="creator@maichienglish.com", password="x", role="admin", tier="ultra"
     )
     headers = auth_headers(admin["email"], role="admin", tier="ultra")
 
@@ -174,7 +174,7 @@ async def test_admin_create_student_with_subscription(client, make_user, auth_he
         "/api/admin/users",
         headers=headers,
         json={
-            "email": "newstudent@maichienglish.test",
+            "email": "newstudent@maichienglish.com",
             "password": "initial-pw",
             "fullName": "New Student",
             "role": "student",
@@ -184,14 +184,14 @@ async def test_admin_create_student_with_subscription(client, make_user, auth_he
 
     assert r.status_code == 201
     user = r.json()["data"]["user"]
-    assert user["email"] == "newstudent@maichienglish.test"
+    assert user["email"] == "newstudent@maichienglish.com"
     assert user["role"] == "student"
     assert user["subscription"]["tier"] == "basic"
 
 
 async def test_admin_create_duplicate_email_returns_409(client, make_user, auth_headers):
     admin = await make_user(
-        email="dup-admin@maichienglish.test",
+        email="dup-admin@maichienglish.com",
         password="x",
         role="admin",
         tier="ultra",
@@ -202,7 +202,7 @@ async def test_admin_create_duplicate_email_returns_409(client, make_user, auth_
         "/api/admin/users",
         headers=headers,
         json={
-            "email": "twice@maichienglish.test",
+            "email": "twice@maichienglish.com",
             "password": "pw1",
             "fullName": "First Insert",
         },
@@ -211,7 +211,7 @@ async def test_admin_create_duplicate_email_returns_409(client, make_user, auth_
         "/api/admin/users",
         headers=headers,
         json={
-            "email": "twice@maichienglish.test",
+            "email": "twice@maichienglish.com",
             "password": "pw2",
             "fullName": "Second Insert",
         },
@@ -221,13 +221,13 @@ async def test_admin_create_duplicate_email_returns_409(client, make_user, auth_
 
 async def test_admin_create_student_with_parent_id_links_parent(client, make_user, auth_headers):
     admin = await make_user(
-        email="link-admin@maichienglish.test",
+        email="link-admin@maichienglish.com",
         password="x",
         role="admin",
         tier="ultra",
     )
     parent = await make_user(
-        email="parent1@maichienglish.test", password="x", role="parent"
+        email="parent1@maichienglish.com", password="x", role="parent"
     )
     headers = auth_headers(admin["email"], role="admin", tier="ultra")
 
@@ -235,7 +235,7 @@ async def test_admin_create_student_with_parent_id_links_parent(client, make_use
         "/api/admin/users",
         headers=headers,
         json={
-            "email": "child1@maichienglish.test",
+            "email": "child1@maichienglish.com",
             "password": "x",
             "fullName": "Child One",
             "role": "student",
@@ -251,13 +251,13 @@ async def test_admin_create_rejects_parent_id_on_non_student(client, make_user, 
     """parent_id is silently dropped for non-students per service contract.
     The created teacher should have no parent link."""
     admin = await make_user(
-        email="parent-strict@maichienglish.test",
+        email="parent-strict@maichienglish.com",
         password="x",
         role="admin",
         tier="ultra",
     )
     parent = await make_user(
-        email="parent2@maichienglish.test", password="x", role="parent"
+        email="parent2@maichienglish.com", password="x", role="parent"
     )
     headers = auth_headers(admin["email"], role="admin", tier="ultra")
 
@@ -265,7 +265,7 @@ async def test_admin_create_rejects_parent_id_on_non_student(client, make_user, 
         "/api/admin/users",
         headers=headers,
         json={
-            "email": "teach1@maichienglish.test",
+            "email": "teach1@maichienglish.com",
             "password": "x",
             "fullName": "Teach One",
             "role": "teacher",
@@ -284,12 +284,12 @@ async def test_admin_create_rejects_parent_id_on_non_student(client, make_user, 
 
 async def test_admin_delete_user_returns_204_and_removes(client, make_user, auth_headers):
     admin = await make_user(
-        email="killer@maichienglish.test",
+        email="killer@maichienglish.com",
         password="x",
         role="admin",
         tier="ultra",
     )
-    victim = await make_user(email="bye@maichienglish.test", password="x")
+    victim = await make_user(email="bye@maichienglish.com", password="x")
     headers = auth_headers(admin["email"], role="admin", tier="ultra")
 
     r = await client.delete(f"/api/admin/users/{victim['id']}", headers=headers)
@@ -304,7 +304,7 @@ async def test_admin_delete_user_returns_204_and_removes(client, make_user, auth
 
 async def test_admin_delete_nonexistent_user_returns_404(client, make_user, auth_headers):
     admin = await make_user(
-        email="missing-killer@maichienglish.test",
+        email="missing-killer@maichienglish.com",
         password="x",
         role="admin",
         tier="ultra",
@@ -324,13 +324,13 @@ async def test_admin_delete_nonexistent_user_returns_404(client, make_user, auth
 
 async def test_admin_reset_password_changes_login(client, make_user, auth_headers):
     admin = await make_user(
-        email="resetter@maichienglish.test",
+        email="resetter@maichienglish.com",
         password="x",
         role="admin",
         tier="ultra",
     )
     target = await make_user(
-        email="reset-me@maichienglish.test", password="old-pw"
+        email="reset-me@maichienglish.com", password="old-pw"
     )
     headers = auth_headers(admin["email"], role="admin", tier="ultra")
 
@@ -361,16 +361,16 @@ async def test_admin_reset_password_changes_login(client, make_user, auth_header
 
 async def test_admin_link_parent_then_unlink(client, make_user, auth_headers):
     admin = await make_user(
-        email="linker@maichienglish.test",
+        email="linker@maichienglish.com",
         password="x",
         role="admin",
         tier="ultra",
     )
     parent = await make_user(
-        email="big-parent@maichienglish.test", password="x", role="parent"
+        email="big-parent@maichienglish.com", password="x", role="parent"
     )
     student = await make_user(
-        email="orphan@maichienglish.test", password="x", role="student"
+        email="orphan@maichienglish.com", password="x", role="student"
     )
     headers = auth_headers(admin["email"], role="admin", tier="ultra")
 

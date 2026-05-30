@@ -185,7 +185,7 @@ async def make_user(db):
     created: list[str] = []  # ids — kept for debug; TRUNCATE handles cleanup
 
     async def _make(
-        email: str = "user@maichienglish.test",
+        email: str = "user@maichienglish.com",
         password: str = "TestPassword123",
         full_name: str = "Test User",
         role: str = "student",

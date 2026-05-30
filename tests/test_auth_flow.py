@@ -17,7 +17,7 @@ pytestmark = pytest.mark.integration
 
 async def test_login_returns_tokens_for_valid_credentials(client, make_user):
     user = await make_user(
-        email="alice@maichienglish.test",
+        email="alice@maichienglish.com",
         password="alice-secret-pw",
         role="admin",
         tier="ultra",
@@ -40,11 +40,11 @@ async def test_login_returns_tokens_for_valid_credentials(client, make_user):
 
 
 async def test_login_wrong_password_returns_401_vietnamese_message(client, make_user):
-    await make_user(email="bob@maichienglish.test", password="correct-pw")
+    await make_user(email="bob@maichienglish.com", password="correct-pw")
 
     r = await client.post(
         "/api/auth/login",
-        json={"email": "bob@maichienglish.test", "password": "wrong-pw"},
+        json={"email": "bob@maichienglish.com", "password": "wrong-pw"},
     )
 
     assert r.status_code == 401
@@ -56,7 +56,7 @@ async def test_login_unknown_email_returns_same_401(client):
     wrong password (same status code + same message)."""
     r = await client.post(
         "/api/auth/login",
-        json={"email": "ghost@maichienglish.test", "password": "anything"},
+        json={"email": "ghost@maichienglish.com", "password": "anything"},
     )
 
     assert r.status_code == 401
@@ -66,7 +66,7 @@ async def test_login_unknown_email_returns_same_401(client):
 async def test_login_normalizes_email_lowercase_and_strips_plus(client, make_user):
     """`_normalize_email` lowercases + strips `+alias` — login should
     accept any equivalent form."""
-    await make_user(email="carol@maichienglish.test", password="carol-pw")
+    await make_user(email="carol@maichienglish.com", password="carol-pw")
 
     r = await client.post(
         "/api/auth/login",
@@ -87,7 +87,7 @@ async def test_login_missing_required_field_returns_422(client):
 
 
 async def test_refresh_with_valid_refresh_token_issues_new_pair(client, make_user):
-    user = await make_user(email="dave@maichienglish.test", password="dave-pw")
+    user = await make_user(email="dave@maichienglish.com", password="dave-pw")
 
     login = await client.post(
         "/api/auth/login",
@@ -109,7 +109,7 @@ async def test_refresh_with_valid_refresh_token_issues_new_pair(client, make_use
 async def test_refresh_rejects_access_token_as_refresh(client, make_user):
     """Passing an access token to /refresh must fail — token type confusion
     is a common JWT bug, must be rejected at the boundary."""
-    user = await make_user(email="eve@maichienglish.test", password="eve-pw")
+    user = await make_user(email="eve@maichienglish.com", password="eve-pw")
     login = await client.post(
         "/api/auth/login",
         json={"email": user["email"], "password": "eve-pw"},
@@ -137,7 +137,7 @@ async def test_refresh_rejects_token_for_deleted_user(client, make_user):
     """Refresh token may outlive the user — backend must re-check existence."""
     from services.user_service import user_service
 
-    user = await make_user(email="frank@maichienglish.test", password="frank-pw")
+    user = await make_user(email="frank@maichienglish.com", password="frank-pw")
     login = await client.post(
         "/api/auth/login",
         json={"email": user["email"], "password": "frank-pw"},
@@ -160,7 +160,7 @@ async def test_refresh_rejects_token_for_deleted_user(client, make_user):
 
 async def test_verify_returns_claims_for_valid_access_token(client, make_user, auth_headers):
     user = await make_user(
-        email="gina@maichienglish.test",
+        email="gina@maichienglish.com",
         password="gina-pw",
         role="teacher",
         tier="pro",
@@ -199,7 +199,7 @@ async def test_verify_rejects_garbage_token(client):
 
 async def test_password_reset_full_flow(client, make_user):
     """Happy path: request code → reset with code → login with new password."""
-    user = await make_user(email="harry@maichienglish.test", password="old-pw")
+    user = await make_user(email="harry@maichienglish.com", password="old-pw")
 
     code_resp = await client.post(
         "/api/auth/password/request-code",
@@ -239,7 +239,7 @@ async def test_password_request_code_for_unknown_email_silent_200(client):
     (no leak of whether the email exists)."""
     r = await client.post(
         "/api/auth/password/request-code",
-        json={"email": "no-such-user@maichienglish.test"},
+        json={"email": "no-such-user@maichienglish.com"},
     )
 
     assert r.status_code == 200
@@ -247,7 +247,7 @@ async def test_password_request_code_for_unknown_email_silent_200(client):
 
 
 async def test_password_reset_rejects_wrong_code(client, make_user):
-    user = await make_user(email="ivy@maichienglish.test", password="ivy-pw")
+    user = await make_user(email="ivy@maichienglish.com", password="ivy-pw")
     await client.post(
         "/api/auth/password/request-code", json={"email": user["email"]}
     )
@@ -267,7 +267,7 @@ async def test_password_reset_rejects_wrong_code(client, make_user):
 
 async def test_password_reset_invalidates_code_after_use(client, make_user):
     """Each code is single-use: re-submitting with the same code must fail."""
-    user = await make_user(email="jane@maichienglish.test", password="jane-pw")
+    user = await make_user(email="jane@maichienglish.com", password="jane-pw")
 
     code_resp = await client.post(
         "/api/auth/password/request-code", json={"email": user["email"]}
@@ -298,7 +298,7 @@ async def test_password_reset_invalidates_code_after_use(client, make_user):
 async def test_requesting_new_code_invalidates_previous_one(client, make_user):
     """Second /request-code marks the first code used — old code can no
     longer reset."""
-    user = await make_user(email="kate@maichienglish.test", password="kate-pw")
+    user = await make_user(email="kate@maichienglish.com", password="kate-pw")
 
     first = await client.post(
         "/api/auth/password/request-code", json={"email": user["email"]}
