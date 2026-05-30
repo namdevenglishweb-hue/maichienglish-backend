@@ -246,10 +246,13 @@ async def make_exam(db_pool):
     `published=False` to test draft-mode preconditions (E1).
 
     `sections` arg is a list of:
-      [{"type": "multiple_choice", "questions": [
-          {"question_type": "multiple_choice", "question_data": {...}},
-          ...
-      ]}, ...]
+      [{"type": "multiple_choice",
+        "materials": [{"type": "audio", "url": "...", "label": "..."}, ...],
+        "max_audio_plays": 3,        # optional; NULL = unlimited
+        "questions": [
+            {"question_type": "multiple_choice", "question_data": {...}},
+            ...
+        ]}, ...]
     """
     import json
     import uuid
@@ -284,14 +287,16 @@ async def make_exam(db_pool):
                     sec_row = await conn.fetchrow(
                         """
                         INSERT INTO public.sections
-                            (exam_id, position, type, materials)
-                        VALUES ($1, $2, $3, $4::jsonb)
+                            (exam_id, position, type, materials,
+                             max_audio_plays)
+                        VALUES ($1, $2, $3, $4::jsonb, $5)
                         RETURNING id
                         """,
                         uuid.UUID(exam_id),
                         s_pos,
                         s.get("type", "multiple_choice"),
                         json.dumps(s.get("materials", [])),
+                        s.get("max_audio_plays"),  # None → SQL NULL
                     )
                     sec_id = str(sec_row["id"])
 
