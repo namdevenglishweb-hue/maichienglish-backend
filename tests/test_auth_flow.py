@@ -70,7 +70,7 @@ async def test_login_normalizes_email_lowercase_and_strips_plus(client, make_use
 
     r = await client.post(
         "/api/auth/login",
-        json={"email": "Carol+work@MAICHIenglish.test", "password": "carol-pw"},
+        json={"email": "Carol+work@MAICHIenglish.com", "password": "carol-pw"},
     )
 
     assert r.status_code == 200

@@ -203,7 +203,7 @@ async def test_admin_create_duplicate_email_returns_409(client, make_user, auth_
         headers=headers,
         json={
             "email": "twice@maichienglish.com",
-            "password": "pw1",
+            "password": "password1",
             "fullName": "First Insert",
         },
     )
@@ -212,7 +212,7 @@ async def test_admin_create_duplicate_email_returns_409(client, make_user, auth_
         headers=headers,
         json={
             "email": "twice@maichienglish.com",
-            "password": "pw2",
+            "password": "password2",
             "fullName": "Second Insert",
         },
     )
@@ -236,7 +236,7 @@ async def test_admin_create_student_with_parent_id_links_parent(client, make_use
         headers=headers,
         json={
             "email": "child1@maichienglish.com",
-            "password": "x",
+            "password": "child-password",
             "fullName": "Child One",
             "role": "student",
             "parentId": parent["id"],
@@ -266,7 +266,7 @@ async def test_admin_create_rejects_parent_id_on_non_student(client, make_user, 
         headers=headers,
         json={
             "email": "teach1@maichienglish.com",
-            "password": "x",
+            "password": "teacher-password",
             "fullName": "Teach One",
             "role": "teacher",
             "parentId": parent["id"],
