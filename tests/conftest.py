@@ -201,3 +201,234 @@ def auth_headers():
         return {"Authorization": f"Bearer {token}"}
 
     return _make
+
+
+# ---------------------------------------------------------------------------
+# Exam / Section / Question / Attempt factories — raw SQL (fast).
+#
+# Service-layer (`exam_service.create_exam_nested`) goes through Pydantic
+# validation, transaction wrapping, gap-marker validation, etc. — too much
+# for test setup. Raw SQL inserts give predictable seed data in ~5ms.
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def make_exam(db_pool):
+    """Factory: creates exam (+optional sections + questions). Returns dict
+    with `id`, `sections` (each carrying `id` + `questions`).
+
+    Defaults: published=True, level="KET", skill="listening". Pass
+    `published=False` to test draft-mode preconditions (E1).
+
+    `sections` arg is a list of:
+      [{"type": "multiple_choice", "questions": [
+          {"question_type": "multiple_choice", "question_data": {...}},
+          ...
+      ]}, ...]
+    """
+    import json
+    import uuid
+
+    async def _make(
+        title: str = "Test KET Listening",
+        level: str = "KET",
+        skill: str = "listening",
+        published: bool = True,
+        deleted: bool = False,
+        sections: list | None = None,
+    ) -> dict:
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO public.exams
+                        (title, level, skill, is_published, deleted_at)
+                    VALUES ($1, $2, $3, $4, $5)
+                    RETURNING id
+                    """,
+                    title,
+                    level,
+                    skill,
+                    published,
+                    None if not deleted else "now()",
+                )
+                exam_id = str(row["id"])
+
+                created_sections = []
+                for s_pos, s in enumerate(sections or [], start=1):
+                    sec_row = await conn.fetchrow(
+                        """
+                        INSERT INTO public.sections
+                            (exam_id, position, type, materials)
+                        VALUES ($1, $2, $3, $4::jsonb)
+                        RETURNING id
+                        """,
+                        uuid.UUID(exam_id),
+                        s_pos,
+                        s.get("type", "multiple_choice"),
+                        json.dumps(s.get("materials", [])),
+                    )
+                    sec_id = str(sec_row["id"])
+
+                    created_questions = []
+                    for q_pos, q in enumerate(s.get("questions", []), start=1):
+                        q_row = await conn.fetchrow(
+                            """
+                            INSERT INTO public.questions
+                                (section_id, position, question_type,
+                                 question_data, points)
+                            VALUES ($1, $2, $3, $4::jsonb, $5)
+                            RETURNING id
+                            """,
+                            uuid.UUID(sec_id),
+                            q_pos,
+                            q["question_type"],
+                            json.dumps(q["question_data"]),
+                            q.get("points", 1),
+                        )
+                        created_questions.append({
+                            "id": str(q_row["id"]),
+                            "question_type": q["question_type"],
+                            "question_data": q["question_data"],
+                            "points": q.get("points", 1),
+                        })
+
+                    created_sections.append({
+                        "id": sec_id,
+                        "type": s.get("type", "multiple_choice"),
+                        "questions": created_questions,
+                    })
+
+        return {
+            "id": exam_id,
+            "title": title,
+            "level": level,
+            "skill": skill,
+            "is_published": published,
+            "sections": created_sections,
+        }
+
+    return _make
+
+
+@pytest_asyncio.fixture
+async def make_attempt(db_pool):
+    """Factory: insert an attempt row directly with a chosen state.
+
+    `state`: "in_progress" (default), "submitted", "abandoned".
+    Use this to seed quota tests (Q1-Q11) without going through the
+    service's INSERT path (which would enforce the partial unique
+    index — only 1 active per user — making "5 prior + 1 active" impossible
+    to seed via the service).
+
+    `started_at` defaults to now(); pass a `datetime` to seed
+    period-boundary tests (Q10).
+    """
+    import uuid
+    from datetime import datetime, timezone
+
+    async def _make(
+        user_id: str,
+        exam_id: str,
+        state: str = "in_progress",
+        started_at: datetime | None = None,
+    ) -> dict:
+        if state == "in_progress":
+            submitted_at = None
+            is_abandoned = False
+        elif state == "submitted":
+            submitted_at = datetime.now(timezone.utc)
+            is_abandoned = False
+        elif state == "abandoned":
+            submitted_at = datetime.now(timezone.utc)
+            is_abandoned = True
+        else:
+            raise ValueError(f"Unknown attempt state: {state}")
+
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO public.attempts
+                    (user_id, exam_id, started_at, submitted_at, is_abandoned,
+                     score, total_points, percentage)
+                VALUES ($1, $2, COALESCE($3, now()), $4, $5, $6, $7, $8)
+                RETURNING id, started_at, submitted_at
+                """,
+                uuid.UUID(user_id),
+                uuid.UUID(exam_id),
+                started_at,
+                submitted_at,
+                is_abandoned,
+                0 if state != "in_progress" else None,
+                0 if state != "in_progress" else None,
+                0 if state != "in_progress" else None,
+            )
+
+        return {
+            "id": str(row["id"]),
+            "user_id": user_id,
+            "exam_id": exam_id,
+            "state": state,
+            "started_at": row["started_at"],
+            "submitted_at": row["submitted_at"],
+        }
+
+    return _make
+
+
+@pytest_asyncio.fixture
+async def set_subscription(db_pool):
+    """Update an existing subscription row — tier, status, period_start.
+
+    `make_user` already creates a sub with defaults
+    (`tier='free', status='active', current_period_start=now()`). This
+    fixture lets tests tweak fields after the fact for tier-quota /
+    canceled-status / period-boundary scenarios.
+    """
+    import uuid
+    from datetime import datetime
+
+    async def _set(
+        user_id: str,
+        *,
+        tier: str | None = None,
+        status: str | None = None,
+        current_period_start: datetime | None = None,
+    ) -> None:
+        sets = []
+        vals: list = []
+        if tier is not None:
+            sets.append(f"tier = ${len(vals) + 1}")
+            vals.append(tier)
+        if status is not None:
+            sets.append(f"status = ${len(vals) + 1}")
+            vals.append(status)
+        if current_period_start is not None:
+            sets.append(f"current_period_start = ${len(vals) + 1}")
+            vals.append(current_period_start)
+        if not sets:
+            return
+        vals.append(uuid.UUID(user_id))
+        sql = (
+            "UPDATE public.subscriptions SET "
+            + ", ".join(sets)
+            + f", updated_at = now() WHERE user_id = ${len(vals)}"
+        )
+        async with db_pool.acquire() as conn:
+            await conn.execute(sql, *vals)
+
+    return _set
+
+
+@pytest.fixture
+def sample_mc_question_data():
+    """Sample multiple_choice question_data — minimal valid shape.
+
+    Use when test just needs A question; the answer is `correct_index=0`
+    so `studentAnswer=0` grades correct, anything else grades wrong.
+    """
+    return {
+        "stem": "What is 2+2?",
+        "options": [{"text": "4"}, {"text": "5"}, {"text": "6"}],
+        "correct_index": 0,
+    }
