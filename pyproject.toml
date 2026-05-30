@@ -1,6 +1,11 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# Share one event loop across all async fixtures + tests so the
+# session-scoped db_pool fixture (in conftest.py) can persist across
+# function-scoped tests without "different loop" errors.
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
 addopts = [
     "-ra",
     "--strict-markers",

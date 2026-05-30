@@ -54,10 +54,50 @@ jobs:
       - name: Run pytest
         run: pytest --cov
 
+  integration:
+    name: Integration tests (Postgres 17)
+    runs-on: ubuntu-latest
+    needs: test
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: maichi_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      MAICHI_TEST_DB: '1'
+      # conftest.py reads MAICHI_TEST_DATABASE_URL (falls back to DATABASE_URL).
+      MAICHI_TEST_DATABASE_URL: postgresql://postgres:test@localhost:5432/maichi_test
+      # main.py reads DATABASE_URL via Settings; same DB so lifespan is happy.
+      DATABASE_URL: postgresql://postgres:test@localhost:5432/maichi_test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run integration tests
+        run: pytest -m integration --cov
+
   deploy:
     name: Trigger Render deploy
     runs-on: ubuntu-latest
-    needs: test
+    needs: integration
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
       - name: Call Render Deploy API
@@ -67,18 +107,4 @@ jobs:
             -H "Content-Type: application/json" \
             "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/deploys"
 
-  # Sprint 2 will add a second `integration` job below with:
-  #   services:
-  #     postgres:
-  #       image: postgres:17-alpine
-  #       env: { POSTGRES_PASSWORD: test }
-  #       ports: ['5432:5432']
-  #       options: >-
-  #         --health-cmd pg_isready --health-interval 10s
-  #   steps:
-  #     - run: python scripts/init_schema.py
-  #     - env:
-  #         MAICHI_TEST_DB: '1'          # opt-in flag honored by tests/conftest.py
-  #         DATABASE_URL: postgresql://postgres:test@localhost:5432/postgres
-  #       run: pytest -m integration --cov
-  # Linting (ruff + mypy) is also pending.
+  # Linting (ruff + mypy) is pending — separate job, runs in parallel with `test`.
