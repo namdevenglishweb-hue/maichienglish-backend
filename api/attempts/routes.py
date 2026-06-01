@@ -366,5 +366,6 @@ async def get_attempt_detail(
                 )
                 for a in detail["answers"]
             ],
+            audioPlayCounts=detail.get("audio_play_counts", {}),
         ),
     )

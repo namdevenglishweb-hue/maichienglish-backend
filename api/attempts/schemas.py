@@ -46,6 +46,16 @@ class AttemptSectionView(BaseModel):
         default=None,
         description="Section-wide cap value applied INDEPENDENTLY per audio material.",
     )
+    audioPlayCounts: dict[str, int] = Field(
+        default_factory=dict,
+        description=(
+            "Per-material play count, keyed by stringified material_index "
+            "('0', '1', ...). Material indices absent from the map mean "
+            "count=0 (audio never played in this attempt yet). "
+            "FE compute remaining = maxAudioPlays - (audioPlayCounts[idx] or 0). "
+            "See ATTEMPT_LIFECYCLE.md §4.6.1."
+        ),
+    )
     questions: list[AttemptQuestionView] = Field(default_factory=list)
 
 
@@ -242,6 +252,15 @@ class AttemptDetailData(BaseModel):
     attempt: AttemptView
     exam: AttemptDetailExam
     answers: list[AnswerView]
+    audioPlayCounts: dict[str, dict[str, int]] = Field(
+        default_factory=dict,
+        description=(
+            "Per-attempt audio play counts. Outer key = section_id; inner key "
+            "= stringified material_index. Sections absent from the outer map "
+            "have no plays yet. Material indices absent from the inner map "
+            "have count=0. See ATTEMPT_LIFECYCLE.md §4.6.1."
+        ),
+    )
 
 
 class AttemptDetailResponse(BaseModel):

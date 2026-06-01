@@ -155,6 +155,10 @@ class AttemptService:
                 "instructions": s["instructions"],
                 "materials": _coerce_jsonb(s["materials"]) or [],
                 "maxAudioPlays": s["max_audio_plays"],
+                # Default empty — overlaid per-attempt by _build_resume_payload
+                # (Case B) when an active attempt has played audio. Case A
+                # always sees {}. See ATTEMPT_LIFECYCLE.md §4.6.1.
+                "audioPlayCounts": {},
                 "questions": q_by_section.get(str(s["id"]), []),
             }
             for s in section_rows
@@ -168,6 +172,32 @@ class AttemptService:
             "durationMinutes": exam["duration_minutes"],
             "description": exam["description"],
             "sections": sections_payload,
+        }
+
+    async def _fetch_audio_play_counts(
+        self, conn, attempt_id: str
+    ) -> dict[str, dict[str, int]]:
+        """Return per-section, per-material audio play counts for this attempt.
+
+        Outer key = stringified section_id; inner key = stringified
+        material_index ('0', '1', ...); value = play count (int).
+        Sections with no `attempt_section_state` row are omitted; callers
+        treat absent sections as all-zeros.
+
+        Powers the `audioPlayCounts` field surfaced in attempt fetch
+        responses — see ATTEMPT_LIFECYCLE.md §4.6.1.
+        """
+        rows = await conn.fetch(
+            """
+            SELECT section_id, audio_play_counts
+            FROM public.attempt_section_state
+            WHERE attempt_id = $1
+            """,
+            attempt_id,
+        )
+        return {
+            str(r["section_id"]): _coerce_jsonb(r["audio_play_counts"]) or {}
+            for r in rows
         }
 
     async def _fetch_saved_answers(
@@ -304,6 +334,12 @@ class AttemptService:
         attempt_id = str(active_row["id"])
         exam_tree = await self._fetch_exam_tree(conn, exam_id)
         saved = await self._fetch_saved_answers(conn, attempt_id, exam_id)
+        # Overlay per-section audio play counts so the FE knows how many
+        # plays remain on each audio without firing a probe POST /audio-play
+        # (which would bump the counter). See ATTEMPT_LIFECYCLE.md §4.6.1.
+        play_counts = await self._fetch_audio_play_counts(conn, attempt_id)
+        for section in exam_tree["sections"]:
+            section["audioPlayCounts"] = play_counts.get(section["id"], {})
         logger.info(
             "Resumed attempt %s (user %s, exam %s, %d saved answers)",
             attempt_id, active_row["user_id"], exam_id, len(saved),
@@ -696,6 +732,12 @@ class AttemptService:
                 attempt_id,
             )
 
+            # Per-section, per-material audio play counts for this attempt.
+            # See ATTEMPT_LIFECYCLE.md §4.6.1.
+            audio_play_counts = await self._fetch_audio_play_counts(
+                conn, attempt_id
+            )
+
         is_submitted = attempt["submitted_at"] is not None
         per_answer = []
         for ar in answer_rows:
@@ -728,6 +770,7 @@ class AttemptService:
                 "skill": attempt["exam_skill"],
             },
             "answers": per_answer,
+            "audio_play_counts": audio_play_counts,
         }
 
     async def list_history_for_user(self, user_id: str, limit: int = 100) -> list[dict[str, Any]]:
