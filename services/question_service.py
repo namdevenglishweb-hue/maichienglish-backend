@@ -58,10 +58,29 @@ class _FillBlankData(BaseModel):
 # `matching` reuses the MC shape: each matching question is one independently-
 # scored row of a shared-options table (KET Listening P5, Reading P2 etc.).
 # The rendering distinction is signaled by `section.type` (plan §3.5/§3.6).
+#
+# `writing` and `speaking` use permissive stub validators — only `prompt` is
+# required. The richer shape (minWords, maxWords, maxDurationSeconds, etc.
+# per WRITING_SPEAKING.md §4.1, §5.1) is documented in spec and will be
+# enforced when the manual-grading flow ships. Until then admins can create
+# basic writing/speaking questions with just a prompt; submit grades them as
+# 0 points / is_correct=false via grade_question's unknown-type fallback.
+class _WritingData(BaseModel):
+    model_config = {"extra": "allow"}        # tolerate minWords/maxWords/etc.
+    prompt: str = Field(..., min_length=1)
+
+
+class _SpeakingData(BaseModel):
+    model_config = {"extra": "allow"}        # tolerate maxDurationSeconds/etc.
+    prompt: str = Field(..., min_length=1)
+
+
 _VALIDATORS = {
     "multiple_choice": _MultipleChoiceData,
     "fill_blank": _FillBlankData,
     "matching": _MultipleChoiceData,
+    "writing": _WritingData,
+    "speaking": _SpeakingData,
 }
 
 

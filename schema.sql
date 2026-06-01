@@ -97,7 +97,7 @@ CREATE TABLE public.sections (
   position          int  NOT NULL,
   part_label        text,
   type              text                                          -- FE rendering hint; soft
-                      CHECK (type IN ('multiple_choice', 'fill_blank', 'matching', 'multiple_choice_shared')),
+                      CHECK (type IN ('multiple_choice', 'fill_blank', 'matching', 'multiple_choice_shared', 'writing', 'speaking')),
   instructions      text,
   materials         jsonb NOT NULL DEFAULT '[]'::jsonb,
   max_audio_plays   int,                                          -- cap value; null = unlimited
@@ -129,7 +129,7 @@ CREATE TABLE public.questions (
   section_id     uuid NOT NULL REFERENCES public.sections(id) ON DELETE CASCADE,
   position       int  NOT NULL,
   question_type  text NOT NULL
-                  CHECK (question_type IN ('multiple_choice', 'fill_blank', 'matching')),
+                  CHECK (question_type IN ('multiple_choice', 'fill_blank', 'matching', 'writing', 'speaking')),
   question_data  jsonb NOT NULL,
   points         int  NOT NULL DEFAULT 1,
   created_at     timestamptz NOT NULL DEFAULT now(),

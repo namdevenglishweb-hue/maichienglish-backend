@@ -4,7 +4,12 @@ from pydantic import BaseModel, Field
 
 from api.common import MAX_BATCH_SIZE
 
-QuestionTypeLiteral = Literal["multiple_choice", "fill_blank", "matching"]
+QuestionTypeLiteral = Literal[
+    "multiple_choice", "fill_blank", "matching",
+    "writing", "speaking",   # opened in migration 0011; full manual-grading
+                             # flow + stricter question_data validators ship
+                             # later (see WRITING_SPEAKING.md)
+]
 
 
 class QuestionCreate(BaseModel):
