@@ -49,7 +49,10 @@ ALLOWED_TYPES: dict[str, set[str]] = {
 SIZE_LIMITS: dict[str, int] = {
     "audio": 50 * 1024 * 1024,
     "images": 10 * 1024 * 1024,
-    "student_recordings": 100 * 1024 * 1024,    # video is larger than audio
+    # Supabase Free tier caps per-bucket file size at 50 MB. Bump to
+    # 100 MB (and update the Supabase Dashboard bucket config to match)
+    # once on a paid plan — see WRITING_SPEAKING.md §11.1.
+    "student_recordings": 50 * 1024 * 1024,
 }
 
 # ---------------------------------------------------------------------------
