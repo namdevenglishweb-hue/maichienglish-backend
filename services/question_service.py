@@ -59,12 +59,12 @@ class _FillBlankData(BaseModel):
 # scored row of a shared-options table (KET Listening P5, Reading P2 etc.).
 # The rendering distinction is signaled by `section.type` (plan §3.5/§3.6).
 #
-# `writing` and `speaking` use permissive stub validators — only `prompt` is
-# required. The richer shape (minWords, maxWords, maxDurationSeconds, etc.
-# per WRITING_SPEAKING.md §4.1, §5.1) is documented in spec and will be
-# enforced when the manual-grading flow ships. Until then admins can create
-# basic writing/speaking questions with just a prompt; submit grades them as
-# 0 points / is_correct=false via grade_question's unknown-type fallback.
+# `writing` and `speaking` use permissive validators — only `prompt` is
+# required; `extra="allow"` keeps optional richer fields (minWords/maxWords,
+# exampleAnswer, promptAudioUrl, etc. per docs/writing-speaking/) without
+# dropping them. submit_attempt does NOT auto-grade these types: it stores
+# the answer with is_correct=NULL / points_earned=0 and a teacher scores
+# them later via the manual-grading flow (docs/teacher-grading/).
 class _WritingData(BaseModel):
     model_config = {"extra": "allow"}        # tolerate minWords/maxWords/etc.
     prompt: str = Field(..., min_length=1)

@@ -80,12 +80,23 @@ async def grade_attempt(
     except ValidationError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
-    # E5 email hook — fires when is_fully_graded just flipped to true.
+    # E5 email hook — fires once, when is_fully_graded just flipped false→true.
+    # `student_email` is non-None ONLY on that transition (see grading_service).
+    #
+    # TODO(email): the email feature is not implemented in code yet (design
+    # only — see docs/email/ + docs/teacher-grading/ §5). When it ships, wire
+    # the E5 "student graded" notification here, e.g.:
+    #     from services.email_dispatch import schedule_email
+    #     from services.email_service import EmailMessage, EmailType
+    #     from services.email_templates import student_graded
+    #     subject, text, html = student_graded.render(...)
+    #     schedule_email(background_tasks, EmailMessage(
+    #         to=[result["student_email"]], subject=subject, text_body=text,
+    #         html_body=html, email_type=EmailType.STUDENT_GRADED))
+    # Until then, log the intent so the trigger is observable in ops.
     if result.get("student_email"):
-        # TODO: wire to email_service.schedule_email(...) once EMAIL.md ships.
-        # For now, log the intent so ops can verify the trigger fires.
         logger.info(
-            "E5 student-graded email NOT YET SENT (email infra pending) — "
+            "E5 student-graded email NOT YET SENT (email feature not built) — "
             "attempt=%s recipient=%s",
             attempt_id, result["student_email"],
         )

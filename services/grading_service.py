@@ -18,7 +18,6 @@ from typing import Any
 
 from services.exceptions import (
     NotFoundError,
-    PermissionDeniedError,
     ValidationError,
 )
 from utils.grading_utils import MANUAL_GRADE_TYPES

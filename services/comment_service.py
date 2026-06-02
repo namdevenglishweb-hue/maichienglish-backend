@@ -8,7 +8,6 @@ from typing import Any, Optional
 
 from services.exceptions import (
     NotFoundError,
-    PermissionDeniedError,
     ValidationError,
 )
 

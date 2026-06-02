@@ -5,7 +5,7 @@ See WRITING_SPEAKING.md §8 (grading) and §9 (comments).
 
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -45,6 +45,12 @@ class WritingCommentCreateRequest(BaseModel):
     rangeEnd: int = Field(..., gt=0)
     quotedText: str = Field(..., min_length=1)
     commentText: str = Field(..., min_length=1)
+
+    @model_validator(mode="after")
+    def _check_range(self):
+        if self.rangeEnd <= self.rangeStart:
+            raise ValueError("rangeEnd must be greater than rangeStart")
+        return self
 
 
 class WritingCommentUpdateRequest(BaseModel):

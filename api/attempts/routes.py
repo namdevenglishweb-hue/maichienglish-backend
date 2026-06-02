@@ -318,10 +318,7 @@ async def speaking_upload(
     MIME + size were already validated by SpeakingUploadRequest's model
     validator. See WRITING_SPEAKING.md §11.2.
     """
-    from services.storage_service import (
-        EXT_FOR_MIME,
-        get_storage_service,
-    )
+    from services.storage_service import get_storage_service
 
     user = await _resolve_user(current_user)
     try:
