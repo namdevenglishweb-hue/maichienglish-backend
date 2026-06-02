@@ -11,7 +11,7 @@ from services.exceptions import (
     ValidationError,
 )
 from services.subscription_plans import SUBSCRIPTION_PLANS, PlanTier
-from utils.grading_utils import grade_question, strip_correct
+from utils.grading_utils import MANUAL_GRADE_TYPES, grade_question, strip_correct
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +34,7 @@ def _row_to_attempt(row) -> dict[str, Any]:
         "percentage": float(row["percentage"]) if row["percentage"] is not None else None,
         "time_spent_seconds": row["time_spent_seconds"],
         "is_abandoned": row["is_abandoned"],
+        "is_fully_graded": row["is_fully_graded"],
         "started_at": row["started_at"].isoformat() if row["started_at"] else None,
         "submitted_at": row["submitted_at"].isoformat() if row["submitted_at"] else None,
     }
@@ -42,14 +43,15 @@ def _row_to_attempt(row) -> dict[str, Any]:
 # Unqualified column list — for INSERT/UPDATE RETURNING (no table alias).
 _ATTEMPT_COLS = """
     id, user_id, exam_id, score, total_points, percentage,
-    time_spent_seconds, is_abandoned, started_at, submitted_at
+    time_spent_seconds, is_abandoned, is_fully_graded, started_at, submitted_at
 """
 
 # Same columns aliased with `a.` — required for SELECTs that JOIN exams,
 # otherwise `id` is ambiguous against `e.id`.
 _ATTEMPT_COLS_A = """
     a.id, a.user_id, a.exam_id, a.score, a.total_points, a.percentage,
-    a.time_spent_seconds, a.is_abandoned, a.started_at, a.submitted_at
+    a.time_spent_seconds, a.is_abandoned, a.is_fully_graded,
+    a.started_at, a.submitted_at
 """
 
 
@@ -647,6 +649,7 @@ class AttemptService:
 
                 total_points = 0
                 earned = 0
+                has_manual_question = False
                 for q in qrows:
                     qid = str(q["id"])
                     qtype = q["question_type"]
@@ -655,9 +658,18 @@ class AttemptService:
                     total_points += qpoints
 
                     student_answer = merged.get(qid)
-                    is_correct = grade_question(qtype, qdata, student_answer)
-                    points_earned = qpoints if is_correct else 0
-                    earned += points_earned
+
+                    # Writing / speaking: skip auto-grade. Save the student's
+                    # answer with is_correct=NULL, points_earned=0 — teacher
+                    # finalises via POST /api/teacher/.../grade.
+                    if qtype in MANUAL_GRADE_TYPES:
+                        has_manual_question = True
+                        is_correct: Optional[bool] = None
+                        points_earned = 0
+                    else:
+                        is_correct = grade_question(qtype, qdata, student_answer)
+                        points_earned = qpoints if is_correct else 0
+                        earned += points_earned
 
                     await conn.execute(
                         """
@@ -678,11 +690,16 @@ class AttemptService:
                     )
 
                 percentage = (earned / total_points * 100) if total_points > 0 else 0
+                # is_fully_graded = true only when the exam has no manual
+                # questions. Otherwise teacher's grading endpoint flips it
+                # to true once every manual answer is graded.
+                is_fully_graded = not has_manual_question
                 row = await conn.fetchrow(
                     f"""
                     UPDATE public.attempts
                     SET score = $2, total_points = $3, percentage = $4,
-                        time_spent_seconds = $5, submitted_at = now()
+                        time_spent_seconds = $5, submitted_at = now(),
+                        is_fully_graded = $6
                     WHERE id = $1
                     RETURNING {_ATTEMPT_COLS}
                     """,
@@ -691,6 +708,7 @@ class AttemptService:
                     total_points,
                     round(percentage, 2),
                     time_spent_seconds,
+                    is_fully_graded,
                 )
 
         logger.info(
@@ -720,6 +738,7 @@ class AttemptService:
             answer_rows = await conn.fetch(
                 """
                 SELECT a.id AS answer_id, a.student_answer, a.is_correct, a.points_earned,
+                       a.speaking_comment, a.speaking_comment_by, a.speaking_comment_at,
                        q.id AS question_id, q.position, q.question_type, q.question_data,
                        q.points, q.section_id, s.position AS section_position,
                        s.part_label AS section_part_label
@@ -731,6 +750,32 @@ class AttemptService:
                 """,
                 attempt_id,
             )
+
+            # Writing range-comments — keyed by answer_id for lookup below.
+            comment_rows = await conn.fetch(
+                """
+                SELECT wc.id, wc.answer_id, wc.range_start, wc.range_end,
+                       wc.quoted_text, wc.comment_text, wc.created_by,
+                       wc.created_at, wc.updated_at
+                FROM public.writing_comments wc
+                JOIN public.answers a ON a.id = wc.answer_id
+                WHERE a.attempt_id = $1
+                ORDER BY wc.range_start ASC
+                """,
+                attempt_id,
+            )
+            comments_by_answer: dict[str, list[dict[str, Any]]] = {}
+            for c in comment_rows:
+                comments_by_answer.setdefault(str(c["answer_id"]), []).append({
+                    "id": str(c["id"]),
+                    "range_start": c["range_start"],
+                    "range_end": c["range_end"],
+                    "quoted_text": c["quoted_text"],
+                    "comment_text": c["comment_text"],
+                    "created_by": str(c["created_by"]) if c["created_by"] else None,
+                    "created_at": c["created_at"].isoformat(),
+                    "updated_at": c["updated_at"].isoformat(),
+                })
 
             # Per-section, per-material audio play counts for this attempt.
             # See ATTEMPT_LIFECYCLE.md §4.6.1.
@@ -744,22 +789,38 @@ class AttemptService:
             qdata = _coerce_jsonb(ar["question_data"])
             if not is_submitted:
                 qdata = strip_correct(ar["question_type"], qdata)
-            per_answer.append(
-                {
-                    "answer_id": str(ar["answer_id"]),
-                    "question_id": str(ar["question_id"]),
-                    "section_id": str(ar["section_id"]),
-                    "section_position": ar["section_position"],
-                    "section_part_label": ar["section_part_label"],
-                    "position": ar["position"],
-                    "question_type": ar["question_type"],
-                    "question_data": qdata,
-                    "points": ar["points"],
-                    "student_answer": _coerce_jsonb(ar["student_answer"]),
-                    "is_correct": ar["is_correct"],
-                    "points_earned": ar["points_earned"],
-                }
-            )
+            row = {
+                "answer_id": str(ar["answer_id"]),
+                "question_id": str(ar["question_id"]),
+                "section_id": str(ar["section_id"]),
+                "section_position": ar["section_position"],
+                "section_part_label": ar["section_part_label"],
+                "position": ar["position"],
+                "question_type": ar["question_type"],
+                "question_data": qdata,
+                "points": ar["points"],
+                "student_answer": _coerce_jsonb(ar["student_answer"]),
+                "is_correct": ar["is_correct"],
+                "points_earned": ar["points_earned"],
+            }
+            # Attach type-specific comment payload.
+            if ar["question_type"] == "writing":
+                row["writing_comments"] = comments_by_answer.get(
+                    str(ar["answer_id"]), []
+                )
+            elif ar["question_type"] == "speaking":
+                if ar["speaking_comment"] is not None:
+                    row["speaking_comment"] = {
+                        "comment_text": ar["speaking_comment"],
+                        "created_by": (
+                            str(ar["speaking_comment_by"])
+                            if ar["speaking_comment_by"] else None
+                        ),
+                        "created_at": ar["speaking_comment_at"].isoformat(),
+                    }
+                else:
+                    row["speaking_comment"] = None
+            per_answer.append(row)
 
         return {
             "attempt": _row_to_attempt(attempt),
@@ -797,6 +858,52 @@ class AttemptService:
             }
             for r in rows
         ]
+
+    async def validate_speaking_upload(
+        self,
+        attempt_id: str,
+        user_id: str,
+        question_id: str,
+    ) -> None:
+        """Pre-flight checks before issuing a speaking-upload signed URL.
+
+        Raises:
+            NotFoundError    — attempt or question doesn't exist / scope
+            PermissionDeniedError — caller doesn't own the attempt
+            ValidationError  — attempt not in_progress, or question is not speaking
+        """
+        async with self.db.acquire() as conn:
+            attempt = await conn.fetchrow(
+                "SELECT id, user_id, exam_id, submitted_at, is_abandoned "
+                "FROM public.attempts WHERE id = $1",
+                attempt_id,
+            )
+            if not attempt:
+                raise NotFoundError(f"Attempt {attempt_id} not found")
+            if str(attempt["user_id"]) != str(user_id):
+                raise PermissionDeniedError("Not the owner of this attempt")
+            if attempt["submitted_at"] is not None or attempt["is_abandoned"]:
+                raise ValidationError("Attempt is not active")
+
+            qrow = await conn.fetchrow(
+                """
+                SELECT q.id, q.question_type, s.exam_id
+                FROM public.questions q
+                JOIN public.sections s ON s.id = q.section_id
+                WHERE q.id = $1
+                  AND q.deleted_at IS NULL
+                  AND s.deleted_at IS NULL
+                """,
+                question_id,
+            )
+            if not qrow or str(qrow["exam_id"]) != str(attempt["exam_id"]):
+                raise NotFoundError(
+                    f"Question {question_id} not in this attempt's exam"
+                )
+            if qrow["question_type"] != "speaking":
+                raise ValidationError(
+                    f"Question {question_id} is not a speaking question"
+                )
 
     async def record_audio_play(
         self,

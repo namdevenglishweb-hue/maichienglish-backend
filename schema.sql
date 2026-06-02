@@ -159,6 +159,7 @@ CREATE TABLE public.attempts (
   percentage           numeric(5,2),
   time_spent_seconds   int,
   is_abandoned         boolean NOT NULL DEFAULT false,
+  is_fully_graded      boolean NOT NULL DEFAULT true,
   started_at           timestamptz NOT NULL DEFAULT now(),
   submitted_at         timestamptz
 );
@@ -199,15 +200,42 @@ CREATE INDEX idx_attempt_section_state_attempt
 --   and POST /attempts/{id}/submit (overwrite with graded values).
 -- ------------------------------------------------------------
 CREATE TABLE public.answers (
-  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  attempt_id      uuid NOT NULL REFERENCES public.attempts(id) ON DELETE CASCADE,
-  question_id     uuid NOT NULL REFERENCES public.questions(id) ON DELETE CASCADE,
-  student_answer  jsonb,
-  is_correct      boolean,
-  points_earned   int NOT NULL DEFAULT 0,
-  created_at      timestamptz NOT NULL DEFAULT now(),
+  id                    uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  attempt_id            uuid NOT NULL REFERENCES public.attempts(id) ON DELETE CASCADE,
+  question_id           uuid NOT NULL REFERENCES public.questions(id) ON DELETE CASCADE,
+  student_answer        jsonb,
+  is_correct            boolean,
+  points_earned         int NOT NULL DEFAULT 0,
+  -- speaking-overall comment (writing comments use writing_comments table)
+  speaking_comment      text,
+  speaking_comment_by   uuid REFERENCES public.profiles(id) ON DELETE SET NULL,
+  speaking_comment_at   timestamptz,
+  created_at            timestamptz NOT NULL DEFAULT now(),
   UNIQUE (attempt_id, question_id)
 );
+
+
+-- ------------------------------------------------------------
+-- writing_comments — range-based teacher annotations on writing answers.
+--   Multiple comments per answer. Overlap rejected at application layer
+--   (with row lock on answers row) — see services/comment_service.py.
+--   quoted_text stores the snapshot of student_answer.text[start:end]
+--   at comment creation time for display + audit.
+-- ------------------------------------------------------------
+CREATE TABLE public.writing_comments (
+  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  answer_id     uuid NOT NULL REFERENCES public.answers(id) ON DELETE CASCADE,
+  range_start   int  NOT NULL CHECK (range_start >= 0),
+  range_end     int  NOT NULL CHECK (range_end > range_start),
+  quoted_text   text NOT NULL,
+  comment_text  text NOT NULL CHECK (length(comment_text) > 0),
+  created_by    uuid REFERENCES public.profiles(id) ON DELETE SET NULL,
+  created_at    timestamptz NOT NULL DEFAULT now(),
+  updated_at    timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX writing_comments_answer_id_idx
+  ON public.writing_comments (answer_id, range_start);
 
 
 -- ------------------------------------------------------------
@@ -225,3 +253,4 @@ ALTER TABLE public.questions             ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.attempts              ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.attempt_section_state ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.answers               ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.writing_comments      ENABLE ROW LEVEL SECURITY;

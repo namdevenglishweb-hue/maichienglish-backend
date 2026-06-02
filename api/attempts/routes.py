@@ -1,6 +1,10 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
 from dependencies import get_current_user
+
+logger = logging.getLogger(__name__)
 from services.attempt_service import (
     AttemptLimitExceededError,
     AudioPlayLimitExceededError,
@@ -40,6 +44,11 @@ from .schemas import (
     AudioPlayResponse,
     AudioPlayResponseData,
     SavedAnswerView,
+    SpeakingCommentView,
+    SpeakingUploadRequest,
+    SpeakingUploadResponse,
+    SpeakingUploadResponseData,
+    WritingCommentView,
 )
 
 router = APIRouter(prefix="/api/attempts", tags=["Attempts"])
@@ -65,6 +74,7 @@ def _attempt_to_view(a: dict) -> AttemptView:
         percentage=a["percentage"],
         timeSpentSeconds=a["time_spent_seconds"],
         isAbandoned=a.get("is_abandoned", False),
+        isFullyGraded=a.get("is_fully_graded", True),
         startedAt=a["started_at"],
         submittedAt=a["submitted_at"],
     )
@@ -238,6 +248,7 @@ async def submit_attempt(
             totalPoints=attempt["total_points"],
             percentage=attempt["percentage"],
             submittedAt=attempt["submitted_at"],
+            isFullyGraded=attempt.get("is_fully_graded", True),
         ),
     )
 
@@ -285,6 +296,91 @@ async def record_audio_play(
     return AudioPlayResponse(data=AudioPlayResponseData(**result))
 
 
+@router.post(
+    "/{attempt_id}/speaking-upload",
+    response_model=SpeakingUploadResponse,
+    status_code=200,
+)
+async def speaking_upload(
+    attempt_id: str,
+    request: SpeakingUploadRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Issue a signed-URL for the student to upload a speaking-answer
+    recording (audio or video) directly to Supabase Storage.
+
+    Validates:
+      - caller owns this attempt (403 if not)
+      - attempt is in_progress (400 if submitted / abandoned)
+      - questionId belongs to the attempt's exam (404 if not)
+      - question is type='speaking' (400 if not)
+
+    MIME + size were already validated by SpeakingUploadRequest's model
+    validator. See WRITING_SPEAKING.md §11.2.
+    """
+    from services.storage_service import (
+        EXT_FOR_MIME,
+        get_storage_service,
+    )
+
+    user = await _resolve_user(current_user)
+    try:
+        await attempt_service.validate_speaking_upload(
+            attempt_id=attempt_id,
+            user_id=user["id"],
+            question_id=request.questionId,
+        )
+    except NotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except PermissionDeniedError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+    except ValidationError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    # Reuse the storage adapter from MEDIA_UPLOAD. Same RuntimeError /
+    # transport error handling pattern (MEDIA_UPLOAD.md §5.1).
+    try:
+        storage = get_storage_service()
+        result = await storage.create_signed_upload(
+            bucket="student_recordings",
+            content_type=request.contentType,
+            file_size_bytes=request.fileSizeBytes,
+        )
+    except RuntimeError:
+        logger.exception("storage adapter init failed")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Storage service not configured",
+        )
+    except Exception as e:
+        status_code = getattr(e, "status_code", None) or getattr(e, "code", None)
+        try:
+            status_code = int(status_code) if status_code is not None else None
+        except (TypeError, ValueError):
+            status_code = None
+        if status_code is not None and 500 <= status_code < 600:
+            logger.warning("storage unreachable: %s", e)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Storage service unavailable",
+            )
+        logger.exception("storage error")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Storage error",
+        )
+
+    return SpeakingUploadResponse(
+        data=SpeakingUploadResponseData(
+            uploadUrl=result.upload_url,
+            publicUrl=result.public_url,
+            token=result.token,
+            path=result.path,
+            bucket=result.bucket,
+        )
+    )
+
+
 @router.get("/history", response_model=AttemptHistoryResponse)
 async def get_history(current_user: dict = Depends(get_current_user)):
     """List the current user's attempts, most recent first (capped at 100)."""
@@ -304,6 +400,7 @@ async def get_history(current_user: dict = Depends(get_current_user)):
                     percentage=r["percentage"],
                     timeSpentSeconds=r["time_spent_seconds"],
                     isAbandoned=r.get("is_abandoned", False),
+                    isFullyGraded=r.get("is_fully_graded", True),
                     startedAt=r["started_at"],
                     submittedAt=r["submitted_at"],
                 )
@@ -349,23 +446,52 @@ async def get_attempt_detail(
         data=AttemptDetailData(
             attempt=_attempt_to_view(detail["attempt"]),
             exam=AttemptDetailExam(**detail["exam"]),
-            answers=[
-                AnswerView(
-                    answerId=a["answer_id"],
-                    questionId=a["question_id"],
-                    sectionId=a["section_id"],
-                    sectionPosition=a["section_position"],
-                    sectionPartLabel=a["section_part_label"],
-                    position=a["position"],
-                    questionType=a["question_type"],
-                    questionData=a["question_data"],
-                    points=a["points"],
-                    studentAnswer=a["student_answer"],
-                    isCorrect=a["is_correct"],
-                    pointsEarned=a["points_earned"],
-                )
-                for a in detail["answers"]
-            ],
+            answers=[_to_answer_view(a) for a in detail["answers"]],
             audioPlayCounts=detail.get("audio_play_counts", {}),
         ),
+    )
+
+
+def _to_answer_view(a: dict) -> AnswerView:
+    """Map a service-layer answer dict → API AnswerView, including the
+    type-specific comment payload (writing range comments / speaking overall
+    comment) when present."""
+    writing_comments = None
+    if "writing_comments" in a:
+        writing_comments = [
+            WritingCommentView(
+                id=c["id"],
+                rangeStart=c["range_start"],
+                rangeEnd=c["range_end"],
+                quotedText=c["quoted_text"],
+                commentText=c["comment_text"],
+                createdBy=c.get("created_by"),
+                createdAt=c["created_at"],
+                updatedAt=c["updated_at"],
+            )
+            for c in a["writing_comments"]
+        ]
+    speaking_comment = None
+    if a.get("speaking_comment"):
+        sc = a["speaking_comment"]
+        speaking_comment = SpeakingCommentView(
+            commentText=sc["comment_text"],
+            createdBy=sc.get("created_by"),
+            createdAt=sc["created_at"],
+        )
+    return AnswerView(
+        answerId=a["answer_id"],
+        questionId=a["question_id"],
+        sectionId=a["section_id"],
+        sectionPosition=a["section_position"],
+        sectionPartLabel=a["section_part_label"],
+        position=a["position"],
+        questionType=a["question_type"],
+        questionData=a["question_data"],
+        points=a["points"],
+        studentAnswer=a["student_answer"],
+        isCorrect=a["is_correct"],
+        pointsEarned=a["points_earned"],
+        writingComments=writing_comments,
+        speakingComment=speaking_comment,
     )

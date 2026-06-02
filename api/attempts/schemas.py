@@ -1,6 +1,6 @@
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class AttemptStartRequest(BaseModel):
@@ -82,6 +82,7 @@ class AttemptView(BaseModel):
     percentage: Optional[float] = None
     timeSpentSeconds: Optional[int] = None
     isAbandoned: bool = False
+    isFullyGraded: bool = True
     startedAt: Optional[str] = None
     submittedAt: Optional[str] = None
 
@@ -215,6 +216,7 @@ class AttemptSubmitResponseData(BaseModel):
     totalPoints: Optional[float] = None
     percentage: Optional[float] = None
     submittedAt: Optional[str] = None
+    isFullyGraded: bool = True
 
 
 class AttemptSubmitResponse(BaseModel):
@@ -222,6 +224,27 @@ class AttemptSubmitResponse(BaseModel):
 
     status: int = 200
     data: AttemptSubmitResponseData
+
+
+class WritingCommentView(BaseModel):
+    """A teacher's range-based annotation on a writing answer."""
+
+    id: str
+    rangeStart: int
+    rangeEnd: int
+    quotedText: str
+    commentText: str
+    createdBy: Optional[str] = None
+    createdAt: str
+    updatedAt: str
+
+
+class SpeakingCommentView(BaseModel):
+    """The single overall comment a teacher attaches to a speaking answer."""
+
+    commentText: str
+    createdBy: Optional[str] = None
+    createdAt: str
 
 
 class AnswerView(BaseModel):
@@ -239,6 +262,10 @@ class AnswerView(BaseModel):
     studentAnswer: Any = None
     isCorrect: Optional[bool] = None
     pointsEarned: int = 0
+    # Writing-only: list of range-based teacher annotations (empty if none).
+    writingComments: Optional[list[WritingCommentView]] = None
+    # Speaking-only: single overall comment (null if not set).
+    speakingComment: Optional[SpeakingCommentView] = None
 
 
 class AttemptDetailExam(BaseModel):
@@ -281,6 +308,7 @@ class AttemptHistoryItem(BaseModel):
     percentage: Optional[float] = None
     timeSpentSeconds: Optional[int] = None
     isAbandoned: bool = False
+    isFullyGraded: bool = True
     startedAt: Optional[str] = None
     submittedAt: Optional[str] = None
 
@@ -316,3 +344,55 @@ class AudioPlayResponse(BaseModel):
 
     status: int = 200
     data: AudioPlayResponseData
+
+
+# ---------------------------------------------------------------------------
+# Speaking upload — student-side signed-URL request (WRITING_SPEAKING.md §11.2)
+# ---------------------------------------------------------------------------
+
+
+class SpeakingUploadRequest(BaseModel):
+    """Body for POST /api/attempts/{id}/speaking-upload.
+
+    Caller (student) supplies the question they're answering, the file's
+    MIME and size. BE validates ownership + question type, then issues a
+    signed PUT URL into the `student_recordings` bucket.
+    """
+
+    questionId: str = Field(..., min_length=1)
+    filename: str = Field(..., min_length=1)
+    contentType: str = Field(..., min_length=1)
+    fileSizeBytes: int = Field(..., ge=1)
+
+    @model_validator(mode="after")
+    def _check_mime_and_size(self):
+        from services.storage_service import (
+            ALLOWED_TYPES, EXT_FOR_MIME, SIZE_LIMITS,
+        )
+        allowed = ALLOWED_TYPES["student_recordings"]
+        if self.contentType not in allowed:
+            raise ValueError(
+                f'Invalid contentType "{self.contentType}" for speaking upload; '
+                f"allowed: {sorted(allowed)}"
+            )
+        if self.contentType not in EXT_FOR_MIME:
+            raise ValueError(f'No extension mapping for contentType "{self.contentType}"')
+        limit = SIZE_LIMITS["student_recordings"]
+        if self.fileSizeBytes > limit:
+            raise ValueError(
+                f"File size {self.fileSizeBytes} exceeds limit of {limit} bytes"
+            )
+        return self
+
+
+class SpeakingUploadResponseData(BaseModel):
+    uploadUrl: str
+    publicUrl: str
+    token: str
+    path: str
+    bucket: str = "student_recordings"
+
+
+class SpeakingUploadResponse(BaseModel):
+    status: int = 200
+    data: SpeakingUploadResponseData
