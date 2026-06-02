@@ -23,6 +23,9 @@ EXT_FOR_MIME: dict[str, str] = {
     "image/png": ".png",
     "image/jpeg": ".jpg",
     "image/webp": ".webp",
+    # video — for student speaking-answer recordings (WRITING_SPEAKING.md §11)
+    "video/webm": ".webm",
+    "video/mp4": ".mp4",
 }
 
 ALLOWED_TYPES: dict[str, set[str]] = {
@@ -35,11 +38,21 @@ ALLOWED_TYPES: dict[str, set[str]] = {
         "audio/webm",
     },
     "images": {"image/png", "image/jpeg", "image/webp"},
+    # Student-uploaded speaking answers — audio OR video.
+    # See WRITING_SPEAKING.md §11.1 + FRONTEND_WRITING_SPEAKING.md §3.2.1.
+    "student_recordings": {
+        "audio/webm", "audio/mp4", "audio/mpeg", "audio/wav",
+        "video/webm", "video/mp4",
+    },
 }
 
 SIZE_LIMITS: dict[str, int] = {
     "audio": 50 * 1024 * 1024,
     "images": 10 * 1024 * 1024,
+    # Supabase Free tier caps per-bucket file size at 50 MB. Bump to
+    # 100 MB (and update the Supabase Dashboard bucket config to match)
+    # once on a paid plan — see WRITING_SPEAKING.md §11.1.
+    "student_recordings": 50 * 1024 * 1024,
 }
 
 # ---------------------------------------------------------------------------

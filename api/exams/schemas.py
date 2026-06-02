@@ -3,7 +3,7 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field
 
 from api.common import MAX_BATCH_SIZE
-from api.sections.schemas import SectionCreate
+from api.sections.schemas import SectionCreate, SectionTypeLiteral
 
 LevelLiteral = Literal["primary", "secondary", "KET", "PET", "IELTS"]
 SkillLiteral = Literal["listening", "reading"]
@@ -78,9 +78,9 @@ class ExamSectionPreview(BaseModel):
     id: str
     position: int
     partLabel: Optional[str] = None
-    type: Optional[Literal["multiple_choice", "fill_blank", "matching", "multiple_choice_shared"]] = Field(
+    type: Optional[SectionTypeLiteral] = Field(
         default=None,
-        description="FE rendering hint; 'matching' signals shared-options table layout.",
+        description="FE rendering hint; 'matching' signals shared-options table layout. Includes 'writing'/'speaking'.",
     )
     instructions: Optional[str] = None
     materials: list[dict[str, Any]] = Field(

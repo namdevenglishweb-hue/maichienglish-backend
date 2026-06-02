@@ -2,9 +2,9 @@ name: Backend CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
 
 env:
   PYTHON_VERSION: '3.14'
@@ -94,17 +94,32 @@ jobs:
       - name: Run integration tests
         run: pytest -m integration --cov
 
-  deploy:
-    name: Trigger Render deploy
+  deploy-prod:
+    name: Trigger Render deploy (prod)
     runs-on: ubuntu-latest
     needs: integration
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
-      - name: Call Render Deploy API
+      - name: Call Render Deploy API (prod)
         run: |
           curl -fsS -X POST \
             -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
             -H "Content-Type: application/json" \
             "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/deploys"
+
+  deploy-dev:
+    name: Trigger Render deploy (dev / staging)
+    runs-on: ubuntu-latest
+    needs: integration
+    if: github.ref == 'refs/heads/dev' && github.event_name == 'push'
+    steps:
+      - name: Call Render Deploy API (dev)
+        # Reuses RENDER_API_KEY (account-wide); separate service ID for the
+        # staging environment connected to the dev branch.
+        run: |
+          curl -fsS -X POST \
+            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            "https://api.render.com/v1/services/${{ secrets.RENDER_DEV_SERVICE_ID }}/deploys"
 
   # Linting (ruff + mypy) is pending — separate job, runs in parallel with `test`.

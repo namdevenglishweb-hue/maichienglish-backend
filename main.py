@@ -14,6 +14,7 @@ from api.questions import section_scoped_router as section_questions_router
 from api.sections import exam_scoped_router as exam_sections_router
 from api.sections import section_router as sections_router
 from api.subscriptions import router as subscriptions_router
+from api.teacher import router as teacher_router
 from api.users import router as users_router
 from config.database import close_db_pool, get_db_pool, init_db_pool
 from config.logging import setup_logging
@@ -57,6 +58,7 @@ app.include_router(section_questions_router)
 app.include_router(questions_router)
 app.include_router(attempts_router)
 app.include_router(parents_router)
+app.include_router(teacher_router)
 
 
 @app.get("/health")

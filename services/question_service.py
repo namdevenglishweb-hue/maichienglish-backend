@@ -58,10 +58,29 @@ class _FillBlankData(BaseModel):
 # `matching` reuses the MC shape: each matching question is one independently-
 # scored row of a shared-options table (KET Listening P5, Reading P2 etc.).
 # The rendering distinction is signaled by `section.type` (plan §3.5/§3.6).
+#
+# `writing` and `speaking` use permissive validators — only `prompt` is
+# required; `extra="allow"` keeps optional richer fields (minWords/maxWords,
+# exampleAnswer, promptAudioUrl, etc. per docs/writing-speaking/) without
+# dropping them. submit_attempt does NOT auto-grade these types: it stores
+# the answer with is_correct=NULL / points_earned=0 and a teacher scores
+# them later via the manual-grading flow (docs/teacher-grading/).
+class _WritingData(BaseModel):
+    model_config = {"extra": "allow"}        # tolerate minWords/maxWords/etc.
+    prompt: str = Field(..., min_length=1)
+
+
+class _SpeakingData(BaseModel):
+    model_config = {"extra": "allow"}        # tolerate maxDurationSeconds/etc.
+    prompt: str = Field(..., min_length=1)
+
+
 _VALIDATORS = {
     "multiple_choice": _MultipleChoiceData,
     "fill_blank": _FillBlankData,
     "matching": _MultipleChoiceData,
+    "writing": _WritingData,
+    "speaking": _SpeakingData,
 }
 
 

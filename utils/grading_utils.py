@@ -16,6 +16,9 @@ def strip_correct(question_type: str, question_data: dict) -> dict:
     """Return a shallow copy of question_data with answer fields removed.
 
     Used when serving a question to a student who hasn't submitted yet.
+    Writing/speaking carry an `exampleAnswer` / `exampleAnswerAudioUrl`
+    that's admin-only — also stripped here (see WRITING_SPEAKING.md §4.3
+    / §5.3).
     """
     stripped = dict(question_data)
     if question_type in ("multiple_choice", "matching"):
@@ -23,7 +26,18 @@ def strip_correct(question_type: str, question_data: dict) -> dict:
     elif question_type == "fill_blank":
         stripped.pop("correct_answers", None)
         stripped.pop("case_sensitive", None)
+    elif question_type == "writing":
+        stripped.pop("exampleAnswer", None)
+    elif question_type == "speaking":
+        stripped.pop("exampleAnswerAudioUrl", None)
     return stripped
+
+
+# Question types whose answers are scored by a human teacher, not by
+# grade_question(). submit_attempt skips auto-grading for these and
+# leaves is_correct=NULL / points_earned=0 until the teacher's grade
+# endpoint sets them. See WRITING_SPEAKING.md §7.
+MANUAL_GRADE_TYPES: frozenset[str] = frozenset({"writing", "speaking"})
 
 
 def _grade_multiple_choice(student_answer: Any, qdata: dict) -> bool:

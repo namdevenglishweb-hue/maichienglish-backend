@@ -5,7 +5,12 @@ from pydantic import BaseModel, Field
 from api.common import MAX_BATCH_SIZE
 from api.questions.schemas import QuestionCreate
 
-SectionTypeLiteral = Literal["multiple_choice", "fill_blank", "matching", "multiple_choice_shared"]
+SectionTypeLiteral = Literal[
+    "multiple_choice", "fill_blank", "matching", "multiple_choice_shared",
+    "writing", "speaking",   # opened in migration 0011; rendering-hint values
+                             # only — manual-grading flow ships later
+                             # (see WRITING_SPEAKING.md)
+]
 
 
 class TextMaterial(BaseModel):
