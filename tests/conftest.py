@@ -69,6 +69,9 @@ _DATA_TABLES = [
     "questions",
     "sections",
     "exams",
+    "class_students",
+    "class_teachers",
+    "classes",
     "password_reset_codes",
     "subscriptions",
     "profiles",
@@ -448,6 +451,56 @@ async def set_subscription(db_pool):
             await conn.execute(sql, *vals)
 
     return _set
+
+
+@pytest_asyncio.fixture
+async def make_class(db_pool):
+    """Factory: create a class, optionally seeding teacher/student members.
+
+    `teacher_ids` / `student_ids` are lists of profile ids to attach via the
+    junction tables (raw SQL — bypasses the 1-class-per-student app check, so
+    callers must keep students distinct across classes themselves).
+
+    Returns {id, name, description}.
+    """
+    import uuid
+
+    async def _make(
+        name: str = "Class A",
+        description: str | None = None,
+        teacher_ids: list[str] | None = None,
+        student_ids: list[str] | None = None,
+    ) -> dict:
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO public.classes (name, description)
+                    VALUES ($1, $2)
+                    RETURNING id, name, description
+                    """,
+                    name, description,
+                )
+                class_id = row["id"]
+                for tid in teacher_ids or []:
+                    await conn.execute(
+                        "INSERT INTO public.class_teachers (class_id, teacher_id) "
+                        "VALUES ($1, $2)",
+                        class_id, uuid.UUID(tid),
+                    )
+                for sid in student_ids or []:
+                    await conn.execute(
+                        "INSERT INTO public.class_students (class_id, student_id) "
+                        "VALUES ($1, $2)",
+                        class_id, uuid.UUID(sid),
+                    )
+        return {
+            "id": str(class_id),
+            "name": row["name"],
+            "description": row["description"],
+        }
+
+    return _make
 
 
 @pytest.fixture

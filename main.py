@@ -7,6 +7,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from api.admin import router as admin_router
 from api.attempts import router as attempts_router
 from api.auth import router as auth_router
+from api.classes import admin_router as admin_classes_router
+from api.classes import teacher_router as teacher_classes_router
 from api.exams import router as exams_router
 from api.parents import router as parents_router
 from api.questions import question_router as questions_router
@@ -59,6 +61,8 @@ app.include_router(questions_router)
 app.include_router(attempts_router)
 app.include_router(parents_router)
 app.include_router(teacher_router)
+app.include_router(admin_classes_router)
+app.include_router(teacher_classes_router)
 
 
 @app.get("/health")

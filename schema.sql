@@ -239,6 +239,43 @@ CREATE INDEX writing_comments_answer_id_idx
 
 
 -- ------------------------------------------------------------
+-- classes / class_teachers / class_students — grouping students +
+-- teachers into classes for teacher-grading scoping (migration 0013).
+--   class_teachers is N-N (a class has 1+ teachers; a teacher teaches
+--   many classes). class_students enforces 1-class-per-student via
+--   UNIQUE(student_id). Membership FKs CASCADE on classes/profiles
+--   delete (housekeeping); the "delete class only when empty" rule is
+--   enforced at the application layer — see services/class_service.py.
+-- ------------------------------------------------------------
+CREATE TABLE public.classes (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name        text NOT NULL,
+  description text,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  updated_at  timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE public.class_teachers (
+  class_id   uuid NOT NULL REFERENCES public.classes(id)  ON DELETE CASCADE,
+  teacher_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (class_id, teacher_id)
+);
+CREATE INDEX class_teachers_teacher_idx
+  ON public.class_teachers (teacher_id);
+
+CREATE TABLE public.class_students (
+  class_id   uuid NOT NULL REFERENCES public.classes(id)  ON DELETE CASCADE,
+  student_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (class_id, student_id),
+  UNIQUE (student_id)        -- ép 1 lớp / học sinh (v1)
+);
+CREATE INDEX class_students_class_idx
+  ON public.class_students (class_id);
+
+
+-- ------------------------------------------------------------
 -- Row-level security. Defense-in-depth per DEPLOYMENT.md §3.1 / §8 —
 -- the backend connects via the service-role key (which bypasses RLS),
 -- but enabling RLS blocks bare anon/authenticated key holders from
@@ -254,3 +291,6 @@ ALTER TABLE public.attempts              ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.attempt_section_state ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.answers               ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.writing_comments      ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.classes               ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.class_teachers        ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.class_students        ENABLE ROW LEVEL SECURITY;
