@@ -78,9 +78,14 @@ def test_expired_token_raises_pyjwt_error():
 
 def test_tampered_signature_rejected():
     token = create_access_token("user@example.com", role="student", tier="free")
-    # Flip a character in the signature segment
     head, payload_b64, sig = token.rsplit(".", 2)
-    tampered = f"{head}.{payload_b64}.{sig[:-1]}{'A' if sig[-1] != 'A' else 'B'}"
+    # Flip the FIRST signature char, not the last. An HS256 signature is
+    # 32 bytes → 43 base64url chars; the *last* char only carries 4
+    # significant bits (the low 2 are unused padding), so flipping it can
+    # decode to the same bytes and leave the signature valid. The first
+    # char's 6 bits are all significant → mutating it always changes the
+    # decoded signature, making this assertion deterministic.
+    tampered = f"{head}.{payload_b64}.{'A' if sig[0] != 'A' else 'B'}{sig[1:]}"
 
     with pytest.raises(jwt.InvalidSignatureError):
         decode_token(tampered)
