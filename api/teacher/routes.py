@@ -12,6 +12,8 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from dependencies import require_teacher_or_admin
+from services.attempt_service import attempt_service
+from services.class_service import class_service
 from services.comment_service import comment_service
 from services.exceptions import (
     NotFoundError,
@@ -52,6 +54,32 @@ async def _resolve_teacher(current_user: dict) -> dict:
     return user
 
 
+async def _authorize_attempt_scope(current_user: dict, attempt_id: str) -> None:
+    """Class-scoping guard for grade + comment endpoints.
+
+    Admin bypasses. A teacher may only act on an attempt whose owner is a
+    student in a class the teacher teaches
+    (`class_service.teacher_shares_class_with`); otherwise 403. A missing
+    attempt → 404 (so the scoping check never masks a not-found).
+
+    See docs/teacher-grading/teacher-grading-design.md §6 +
+    docs/class-management/class-management-design.md §7.
+    """
+    if current_user.get("role") == "admin":
+        return
+    teacher = await _resolve_teacher(current_user)
+    owner_id = await attempt_service.get_attempt_owner(attempt_id)
+    if owner_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Attempt not found"
+        )
+    if not await class_service.teacher_shares_class_with(teacher["id"], owner_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not teach this student's class",
+        )
+
+
 # =========================================================================
 # Grading
 # =========================================================================
@@ -70,6 +98,7 @@ async def grade_attempt(
     E5 email is scheduled to the student (currently logged TODO; will be
     wired up when EMAIL.md infrastructure ships).
     """
+    await _authorize_attempt_scope(current_user, attempt_id)
     grades = [g.model_dump() for g in request.grades]
     try:
         result = await grading_service.grade_attempt(
@@ -128,6 +157,7 @@ async def create_writing_comment(
     request: WritingCommentCreateRequest,
     current_user: dict = Depends(require_teacher_or_admin),
 ):
+    await _authorize_attempt_scope(current_user, attempt_id)
     teacher = await _resolve_teacher(current_user)
     try:
         c = await comment_service.create_writing_comment(
@@ -171,6 +201,7 @@ async def update_writing_comment(
     current_user: dict = Depends(require_teacher_or_admin),
 ):
     """Edit comment text (range immutable — DELETE + POST to change range)."""
+    await _authorize_attempt_scope(current_user, attempt_id)
     teacher = await _resolve_teacher(current_user)
     try:
         c = await comment_service.update_writing_comment(
@@ -210,6 +241,7 @@ async def delete_writing_comment(
     comment_id: str,
     current_user: dict = Depends(require_teacher_or_admin),
 ):
+    await _authorize_attempt_scope(current_user, attempt_id)
     try:
         await comment_service.delete_writing_comment(
             attempt_id=attempt_id,
@@ -241,6 +273,7 @@ async def upsert_speaking_comment(
 
     Overwrites any existing comment (matches "1 đoạn comment duy nhất" rule).
     """
+    await _authorize_attempt_scope(current_user, attempt_id)
     teacher = await _resolve_teacher(current_user)
     try:
         c = await comment_service.upsert_speaking_comment(
@@ -273,6 +306,7 @@ async def delete_speaking_comment(
     answer_id: str,
     current_user: dict = Depends(require_teacher_or_admin),
 ):
+    await _authorize_attempt_scope(current_user, attempt_id)
     try:
         await comment_service.delete_speaking_comment(
             attempt_id=attempt_id, answer_id=answer_id,

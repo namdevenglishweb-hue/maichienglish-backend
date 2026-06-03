@@ -10,6 +10,7 @@ from services.attempt_service import (
     AudioPlayLimitExceededError,
     attempt_service,
 )
+from services.class_service import class_service
 from services.exceptions import (
     ConflictError,
     NotFoundError,
@@ -414,7 +415,9 @@ async def get_attempt_detail(
     """Get an attempt with per-question breakdown (grouped by section).
 
     - Owner can always view.
-    - Admin/teacher can view any attempt.
+    - Admin can view any attempt.
+    - Teacher can view only attempts of students in a class they teach
+      (class-scoped — see docs/attempt-lifecycle §5.7).
     - Parent can view attempts of their linked children.
     """
     detail = await attempt_service.get_attempt_with_answers(attempt_id)
@@ -428,12 +431,17 @@ async def get_attempt_detail(
 
     owner_id = detail["attempt"]["user_id"]
     is_owner = owner_id == user["id"]
-    is_staff = role in ("admin", "teacher")
+    is_admin = role == "admin"
+    is_teacher_in_class = False
+    if role == "teacher":
+        is_teacher_in_class = await class_service.teacher_shares_class_with(
+            user["id"], owner_id
+        )
     is_parent_of_owner = False
     if role == "parent":
         is_parent_of_owner = await user_service.is_child_of(owner_id, user["id"])
 
-    if not (is_owner or is_staff or is_parent_of_owner):
+    if not (is_owner or is_admin or is_teacher_in_class or is_parent_of_owner):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not allowed to view this attempt",

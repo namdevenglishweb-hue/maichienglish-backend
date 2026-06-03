@@ -717,6 +717,24 @@ class AttemptService:
         )
         return _row_to_attempt(row)
 
+    async def get_attempt_owner(self, attempt_id: str) -> Optional[str]:
+        """Return the attempt's owner (user_id) as a str, or None if the
+        attempt doesn't exist / id is malformed.
+
+        Lightweight lookup used by the route layer for class-scoping authz
+        on grade + comment endpoints, so we don't have to load the full
+        attempt + answers tree just to check who owns it.
+        """
+        async with self.db.acquire() as conn:
+            try:
+                uid = await conn.fetchval(
+                    "SELECT user_id FROM public.attempts WHERE id = $1",
+                    attempt_id,
+                )
+            except asyncpg.DataError:
+                return None
+        return str(uid) if uid is not None else None
+
     async def get_attempt_with_answers(
         self, attempt_id: str
     ) -> Optional[dict[str, Any]]:
