@@ -235,6 +235,7 @@ class WritingCommentView(BaseModel):
     quotedText: str
     commentText: str
     createdBy: Optional[str] = None
+    createdByName: Optional[str] = None  # teacher full_name (for display/print)
     createdAt: str
     updatedAt: str
 
@@ -244,6 +245,7 @@ class SpeakingCommentView(BaseModel):
 
     commentText: str
     createdBy: Optional[str] = None
+    createdByName: Optional[str] = None  # teacher full_name (for display/print)
     createdAt: str
 
 

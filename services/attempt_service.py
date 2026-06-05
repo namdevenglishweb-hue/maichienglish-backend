@@ -757,12 +757,14 @@ class AttemptService:
                 """
                 SELECT a.id AS answer_id, a.student_answer, a.is_correct, a.points_earned,
                        a.speaking_comment, a.speaking_comment_by, a.speaking_comment_at,
+                       sp.full_name AS speaking_comment_by_name,
                        q.id AS question_id, q.position, q.question_type, q.question_data,
                        q.points, q.section_id, s.position AS section_position,
                        s.part_label AS section_part_label
                 FROM public.answers a
                 JOIN public.questions q ON q.id = a.question_id
                 JOIN public.sections s ON s.id = q.section_id
+                LEFT JOIN public.profiles sp ON sp.id = a.speaking_comment_by
                 WHERE a.attempt_id = $1
                 ORDER BY s.position ASC, q.position ASC
                 """,
@@ -774,9 +776,11 @@ class AttemptService:
                 """
                 SELECT wc.id, wc.answer_id, wc.range_start, wc.range_end,
                        wc.quoted_text, wc.comment_text, wc.created_by,
+                       p.full_name AS created_by_name,
                        wc.created_at, wc.updated_at
                 FROM public.writing_comments wc
                 JOIN public.answers a ON a.id = wc.answer_id
+                LEFT JOIN public.profiles p ON p.id = wc.created_by
                 WHERE a.attempt_id = $1
                 ORDER BY wc.range_start ASC
                 """,
@@ -791,6 +795,7 @@ class AttemptService:
                     "quoted_text": c["quoted_text"],
                     "comment_text": c["comment_text"],
                     "created_by": str(c["created_by"]) if c["created_by"] else None,
+                    "created_by_name": c["created_by_name"],
                     "created_at": c["created_at"].isoformat(),
                     "updated_at": c["updated_at"].isoformat(),
                 })
@@ -834,6 +839,7 @@ class AttemptService:
                             str(ar["speaking_comment_by"])
                             if ar["speaking_comment_by"] else None
                         ),
+                        "created_by_name": ar["speaking_comment_by_name"],
                         "created_at": ar["speaking_comment_at"].isoformat(),
                     }
                 else:

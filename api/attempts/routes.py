@@ -471,6 +471,7 @@ def _to_answer_view(a: dict) -> AnswerView:
                 quotedText=c["quoted_text"],
                 commentText=c["comment_text"],
                 createdBy=c.get("created_by"),
+                createdByName=c.get("created_by_name"),
                 createdAt=c["created_at"],
                 updatedAt=c["updated_at"],
             )
@@ -482,6 +483,7 @@ def _to_answer_view(a: dict) -> AnswerView:
         speaking_comment = SpeakingCommentView(
             commentText=sc["comment_text"],
             createdBy=sc.get("created_by"),
+            createdByName=sc.get("created_by_name"),
             createdAt=sc["created_at"],
         )
     return AnswerView(
