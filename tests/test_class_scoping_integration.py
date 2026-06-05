@@ -265,6 +265,10 @@ async def test_attempt_detail_owner_admin_parent_unaffected(
     student = await make_user(
         email="sc9-s@x.com", role="student", parent_id=parent["id"]
     )
+    # GET /api/attempts/{id} resolves the viewer's profile by email for EVERY
+    # role (incl. admin), so the admin viewer needs a real DB row — seed one
+    # rather than using a token-only admin email.
+    admin_user = await make_user(email="sc9-admin@x.com", role="admin")
     exam = await make_exam()
     attempt = await make_attempt(student["id"], exam["id"], state="submitted")
 
@@ -273,7 +277,8 @@ async def test_attempt_detail_owner_admin_parent_unaffected(
         headers=auth_headers(student["email"], role="student"),
     )
     admin = await client.get(
-        f"/api/attempts/{attempt['id']}", headers=_admin(auth_headers)
+        f"/api/attempts/{attempt['id']}",
+        headers=auth_headers(admin_user["email"], role="admin"),
     )
     par = await client.get(
         f"/api/attempts/{attempt['id']}",
