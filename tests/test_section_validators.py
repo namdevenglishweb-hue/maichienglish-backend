@@ -16,7 +16,28 @@ Source of truth: plan §3.5.
 import pytest
 
 from services.exceptions import ValidationError
-from services.section_service import _validate_materials, validate_gap_markers
+from services.section_service import (
+    _ALLOWED_TYPES,
+    _validate_materials,
+    validate_gap_markers,
+)
+
+
+# ===========================================================================
+# Allowed section types
+# ===========================================================================
+
+
+def test_form_completion_is_an_allowed_section_type():
+    """KET note/form completion rendering hint (migration 0014)."""
+    assert "form_completion" in _ALLOWED_TYPES
+
+
+def test_core_section_types_still_allowed():
+    assert {
+        "multiple_choice", "fill_blank", "matching",
+        "multiple_choice_shared", "writing", "speaking",
+    } <= _ALLOWED_TYPES
 
 
 # ===========================================================================

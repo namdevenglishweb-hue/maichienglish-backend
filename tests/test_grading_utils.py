@@ -121,6 +121,37 @@ def test_strip_correct_removes_correct_answers_and_case_flag_for_fill_blank():
     assert stripped["stem"] == "Fill: {{gap:1}}"
 
 
+def test_strip_correct_keeps_form_completion_presentation_fields():
+    """form_completion blanks reuse fill_blank: answers are stripped, but the
+    label/prefix/postfix context stays visible to the in-progress student."""
+    qdata = {
+        "label": "Time:",
+        "prefix": "from",
+        "postfix": "to 5 p.m.",
+        "correct_answers": ["3 p.m."],
+        "case_sensitive": False,
+    }
+    stripped = strip_correct("fill_blank", qdata)
+
+    assert "correct_answers" not in stripped
+    assert "case_sensitive" not in stripped
+    assert stripped["label"] == "Time:"
+    assert stripped["prefix"] == "from"
+    assert stripped["postfix"] == "to 5 p.m."
+
+
+def test_fill_blank_grading_ignores_presentation_fields():
+    """Presence of label/prefix/postfix does not change string-match grading."""
+    qdata = {
+        "label": "Teacher's name:",
+        "prefix": "Mr",
+        "correct_answers": ["Brown"],
+    }
+    assert grade_question("fill_blank", qdata, "Brown") is True
+    assert grade_question("fill_blank", qdata, "brown") is True  # case-insensitive
+    assert grade_question("fill_blank", qdata, "Green") is False
+
+
 def test_strip_correct_does_not_mutate_input():
     qdata = {"stem": "?", "options": ["a"], "correct_index": 0}
     _ = strip_correct("multiple_choice", qdata)

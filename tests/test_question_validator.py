@@ -208,6 +208,48 @@ def test_fill_blank_rejects_missing_correct_answers():
 
 
 # ---------------------------------------------------------------------------
+# fill_blank — form_completion presentation fields (migration 0014)
+# ---------------------------------------------------------------------------
+
+
+def test_fill_blank_accepts_form_completion_label_prefix_postfix():
+    """KET note/form completion blanks reuse fill_blank + carry per-row
+    label/prefix/postfix presentation fields."""
+    out = _validate_question_data(
+        "fill_blank",
+        {
+            "label": "Time:",
+            "prefix": "from",
+            "postfix": "to 5 p.m.",
+            "correct_answers": ["3 p.m.", "3"],
+        },
+    )
+    assert out["label"] == "Time:"
+    assert out["prefix"] == "from"
+    assert out["postfix"] == "to 5 p.m."
+    assert out["correct_answers"] == ["3 p.m.", "3"]
+
+
+def test_fill_blank_partial_presentation_fields_allowed():
+    """Only some of label/prefix/postfix present (e.g. 'Mr ___')."""
+    out = _validate_question_data(
+        "fill_blank",
+        {"label": "Teacher's name:", "prefix": "Mr", "correct_answers": ["Brown"]},
+    )
+    assert out["label"] == "Teacher's name:"
+    assert out["prefix"] == "Mr"
+    assert "postfix" not in out  # exclude_none drops the omitted field
+
+
+def test_fill_blank_plain_passage_omits_presentation_fields():
+    """Passage-gap fill_blank carries none of the form fields."""
+    out = _validate_question_data("fill_blank", {"correct_answers": ["lift"]})
+    assert "label" not in out
+    assert "prefix" not in out
+    assert "postfix" not in out
+
+
+# ---------------------------------------------------------------------------
 # Unknown / boundary cases
 # ---------------------------------------------------------------------------
 

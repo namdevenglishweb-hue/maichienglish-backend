@@ -136,6 +136,8 @@ _SELECT_COLS = """
 _ALLOWED_TYPES = {
     "multiple_choice", "fill_blank", "matching", "multiple_choice_shared",
     "writing", "speaking",   # opened in migration 0011; see WRITING_SPEAKING.md
+    "form_completion",       # opened in migration 0014; KET note/form completion
+                             # (questions stay question_type='fill_blank')
 }
 
 

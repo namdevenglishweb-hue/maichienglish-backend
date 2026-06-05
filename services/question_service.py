@@ -53,6 +53,17 @@ class _MultipleChoiceData(BaseModel):
 class _FillBlankData(BaseModel):
     correct_answers: list[str] = Field(..., min_length=1)
     case_sensitive: bool = False
+    # Presentation-only fields for `form_completion` sections (KET-style
+    # note/form completion — migration 0014). They carry the visible context
+    # of each blank and are NOT answers, so strip_correct keeps them:
+    #   label   — left-column text, e.g. "Teacher's name:"
+    #   prefix  — text immediately before the blank, e.g. "Mr" / "from"
+    #   postfix — text immediately after the blank, e.g. "to 5 p.m."
+    # Plain passage fill_blank questions simply omit them (exclude_none drops
+    # them on the way out). Grading is unchanged — see utils/grading_utils.py.
+    label: Optional[str] = None
+    prefix: Optional[str] = None
+    postfix: Optional[str] = None
 
 
 # `matching` reuses the MC shape: each matching question is one independently-
