@@ -10,6 +10,8 @@ SectionTypeLiteral = Literal[
     "writing", "speaking",   # opened in migration 0011; rendering-hint values
                              # only — manual-grading flow ships later
                              # (see WRITING_SPEAKING.md)
+    "form_completion",       # opened in migration 0014; KET note/form completion
+                             # (questions stay question_type='fill_blank')
 ]
 
 

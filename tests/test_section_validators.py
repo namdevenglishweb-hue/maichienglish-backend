@@ -40,6 +40,21 @@ def test_core_section_types_still_allowed():
     } <= _ALLOWED_TYPES
 
 
+def test_section_create_schema_accepts_form_completion():
+    """Guard the Pydantic layer too: SectionTypeLiteral must include
+    form_completion, else POST /sections (and nested exam create) 422s
+    before reaching the service."""
+    from pydantic import ValidationError as PydanticValidationError
+
+    from api.sections.schemas import SectionCreate
+
+    s = SectionCreate(type="form_completion")
+    assert s.type == "form_completion"
+
+    with pytest.raises(PydanticValidationError):
+        SectionCreate(type="not_a_real_type")
+
+
 # ===========================================================================
 # validate_gap_markers
 # ===========================================================================
