@@ -160,6 +160,10 @@ CREATE TABLE public.attempts (
   time_spent_seconds   int,
   is_abandoned         boolean NOT NULL DEFAULT false,
   is_fully_graded      boolean NOT NULL DEFAULT true,
+  -- exam mode (migration 0016): 'real' (thi thật) forces audio plays to 1
+  -- per audio + no-resume; 'practice' (default) = current behaviour.
+  mode                 text NOT NULL DEFAULT 'practice'
+                         CHECK (mode IN ('practice','real')),
   started_at           timestamptz NOT NULL DEFAULT now(),
   submitted_at         timestamptz
 );

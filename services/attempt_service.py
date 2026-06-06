@@ -35,6 +35,7 @@ def _row_to_attempt(row) -> dict[str, Any]:
         "time_spent_seconds": row["time_spent_seconds"],
         "is_abandoned": row["is_abandoned"],
         "is_fully_graded": row["is_fully_graded"],
+        "mode": row["mode"],
         "started_at": row["started_at"].isoformat() if row["started_at"] else None,
         "submitted_at": row["submitted_at"].isoformat() if row["submitted_at"] else None,
     }
@@ -43,14 +44,15 @@ def _row_to_attempt(row) -> dict[str, Any]:
 # Unqualified column list — for INSERT/UPDATE RETURNING (no table alias).
 _ATTEMPT_COLS = """
     id, user_id, exam_id, score, total_points, percentage,
-    time_spent_seconds, is_abandoned, is_fully_graded, started_at, submitted_at
+    time_spent_seconds, is_abandoned, is_fully_graded, mode,
+    started_at, submitted_at
 """
 
 # Same columns aliased with `a.` — required for SELECTs that JOIN exams,
 # otherwise `id` is ambiguous against `e.id`.
 _ATTEMPT_COLS_A = """
     a.id, a.user_id, a.exam_id, a.score, a.total_points, a.percentage,
-    a.time_spent_seconds, a.is_abandoned, a.is_fully_graded,
+    a.time_spent_seconds, a.is_abandoned, a.is_fully_graded, a.mode,
     a.started_at, a.submitted_at
 """
 
@@ -93,9 +95,30 @@ class AttemptService:
             user_id,
         )
 
-    async def _fetch_exam_tree(self, conn, exam_id: str) -> dict[str, Any]:
+    async def _abandon_row(self, conn, attempt_id) -> None:
+        """Force-abandon (forfeit) an attempt in-place: score 0, submitted_at
+        now(). Used by the real-mode no-resume rule — a real attempt that is
+        left/interrupted is abandoned on the next start
+        (docs/exam-mode/exam-mode-design.md §4). Mirrors `abandon_attempt`."""
+        await conn.execute(
+            """
+            UPDATE public.attempts
+            SET is_abandoned = true, submitted_at = now(),
+                score = 0, total_points = 0, percentage = 0
+            WHERE id = $1
+            """,
+            attempt_id,
+        )
+
+    async def _fetch_exam_tree(
+        self, conn, exam_id: str, mode: str = "practice"
+    ) -> dict[str, Any]:
         """Load exam metadata + sections + questions for the student-facing
-        attempt view. Correct-answer fields are stripped from every question."""
+        attempt view. Correct-answer fields are stripped from every question.
+
+        `mode='real'` (thi thật) forces each section's effective `maxAudioPlays`
+        to 1 regardless of the configured `section.max_audio_plays`
+        (docs/exam-mode/exam-mode-design.md §5-6)."""
         exam = await conn.fetchrow(
             """
             SELECT id, title, level, skill, duration_minutes, description
@@ -156,7 +179,10 @@ class AttemptService:
                 "type": s["type"],
                 "instructions": s["instructions"],
                 "materials": _coerce_jsonb(s["materials"]) or [],
-                "maxAudioPlays": s["max_audio_plays"],
+                # Thi thật: ép cap = 1 mỗi audio, bỏ qua cấu hình section.
+                "maxAudioPlays": (
+                    1 if mode == "real" else s["max_audio_plays"]
+                ),
                 # Default empty — overlaid per-attempt by _build_resume_payload
                 # (Case B) when an active attempt has played audio. Case A
                 # always sees {}. See ATTEMPT_LIFECYCLE.md §4.6.1.
@@ -235,13 +261,23 @@ class AttemptService:
     # Public API                                                         #
     # ------------------------------------------------------------------ #
 
-    async def start_attempt(self, user_id: str, exam_id: str) -> dict[str, Any]:
-        """Idempotent start. Three outcomes (see ATTEMPT_LIFECYCLE.md §4.1):
+    async def start_attempt(
+        self, user_id: str, exam_id: str, mode: str = "practice"
+    ) -> dict[str, Any]:
+        """Idempotent start. Outcomes (see ATTEMPT_LIFECYCLE.md §4.1 +
+        docs/exam-mode/exam-mode-design.md §4):
 
-          - Case A: no active attempt → INSERT new, consume quota, isResume=False.
-          - Case B: active attempt for the SAME exam → return existing
-            + savedAnswers (no quota consumed), isResume=True.
+          - Case A: no active attempt → INSERT new (with `mode`), consume
+            quota, isResume=False.
+          - Case B: active PRACTICE attempt for the SAME exam + requesting
+            practice → return existing + savedAnswers, isResume=True.
           - Case C: active attempt for a DIFFERENT exam → ConflictError (409).
+
+        Exam-mode rules (overlay on the above):
+          - Active attempt is `real` → it is force-abandoned (forfeit; real
+            never resumes), then we fall through to Case A.
+          - Active is `practice` (same exam) but caller requests `real` →
+            ConflictError (409): finish/abandon the practice attempt first.
 
         Race-safe: a concurrent INSERT loser triggers `UniqueViolationError`
         on the `attempts_one_active_per_user` partial unique index. We catch
@@ -260,11 +296,21 @@ class AttemptService:
                 # already know we're going to bail.
                 active = await self._fetch_active_attempt(conn, user_id)
                 if active is not None:
-                    if str(active["exam_id"]) == exam_id:
+                    if active["mode"] == "real":
+                        # Real never resumes — forfeit the interrupted real
+                        # attempt, then fall through to start fresh (§4).
+                        await self._abandon_row(conn, active["id"])
+                    elif str(active["exam_id"]) == exam_id:
+                        if mode == "real":
+                            raise ConflictError(
+                                "Finish or abandon your in-progress attempt "
+                                "before starting a real exam"
+                            )
                         return await self._build_resume_payload(conn, active)
-                    raise ConflictError(
-                        "You have an unfinished attempt for another exam"
-                    )
+                    else:
+                        raise ConflictError(
+                            "You have an unfinished attempt for another exam"
+                        )
 
                 # No active attempt — verify exam, enforce quota, INSERT.
                 exam = await conn.fetchrow(
@@ -287,12 +333,13 @@ class AttemptService:
                 try:
                     row = await conn.fetchrow(
                         f"""
-                        INSERT INTO public.attempts (user_id, exam_id)
-                        VALUES ($1, $2)
+                        INSERT INTO public.attempts (user_id, exam_id, mode)
+                        VALUES ($1, $2, $3)
                         RETURNING {_ATTEMPT_COLS}
                         """,
                         user_id,
                         exam_id,
+                        mode,
                     )
                 except asyncpg.exceptions.UniqueViolationError:
                     # Lost the race against a concurrent POST /attempts.
@@ -315,7 +362,7 @@ class AttemptService:
                         "You have an unfinished attempt for another exam"
                     ) from None
 
-                exam_tree = await self._fetch_exam_tree(conn, exam_id)
+                exam_tree = await self._fetch_exam_tree(conn, exam_id, mode)
 
         total_questions = sum(len(s["questions"]) for s in exam_tree["sections"])
         logger.info(
@@ -334,7 +381,9 @@ class AttemptService:
         attempt row. Quota is NOT touched."""
         exam_id = str(active_row["exam_id"])
         attempt_id = str(active_row["id"])
-        exam_tree = await self._fetch_exam_tree(conn, exam_id)
+        exam_tree = await self._fetch_exam_tree(
+            conn, exam_id, active_row["mode"]
+        )
         saved = await self._fetch_saved_answers(conn, attempt_id, exam_id)
         # Overlay per-section audio play counts so the FE knows how many
         # plays remain on each audio without firing a probe POST /audio-play
@@ -362,7 +411,7 @@ class AttemptService:
         async with self.db.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                SELECT a.id, a.exam_id, a.started_at,
+                SELECT a.id, a.exam_id, a.started_at, a.mode,
                        e.title AS exam_title, e.level AS exam_level,
                        e.skill AS exam_skill,
                        (SELECT COUNT(*) FROM public.answers ans
@@ -383,6 +432,7 @@ class AttemptService:
             "examTitle": row["exam_title"],
             "examLevel": row["exam_level"],
             "examSkill": row["exam_skill"],
+            "mode": row["mode"],
             "startedAt": row["started_at"].isoformat() if row["started_at"] else None,
             "savedAnswerCount": row["saved_answer_count"],
         }
@@ -959,7 +1009,7 @@ class AttemptService:
             async with conn.transaction():
                 attempt = await conn.fetchrow(
                     """
-                    SELECT id, user_id, exam_id, is_abandoned, submitted_at
+                    SELECT id, user_id, exam_id, is_abandoned, submitted_at, mode
                     FROM public.attempts
                     WHERE id = $1
                     """,
@@ -1002,7 +1052,10 @@ class AttemptService:
                         f"(type={material.get('type') if isinstance(material, dict) else type(material).__name__!r})"
                     )
 
-                max_plays = section["max_audio_plays"]
+                # Thi thật (real): ép cap = 1 mỗi audio, bỏ qua cấu hình section.
+                max_plays = (
+                    1 if attempt["mode"] == "real" else section["max_audio_plays"]
+                )
                 key = str(material_index)
                 # Atomic upsert + increment of the specific key inside the jsonb map.
                 row = await conn.fetchrow(

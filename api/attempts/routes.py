@@ -76,6 +76,7 @@ def _attempt_to_view(a: dict) -> AttemptView:
         timeSpentSeconds=a["time_spent_seconds"],
         isAbandoned=a.get("is_abandoned", False),
         isFullyGraded=a.get("is_fully_graded", True),
+        mode=a.get("mode", "practice"),
         startedAt=a["started_at"],
         submittedAt=a["submitted_at"],
     )
@@ -112,7 +113,7 @@ async def start_attempt(
     user = await _resolve_user(current_user)
     try:
         result = await attempt_service.start_attempt(
-            user_id=user["id"], exam_id=request.examId
+            user_id=user["id"], exam_id=request.examId, mode=request.mode
         )
     except NotFoundError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
@@ -399,6 +400,7 @@ async def get_history(current_user: dict = Depends(get_current_user)):
                     timeSpentSeconds=r["time_spent_seconds"],
                     isAbandoned=r.get("is_abandoned", False),
                     isFullyGraded=r.get("is_fully_graded", True),
+                    mode=r.get("mode", "practice"),
                     startedAt=r["started_at"],
                     submittedAt=r["submitted_at"],
                 )

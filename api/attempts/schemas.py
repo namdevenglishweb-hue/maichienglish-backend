@@ -1,15 +1,24 @@
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
+
+AttemptMode = Literal["practice", "real"]
 
 
 class AttemptStartRequest(BaseModel):
     """Body for POST /api/attempts."""
 
     examId: str = Field(..., description="UUID of a published exam")
+    mode: AttemptMode = Field(
+        default="practice",
+        description="'practice' (thi thử, mặc định) hoặc 'real' (thi thật: "
+        "audio nghe 1 lần + không resume).",
+    )
 
     model_config = {
-        "json_schema_extra": {"example": {"examId": "uuid-of-exam"}}
+        "json_schema_extra": {
+            "example": {"examId": "uuid-of-exam", "mode": "practice"}
+        }
     }
 
 
@@ -83,6 +92,7 @@ class AttemptView(BaseModel):
     timeSpentSeconds: Optional[int] = None
     isAbandoned: bool = False
     isFullyGraded: bool = True
+    mode: AttemptMode = "practice"
     startedAt: Optional[str] = None
     submittedAt: Optional[str] = None
 
@@ -128,6 +138,7 @@ class ActiveAttemptData(BaseModel):
     examTitle: str
     examLevel: str
     examSkill: str
+    mode: AttemptMode = "practice"
     startedAt: Optional[str] = None
     savedAnswerCount: int = 0
 
@@ -311,6 +322,7 @@ class AttemptHistoryItem(BaseModel):
     timeSpentSeconds: Optional[int] = None
     isAbandoned: bool = False
     isFullyGraded: bool = True
+    mode: AttemptMode = "practice"
     startedAt: Optional[str] = None
     submittedAt: Optional[str] = None
 
