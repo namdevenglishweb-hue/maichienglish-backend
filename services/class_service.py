@@ -236,32 +236,19 @@ class ClassService:
             raise NotFoundError("Teacher is not a member of this class")
 
     # ================================================================== #
-    # Admin — student membership (1-class-per-student)                    #
+    # Admin — student membership (v2: a student may be in MANY classes)   #
     # ================================================================== #
 
     async def add_student(self, class_id: str, student_id: str) -> None:
+        """Add a student to a class.
+
+        v2: a student can belong to multiple classes — no "already in
+        another class" check. The PK (class_id, student_id) still blocks
+        adding the same student to the SAME class twice → 409.
+        """
         async with self.db.acquire() as conn:
             await self._fetch_class_or_404(conn, class_id)
             await self._require_user_role(conn, student_id, "student")
-
-            existing = await conn.fetchrow(
-                """
-                SELECT cs.class_id, c.name
-                FROM public.class_students cs
-                JOIN public.classes c ON c.id = cs.class_id
-                WHERE cs.student_id = $1
-                """,
-                student_id,
-            )
-            if existing is not None:
-                if str(existing["class_id"]) == str(class_id):
-                    raise AlreadyExistsError(
-                        "Student is already in this class"
-                    )
-                raise ValidationError(
-                    f"Student already in class {existing['name']}; remove first"
-                )
-
             try:
                 await conn.execute(
                     """
@@ -271,23 +258,7 @@ class ClassService:
                     class_id, student_id,
                 )
             except asyncpg.UniqueViolationError:
-                # Lost a race against a concurrent add into another class —
-                # re-resolve to surface the same friendly errors. (R8)
-                other = await conn.fetchrow(
-                    """
-                    SELECT cs.class_id, c.name
-                    FROM public.class_students cs
-                    JOIN public.classes c ON c.id = cs.class_id
-                    WHERE cs.student_id = $1
-                    """,
-                    student_id,
-                )
-                if other and str(other["class_id"]) == str(class_id):
-                    raise AlreadyExistsError("Student is already in this class")
-                name = other["name"] if other else "another class"
-                raise ValidationError(
-                    f"Student already in class {name}; remove first"
-                )
+                raise AlreadyExistsError("Student is already in this class")
 
     async def remove_student(self, class_id: str, student_id: str) -> None:
         async with self.db.acquire() as conn:
@@ -452,6 +423,172 @@ class ClassService:
             }
             for r in rows
         ]
+
+    # ================================================================== #
+    # Teacher — class detail (v2: roster + global per-student progress)   #
+    # ================================================================== #
+
+    async def get_teacher_class_detail(self, class_id: str) -> dict[str, Any]:
+        """Co-teachers + student roster with GLOBAL per-student progress
+        (attempts aren't class-scoped). One aggregate avoids N+1.
+
+        Raises NotFoundError if the class doesn't exist. Caller checks the
+        teaching authorization (teacher_teaches_class) separately.
+        """
+        async with self.db.acquire() as conn:
+            cls = await self._fetch_class_or_404(conn, class_id)
+            teachers = await conn.fetch(
+                """
+                SELECT p.id, p.full_name
+                FROM public.class_teachers ct
+                JOIN public.profiles p ON p.id = ct.teacher_id
+                WHERE ct.class_id = $1
+                ORDER BY p.full_name
+                """,
+                class_id,
+            )
+            students = await conn.fetch(
+                """
+                SELECT cs.student_id, p.full_name, p.email,
+                  COUNT(a.id) FILTER (
+                    WHERE a.submitted_at IS NOT NULL AND NOT a.is_abandoned
+                  ) AS submitted_count,
+                  AVG(a.percentage) FILTER (
+                    WHERE a.is_fully_graded AND a.submitted_at IS NOT NULL
+                      AND NOT a.is_abandoned
+                  ) AS avg_pct,
+                  COUNT(a.id) FILTER (
+                    WHERE a.submitted_at IS NOT NULL AND NOT a.is_abandoned
+                      AND NOT a.is_fully_graded
+                  ) AS pending_count,
+                  MAX(a.submitted_at) FILTER (
+                    WHERE a.submitted_at IS NOT NULL AND NOT a.is_abandoned
+                  ) AS last_submitted_at
+                FROM public.class_students cs
+                JOIN public.profiles p ON p.id = cs.student_id
+                LEFT JOIN public.attempts a ON a.user_id = cs.student_id
+                WHERE cs.class_id = $1
+                GROUP BY cs.student_id, p.full_name, p.email
+                ORDER BY p.full_name
+                """,
+                class_id,
+            )
+        return {
+            "id": str(cls["id"]),
+            "name": cls["name"],
+            "description": cls["description"],
+            "created_at": cls["created_at"],
+            "teachers": [
+                {"id": str(t["id"]), "full_name": t["full_name"]}
+                for t in teachers
+            ],
+            "students": [
+                {
+                    "id": str(s["student_id"]),
+                    "full_name": s["full_name"],
+                    "email": s["email"],
+                    "submitted_count": int(s["submitted_count"]),
+                    "average_percentage": (
+                        round(float(s["avg_pct"]), 2)
+                        if s["avg_pct"] is not None else None
+                    ),
+                    "pending_grading_count": int(s["pending_count"]),
+                    "last_submitted_at": s["last_submitted_at"],
+                }
+                for s in students
+            ],
+        }
+
+    # ================================================================== #
+    # Student — my classes (v2)                                           #
+    # ================================================================== #
+
+    async def list_student_classes(
+        self, student_id: str
+    ) -> list[dict[str, Any]]:
+        """Classes the student belongs to (+ member counts)."""
+        async with self.db.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT c.id, c.name, c.description,
+                       COUNT(DISTINCT ct.teacher_id) AS teacher_count,
+                       (SELECT COUNT(*) FROM public.class_students cs2
+                          WHERE cs2.class_id = c.id) AS student_count
+                FROM public.classes c
+                JOIN public.class_students cs
+                  ON cs.class_id = c.id AND cs.student_id = $1
+                LEFT JOIN public.class_teachers ct ON ct.class_id = c.id
+                GROUP BY c.id, c.name, c.description, c.created_at
+                ORDER BY c.created_at DESC
+                """,
+                student_id,
+            )
+        return [
+            {
+                "id": str(r["id"]),
+                "name": r["name"],
+                "description": r["description"],
+                "teacher_count": int(r["teacher_count"]),
+                "student_count": int(r["student_count"]),
+            }
+            for r in rows
+        ]
+
+    async def get_student_class_detail(
+        self, student_id: str, class_id: str
+    ) -> dict[str, Any]:
+        """Detail of a class the student is in: teachers (with email) +
+        classmates (name only, excluding self).
+
+        Raises NotFoundError if the student is NOT a member — don't leak
+        the existence of classes the student doesn't belong to.
+        """
+        async with self.db.acquire() as conn:
+            try:
+                is_member = await conn.fetchval(
+                    "SELECT EXISTS (SELECT 1 FROM public.class_students "
+                    "WHERE class_id = $1 AND student_id = $2)",
+                    class_id, student_id,
+                )
+            except asyncpg.DataError:
+                is_member = False
+            if not is_member:
+                raise NotFoundError(f"Class {class_id} not found")
+
+            cls = await self._fetch_class_or_404(conn, class_id)
+            teachers = await conn.fetch(
+                """
+                SELECT p.id, p.full_name, p.email
+                FROM public.class_teachers ct
+                JOIN public.profiles p ON p.id = ct.teacher_id
+                WHERE ct.class_id = $1
+                ORDER BY p.full_name
+                """,
+                class_id,
+            )
+            classmates = await conn.fetch(
+                """
+                SELECT p.id, p.full_name
+                FROM public.class_students cs
+                JOIN public.profiles p ON p.id = cs.student_id
+                WHERE cs.class_id = $1 AND cs.student_id <> $2
+                ORDER BY p.full_name
+                """,
+                class_id, student_id,
+            )
+        return {
+            "id": str(cls["id"]),
+            "name": cls["name"],
+            "description": cls["description"],
+            "teachers": [
+                {"id": str(t["id"]), "full_name": t["full_name"], "email": t["email"]}
+                for t in teachers
+            ],
+            "classmates": [
+                {"id": str(m["id"]), "full_name": m["full_name"]}
+                for m in classmates
+            ],
+        }
 
     # ================================================================== #
     # Internal helpers                                                    #

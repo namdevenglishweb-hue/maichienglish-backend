@@ -268,8 +268,9 @@ CREATE TABLE public.class_students (
   class_id   uuid NOT NULL REFERENCES public.classes(id)  ON DELETE CASCADE,
   student_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
   created_at timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY (class_id, student_id),
-  UNIQUE (student_id)        -- ép 1 lớp / học sinh (v1)
+  PRIMARY KEY (class_id, student_id)
+  -- v2 (migration 0015): student có thể thuộc NHIỀU lớp; PK vẫn chặn
+  -- thêm trùng cùng lớp.
 );
 CREATE INDEX class_students_class_idx
   ON public.class_students (class_id);

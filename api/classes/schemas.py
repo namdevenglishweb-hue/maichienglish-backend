@@ -142,3 +142,95 @@ class SubmissionListResponseData(BaseModel):
 class SubmissionListResponse(BaseModel):
     status: int = 200
     data: SubmissionListResponseData
+
+
+# ===================================================================== #
+# Teacher — class detail (v2: roster + per-student progress)             #
+# ===================================================================== #
+
+
+class TeacherClassCoTeacherView(BaseModel):
+    id: str
+    fullName: str
+
+
+class TeacherClassStudentView(BaseModel):
+    id: str
+    fullName: str
+    email: str
+    submittedCount: int
+    averagePercentage: Optional[float] = None  # null until a graded attempt exists
+    pendingGradingCount: int
+    lastSubmittedAt: Optional[datetime] = None
+
+
+class TeacherClassDetailView(BaseModel):
+    id: str
+    name: str
+    description: Optional[str] = None
+    createdAt: datetime
+    teachers: list[TeacherClassCoTeacherView]
+    students: list[TeacherClassStudentView]
+
+
+class TeacherClassDetailResponseData(BaseModel):
+    class_: TeacherClassDetailView = Field(..., alias="class")
+
+    model_config = {"populate_by_name": True}
+
+
+class TeacherClassDetailResponse(BaseModel):
+    status: int = 200
+    data: TeacherClassDetailResponseData
+
+
+# ===================================================================== #
+# Student — my classes (v2)                                              #
+# ===================================================================== #
+
+
+class StudentClassView(BaseModel):
+    id: str
+    name: str
+    description: Optional[str] = None
+    teacherCount: int
+    studentCount: int
+
+
+class StudentClassListResponseData(BaseModel):
+    items: list[StudentClassView]
+
+
+class StudentClassListResponse(BaseModel):
+    status: int = 200
+    data: StudentClassListResponseData
+
+
+class StudentClassTeacherView(BaseModel):
+    id: str
+    fullName: str
+    email: str
+
+
+class StudentClassmateView(BaseModel):
+    id: str
+    fullName: str
+
+
+class StudentClassDetailView(BaseModel):
+    id: str
+    name: str
+    description: Optional[str] = None
+    teachers: list[StudentClassTeacherView]
+    classmates: list[StudentClassmateView]
+
+
+class StudentClassDetailResponseData(BaseModel):
+    class_: StudentClassDetailView = Field(..., alias="class")
+
+    model_config = {"populate_by_name": True}
+
+
+class StudentClassDetailResponse(BaseModel):
+    status: int = 200
+    data: StudentClassDetailResponseData

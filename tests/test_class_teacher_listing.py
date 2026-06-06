@@ -376,31 +376,21 @@ async def test_teacher_in_two_classes_switches_and_sees_correct_submissions(
     assert [s["attemptId"] for s in rb.json()["data"]["items"]] == [ab["id"]]
 
 
-async def test_student_moved_between_classes_submissions_follow(
+async def test_multi_class_student_submissions_appear_in_all_classes(
     client, auth_headers, make_user, make_class, make_exam, make_attempt
 ):
-    """R2 — move student A→B; their attempt now shows under B, not A."""
+    """R2 (v2) — student in BOTH classes; their attempt shows under both."""
     teacher = await make_user(email="r2-t@x.com", role="teacher")
     student = await make_user(email="r2-s@x.com", role="student")
     ca = await make_class(name="R2-A", teacher_ids=[teacher["id"]], student_ids=[student["id"]])
-    cb = await make_class(name="R2-B", teacher_ids=[teacher["id"]])
+    cb = await make_class(name="R2-B", teacher_ids=[teacher["id"]], student_ids=[student["id"]])
     exam = await make_exam()
     att = await make_attempt(student["id"], exam["id"], state="submitted")
-
-    h = _admin(auth_headers)
-    await client.delete(
-        f"/api/admin/classes/{ca['id']}/students/{student['id']}", headers=h
-    )
-    await client.post(
-        f"/api/admin/classes/{cb['id']}/students",
-        headers=h,
-        json={"studentId": student["id"]},
-    )
 
     th = _teacher(auth_headers, teacher)
     ra = await client.get(f"/api/teacher/classes/{ca['id']}/submissions", headers=th)
     rb = await client.get(f"/api/teacher/classes/{cb['id']}/submissions", headers=th)
-    assert att["id"] not in [s["attemptId"] for s in ra.json()["data"]["items"]]
+    assert att["id"] in [s["attemptId"] for s in ra.json()["data"]["items"]]
     assert att["id"] in [s["attemptId"] for s in rb.json()["data"]["items"]]
 
 

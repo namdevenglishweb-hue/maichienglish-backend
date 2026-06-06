@@ -1,7 +1,8 @@
-"""DB-level guarantees for class membership tables (migration 0013).
+"""DB-level guarantees for class membership tables (migrations 0013 + 0015).
 
-CL1-CL5 — UNIQUE(student_id), PK uniqueness, FK CASCADE. Raw SQL against
-the live pool. Auto-skipped unless MAICHI_TEST_DB=1.
+CL1-CL5 — multi-class students (0015 dropped UNIQUE(student_id)), PK
+uniqueness, FK CASCADE. Raw SQL against the live pool. Auto-skipped unless
+MAICHI_TEST_DB=1.
 """
 
 import uuid
@@ -18,21 +19,34 @@ async def _new_class(conn, name="C") -> uuid.UUID:
     )
 
 
-async def test_unique_student_id_blocks_second_class(db_pool, make_user):
-    """CL1 — a student already in one class cannot be added to another."""
+async def test_student_can_belong_to_multiple_classes(db_pool, make_user):
+    """CL1 (v2) — a student may join multiple classes (0015 dropped
+    UNIQUE(student_id)); the PK still blocks the same class twice."""
     student = await make_user(email="cl1-s@x.com", role="student")
+    sid = uuid.UUID(student["id"])
     async with db_pool.acquire() as conn:
         a = await _new_class(conn, "A")
         b = await _new_class(conn, "B")
         await conn.execute(
             "INSERT INTO public.class_students (class_id, student_id) VALUES ($1,$2)",
-            a, uuid.UUID(student["id"]),
+            a, sid,
         )
+        # Second, different class → allowed now.
+        await conn.execute(
+            "INSERT INTO public.class_students (class_id, student_id) VALUES ($1,$2)",
+            b, sid,
+        )
+        count = await conn.fetchval(
+            "SELECT COUNT(*) FROM public.class_students WHERE student_id=$1", sid
+        )
+        assert count == 2
+
+        # Same (class_id, student_id) again → PK still rejects.
         with pytest.raises(asyncpg.UniqueViolationError):
             await conn.execute(
                 "INSERT INTO public.class_students (class_id, student_id) "
                 "VALUES ($1,$2)",
-                b, uuid.UUID(student["id"]),
+                a, sid,
             )
 
 

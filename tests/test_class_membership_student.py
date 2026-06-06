@@ -1,4 +1,4 @@
-"""Student membership + 1-class rule — MS1-MS8 + R8 (concurrent race)."""
+"""Student membership — MS1-MS8 + R8 (v2: a student may join MANY classes)."""
 
 import asyncio
 import uuid
@@ -41,10 +41,10 @@ async def test_add_student_validates_role_400(
     assert r.status_code == 400
 
 
-async def test_add_student_already_in_another_class_400(
+async def test_add_student_to_second_class_succeeds(
     client, auth_headers, make_user, make_class
 ):
-    """MS3 — 1-class rule surfaces as 400 with the current class name."""
+    """MS3 (v2) — a student may belong to multiple classes at once."""
     student = await make_user(email="ms3-s@x.com", role="student")
     a = await make_class(name="Alpha")
     b = await make_class(name="Beta")
@@ -52,9 +52,10 @@ async def test_add_student_already_in_another_class_400(
     assert r1.status_code == 201
 
     r2 = await _add_student(client, auth_headers, b["id"], student["id"])
-    assert r2.status_code == 400
-    assert "Alpha" in r2.json()["detail"]
-    assert "remove first" in r2.json()["detail"]
+    assert r2.status_code == 201
+    assert student["id"] in [
+        s["id"] for s in r2.json()["data"]["class"]["students"]
+    ]
 
 
 async def test_add_student_already_in_same_class_409(
@@ -67,22 +68,27 @@ async def test_add_student_already_in_same_class_409(
     assert r.status_code == 409
 
 
-async def test_move_student_remove_then_add_succeeds(
+async def test_remove_from_one_class_keeps_other(
     client, auth_headers, make_user, make_class
 ):
-    """MS5 — explicit move = remove from old then add to new."""
+    """MS5 (v2) — student in two classes; removing from one keeps the other."""
     student = await make_user(email="ms5-s@x.com", role="student")
-    a = await make_class(name="From", student_ids=[student["id"]])
-    b = await make_class(name="To")
+    a = await make_class(name="Keep", student_ids=[student["id"]])
+    b = await make_class(name="Drop", student_ids=[student["id"]])
 
     rm = await client.delete(
-        f"/api/admin/classes/{a['id']}/students/{student['id']}",
+        f"/api/admin/classes/{b['id']}/students/{student['id']}",
         headers=_admin(auth_headers),
     )
     assert rm.status_code == 204
 
-    add = await _add_student(client, auth_headers, b["id"], student["id"])
-    assert add.status_code == 201
+    # Still a member of class A.
+    detail = await client.get(
+        f"/api/admin/classes/{a['id']}", headers=_admin(auth_headers)
+    )
+    assert student["id"] in [
+        s["id"] for s in detail.json()["data"]["class"]["students"]
+    ]
 
 
 async def test_remove_student_204(client, auth_headers, make_user, make_class):
@@ -116,11 +122,11 @@ async def test_add_student_nonexistent_user_404(client, auth_headers, make_class
     assert r.status_code == 404
 
 
-async def test_concurrent_add_same_student_to_two_classes_one_wins(
+async def test_concurrent_add_same_student_to_two_classes_both_succeed(
     client, auth_headers, make_user, make_class
 ):
-    """R8 — two parallel adds into different classes: exactly one succeeds
-    (DB UNIQUE(student_id) breaks the tie)."""
+    """R8 (v2) — two parallel adds into different classes both succeed now
+    that UNIQUE(student_id) is gone (multi-class)."""
     student = await make_user(email="r8-s@x.com", role="student")
     a = await make_class(name="R8A")
     b = await make_class(name="R8B")
@@ -130,4 +136,4 @@ async def test_concurrent_add_same_student_to_two_classes_one_wins(
         _add_student(client, auth_headers, b["id"], student["id"]),
     )
     codes = sorted(r.status_code for r in results)
-    assert codes == [201, 400]
+    assert codes == [201, 201]
