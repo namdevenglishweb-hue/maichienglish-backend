@@ -4,6 +4,8 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
+from api.exams.schemas import ExamView
+
 
 class GenerateExamRequest(BaseModel):
     """Mode 1 — whole exam, auto-save (POST /api/admin/exam-generations)."""
@@ -78,7 +80,7 @@ class JobListResponse(BaseModel):
 
 
 class AssembledExamData(BaseModel):
-    exam: dict[str, Any]
+    exam: ExamView  # camelCase, consistent with the rest of the exam API
     warning: Optional[str] = None
 
 

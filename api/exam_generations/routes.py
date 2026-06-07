@@ -196,6 +196,9 @@ async def save_assembled_exam(
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(e))
     except ValidationError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(e))
+    # Serialize via the shared exam view → camelCase, like every other exam
+    # response. The creating admin sees generationMeta (include_meta=True).
+    from api.exams.routes import _to_view
     return AssembledExamResponse(
-        data=AssembledExamData(exam=result["exam"], warning=result["warning"])
+        data=AssembledExamData(exam=_to_view(result["exam"]), warning=result["warning"])
     )

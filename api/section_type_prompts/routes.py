@@ -51,7 +51,9 @@ async def upsert_prompt(
             updated_by=profile["id"] if profile else None,
         )
     except ValidationError as e:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
+        # Literal 422 — status.HTTP_422_UNPROCESSABLE_ENTITY is deprecated in
+        # newer Starlette and trips the test suite's filterwarnings=error.
+        raise HTTPException(422, detail=str(e))
     return PromptResponse(data=_view(row))
 
 
