@@ -63,6 +63,7 @@ _SCHEMA_FILE = _PROJECT_ROOT / "schema.sql"
 # Data tables, parent-last for readability. TRUNCATE ... CASCADE cleans
 # all of them in one statement irrespective of order.
 _DATA_TABLES = [
+    "exam_generation_jobs",   # FK→exams/sections CASCADE, but listed (children-first)
     "answers",
     "attempt_section_state",
     "attempts",
@@ -72,6 +73,9 @@ _DATA_TABLES = [
     "class_students",
     "class_teachers",
     "classes",
+    # section_type_prompts has NO cascade FK to a data table (only
+    # updated_by→profiles SET NULL) — must be cleaned explicitly or it leaks.
+    "section_type_prompts",
     "password_reset_codes",
     "subscriptions",
     "profiles",

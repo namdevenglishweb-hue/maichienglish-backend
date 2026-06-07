@@ -500,6 +500,11 @@ class ExamGenerationService:
         }
         gen_sections: list[dict[str, Any]] = []
         for idx, sec in enumerate(src["sections"]):
+            # new_pos = position this section will have in the SAVED exam
+            # (create_exam_nested re-assigns 1..N by array order). Report keys
+            # use new_pos so self_review/media_todos all line up with the new
+            # exam, even when source positions are non-contiguous.
+            new_pos = idx + 1
             if progress_cb:
                 await progress_cb(idx, total)
             try:
@@ -511,13 +516,16 @@ class ExamGenerationService:
                 )
             except SectionGenerationError as e:
                 report["token_usage"] = getattr(gen, "usage", {})
-                report["sections"].append(
-                    {"position": sec["position"], "status": "failed", "reason": str(e)}
-                )
-                raise GenerationAborted(f"section {sec['position']}: {e}", report)
+                report["sections"].append({
+                    "position": new_pos, "source_position": sec["position"],
+                    "status": "failed", "reason": str(e),
+                })
+                raise GenerationAborted(f"section {new_pos}: {e}", report)
             gen_sections.append(gsec)
-            report["sections"].append({"position": sec["position"], "status": "ok"})
-            report["self_review"][str(sec["position"])] = srep["self_review"]
+            report["sections"].append({
+                "position": new_pos, "source_position": sec["position"], "status": "ok",
+            })
+            report["self_review"][str(new_pos)] = srep["self_review"]
 
         if len(gen_sections) != total:  # defensive (§9.3.3)
             raise GenerationAborted("generated section count mismatch", report)
@@ -565,7 +573,10 @@ class ExamGenerationService:
         for idx, sec in enumerate(src["sections"]):
             if progress_cb:
                 await progress_cb(idx, total)
-            entry = {"source_section_id": sec["id"], "position": sec["position"]}
+            # position = order in the (eventual) assembled exam; FE maps back
+            # to the source via source_section_id.
+            entry = {"source_section_id": sec["id"], "position": idx + 1,
+                     "source_position": sec["position"]}
             try:
                 gsec, srep = await generate_one_section(
                     sec, k, exam_context=exam_context, generator=gen,
