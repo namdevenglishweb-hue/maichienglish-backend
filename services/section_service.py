@@ -11,6 +11,11 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, ValidationError as PydanticValidationError
 
+from services.exam_guards import (
+    assert_exam_content_editable,
+    assert_section_editable,
+    assert_sections_editable,
+)
 from services.exceptions import NotFoundError, ValidationError
 
 logger = logging.getLogger(__name__)
@@ -55,6 +60,20 @@ def validate_gap_markers(
 # ---------------------------------------------------------------------------
 
 
+# Per-material admin-only meta (docs/exam-ai-generation §5). `transcript`
+# (audio) / `description` (image) are the AI's raw input + generated output;
+# `pendingReplacement` flags media whose file is still the source's. ALL of
+# `meta` is stripped from student-facing payloads (strip_material_meta).
+class _AudioMeta(BaseModel):
+    transcript: Optional[str] = None
+    pendingReplacement: bool = False
+
+
+class _ImageMeta(BaseModel):
+    description: Optional[str] = None
+    pendingReplacement: bool = False
+
+
 class _TextMaterial(BaseModel):
     type: Literal["text"]
     label: Optional[str] = None
@@ -66,12 +85,14 @@ class _ImageMaterial(BaseModel):
     label: Optional[str] = None
     url: str = Field(..., min_length=1)
     alt: Optional[str] = None
+    meta: Optional[_ImageMeta] = None
 
 
 class _AudioMaterial(BaseModel):
     type: Literal["audio"]
     label: Optional[str] = None
     url: str = Field(..., min_length=1)
+    meta: Optional[_AudioMeta] = None
 
 
 _MATERIAL_CLASSES = {
@@ -196,6 +217,7 @@ class SectionService:
                 )
                 if not exam:
                     raise NotFoundError(f"Exam {exam_id} not found")
+                await assert_exam_content_editable(conn, exam_id)  # publish-lock
 
                 if position is None:
                     max_pos = await conn.fetchval(
@@ -303,6 +325,7 @@ class SectionService:
         params.append(section_id)
 
         async with self.db.acquire() as conn:
+            await assert_section_editable(conn, section_id)  # publish-lock
             row = await conn.fetchrow(
                 f"""
                 UPDATE public.sections
@@ -325,6 +348,7 @@ class SectionService:
             NotFoundError: section doesn't exist or is already deleted.
         """
         async with self.db.acquire() as conn:
+            await assert_section_editable(conn, section_id)  # publish-lock
             result = await conn.execute(
                 """
                 UPDATE public.sections
@@ -346,6 +370,7 @@ class SectionService:
             NotFoundError: section doesn't exist.
         """
         async with self.db.acquire() as conn:
+            await assert_section_editable(conn, section_id)  # publish-lock
             result = await conn.execute(
                 "DELETE FROM public.sections WHERE id = $1",
                 section_id,
@@ -425,6 +450,7 @@ class SectionService:
                 )
                 if not exam:
                     raise NotFoundError(f"Exam {exam_id} not found")
+                await assert_exam_content_editable(conn, exam_id)  # publish-lock
 
                 if position is None:
                     max_pos = await conn.fetchval(
@@ -523,6 +549,9 @@ class SectionService:
         out: list[dict[str, Any]] = []
         async with self.db.acquire() as conn:
             async with conn.transaction():
+                await assert_sections_editable(  # publish-lock
+                    conn, [sid for sid, _ in normalized]
+                )
                 for sid, patch in normalized:
                     set_parts: list[str] = []
                     params: list[Any] = []
@@ -560,6 +589,7 @@ class SectionService:
 
         async with self.db.acquire() as conn:
             async with conn.transaction():
+                await assert_sections_editable(conn, ids)  # publish-lock
                 if hard:
                     result = await conn.execute(
                         "DELETE FROM public.sections WHERE id = ANY($1::uuid[])",

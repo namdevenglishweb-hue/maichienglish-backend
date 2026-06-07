@@ -78,12 +78,18 @@ CREATE TABLE public.exams (
   created_by        uuid REFERENCES public.profiles(id) ON DELETE SET NULL,
   created_at        timestamptz NOT NULL DEFAULT now(),
   updated_at        timestamptz NOT NULL DEFAULT now(),
-  deleted_at        timestamptz
+  deleted_at        timestamptz,
+  -- AI exam generation provenance (migration 0018, docs/exam-ai-generation §11).
+  generated_from_exam_id uuid REFERENCES public.exams(id) ON DELETE SET NULL,
+  generation_meta        jsonb
 );
 
 
 -- ------------------------------------------------------------
 -- sections — one row per "Part" of an exam (KET/PET style).
+--   audio/image materials may carry admin-only `meta`
+--   ({transcript|description, pendingReplacement}) for AI generation
+--   (docs/exam-ai-generation §5) — stripped from student payloads.
 --   `materials` is a JSONB list of typed blocks shown above the questions:
 --     - {type:"text",  label?, content}            (passage; supports {{gap:N}})
 --     - {type:"image", label?, url, alt?}          (diagram, form, illustration)
@@ -309,6 +315,55 @@ CREATE INDEX attempt_highlights_attempt_idx
 
 
 -- ------------------------------------------------------------
+-- section_type_prompts — admin per-type prompt config (source A) for AI
+--   exam generation. One row per section type; injected at generation time
+--   below the structure/quality invariants. See docs/exam-ai-generation §10.
+-- ------------------------------------------------------------
+CREATE TABLE public.section_type_prompts (
+  type              text PRIMARY KEY
+                      CHECK (type IN ('multiple_choice', 'multiple_choice_shared',
+                                      'fill_blank', 'matching', 'writing', 'speaking',
+                                      'form_completion')),
+  additional_prompt text NOT NULL,
+  updated_at        timestamptz NOT NULL DEFAULT now(),
+  updated_by        uuid REFERENCES public.profiles(id) ON DELETE SET NULL
+);
+
+
+-- ------------------------------------------------------------
+-- exam_generation_jobs — async job tracking for AI exam generation (Phase 2).
+--   scope: 'exam' (Mode 1, auto-saves result_exam_id) / 'section' (Mode 2
+--   single) / 'exam_preview' (Mode 2 all) — section/preview return their
+--   generated section payloads in report.sections[] (not persisted as exams).
+--   See docs/exam-ai-generation §14.
+-- ------------------------------------------------------------
+CREATE TABLE public.exam_generation_jobs (
+  id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  scope             text NOT NULL DEFAULT 'exam'
+                      CHECK (scope IN ('exam', 'section', 'exam_preview')),
+  source_exam_id    uuid NOT NULL REFERENCES public.exams(id) ON DELETE CASCADE,
+  target_section_id uuid REFERENCES public.sections(id) ON DELETE CASCADE,
+  k                 int  NOT NULL CHECK (k BETWEEN 1 AND 5),
+  title             text,
+  status            text NOT NULL DEFAULT 'pending'
+                      CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'aborted')),
+  sections_total    int,
+  sections_done     int  NOT NULL DEFAULT 0,
+  current_section   int,
+  result_exam_id    uuid REFERENCES public.exams(id) ON DELETE SET NULL,
+  report            jsonb,
+  aborted_reason    text,
+  cancel_requested  boolean NOT NULL DEFAULT false,
+  created_by        uuid REFERENCES public.profiles(id) ON DELETE SET NULL,
+  created_at        timestamptz NOT NULL DEFAULT now(),
+  updated_at        timestamptz NOT NULL DEFAULT now(),
+  finished_at       timestamptz
+);
+CREATE INDEX exam_generation_jobs_status_idx
+  ON public.exam_generation_jobs (status, created_at DESC);
+
+
+-- ------------------------------------------------------------
 -- Row-level security. Defense-in-depth per DEPLOYMENT.md §3.1 / §8 —
 -- the backend connects via the service-role key (which bypasses RLS),
 -- but enabling RLS blocks bare anon/authenticated key holders from
@@ -328,3 +383,5 @@ ALTER TABLE public.classes               ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.class_teachers        ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.class_students        ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.attempt_highlights    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.section_type_prompts  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.exam_generation_jobs  ENABLE ROW LEVEL SECURITY;

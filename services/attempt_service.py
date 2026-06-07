@@ -12,7 +12,12 @@ from services.exceptions import (
 )
 from services.highlight_service import highlight_service
 from services.subscription_plans import SUBSCRIPTION_PLANS, PlanTier
-from utils.grading_utils import MANUAL_GRADE_TYPES, grade_question, strip_correct
+from utils.grading_utils import (
+    MANUAL_GRADE_TYPES,
+    grade_question,
+    strip_correct,
+    strip_material_meta,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -179,7 +184,9 @@ class AttemptService:
                 "partLabel": s["part_label"],
                 "type": s["type"],
                 "instructions": s["instructions"],
-                "materials": _coerce_jsonb(s["materials"]) or [],
+                # Student is taking the exam → strip admin-only material.meta
+                # (transcript = listening answer). See exam-ai-generation §5.4.
+                "materials": strip_material_meta(_coerce_jsonb(s["materials"]) or []),
                 # Thi thật: ép cap = 1 mỗi audio, bỏ qua cấu hình section.
                 "maxAudioPlays": (
                     1 if mode == "real" else s["max_audio_plays"]

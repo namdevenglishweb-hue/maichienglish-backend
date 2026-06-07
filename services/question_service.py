@@ -9,6 +9,11 @@ from pydantic import (
     model_validator,
 )
 
+from services.exam_guards import (
+    assert_question_editable,
+    assert_questions_editable,
+    assert_section_editable,
+)
 from services.exceptions import NotFoundError, ValidationError
 
 logger = logging.getLogger(__name__)
@@ -162,6 +167,7 @@ class QuestionService:
                 if not section:
                     logger.warning("create_question: section %s not found", section_id)
                     raise NotFoundError(f"Section {section_id} not found")
+                await assert_section_editable(conn, section_id)  # publish-lock
 
                 if position is None:
                     max_pos = await conn.fetchval(
@@ -271,6 +277,7 @@ class QuestionService:
         params.append(question_id)
 
         async with self.db.acquire() as conn:
+            await assert_question_editable(conn, question_id)  # publish-lock
             row = await conn.fetchrow(
                 f"""
                 UPDATE public.questions
@@ -287,6 +294,7 @@ class QuestionService:
 
     async def soft_delete_question(self, question_id: str) -> None:
         async with self.db.acquire() as conn:
+            await assert_question_editable(conn, question_id)  # publish-lock
             result = await conn.execute(
                 """
                 UPDATE public.questions
@@ -323,6 +331,9 @@ class QuestionService:
         out: list[dict[str, Any]] = []
         async with self.db.acquire() as conn:
             async with conn.transaction():
+                await assert_questions_editable(  # publish-lock
+                    conn, [u["id"] for u in updates if u.get("id")]
+                )
                 for i, item in enumerate(updates):
                     qid = item.get("id")
                     if not qid:
@@ -396,6 +407,7 @@ class QuestionService:
 
         async with self.db.acquire() as conn:
             async with conn.transaction():
+                await assert_questions_editable(conn, ids)  # publish-lock
                 if hard:
                     result = await conn.execute(
                         "DELETE FROM public.questions WHERE id = ANY($1::uuid[])",
@@ -423,6 +435,7 @@ class QuestionService:
 
     async def hard_delete_question(self, question_id: str) -> None:
         async with self.db.acquire() as conn:
+            await assert_question_editable(conn, question_id)  # publish-lock
             result = await conn.execute(
                 "DELETE FROM public.questions WHERE id = $1",
                 question_id,

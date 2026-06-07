@@ -35,6 +35,28 @@ class TextMaterial(BaseModel):
     )
 
 
+class AudioMeta(BaseModel):
+    """Admin-only meta on an audio material (docs/exam-ai-generation §5).
+
+    `transcript` is the text of the listening clip — the AI's raw input for
+    a source exam and its generated output for a new one. `pendingReplacement`
+    flags that the audio FILE is still the source's and must be re-recorded.
+    STRIPPED from student-facing payloads (it reveals listening answers).
+    """
+
+    transcript: Optional[str] = None
+    pendingReplacement: bool = False
+
+
+class ImageMeta(BaseModel):
+    """Admin-only meta on an image material. `description` is what the image
+    depicts (AI input/output); `pendingReplacement` flags a stale file.
+    STRIPPED from student-facing payloads."""
+
+    description: Optional[str] = None
+    pendingReplacement: bool = False
+
+
 class ImageMaterial(BaseModel):
     """An image block inside `sections.materials` (diagram, form, illustration)."""
 
@@ -47,6 +69,10 @@ class ImageMaterial(BaseModel):
     alt: Optional[str] = Field(
         default=None,
         description="Accessibility description. FE should warn (but not block) when missing.",
+    )
+    meta: Optional[ImageMeta] = Field(
+        default=None,
+        description="Admin-only; stripped from student payloads. See §5.",
     )
 
 
@@ -65,6 +91,10 @@ class AudioMaterial(BaseModel):
         description="Optional label shown next to the play control.",
     )
     url: str = Field(..., min_length=1, description="Audio asset URL.")
+    meta: Optional[AudioMeta] = Field(
+        default=None,
+        description="Admin-only; stripped from student payloads. See §5.",
+    )
 
 
 # Discriminated union — Pydantic routes each dict to the right class based

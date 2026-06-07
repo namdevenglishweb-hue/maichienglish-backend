@@ -110,6 +110,17 @@ class ExamView(BaseModel):
     createdAt: Optional[str] = None
     updatedAt: Optional[str] = None
     deletedAt: Optional[str] = None
+    generatedFromExamId: Optional[str] = Field(
+        default=None,
+        description="Set when this exam was AI-generated from another (badge / link back).",
+    )
+    generationMeta: Optional[dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "AI-generation audit (k/model/media_todos/self_review/token_usage). "
+            "Admin/teacher only — null for students."
+        ),
+    )
     sections: Optional[list[ExamSectionPreview]] = Field(
         default=None,
         description="Populated only when ?include=sections was requested.",
