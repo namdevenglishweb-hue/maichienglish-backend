@@ -17,6 +17,7 @@ from services.exceptions import (
     PermissionDeniedError,
     ValidationError,
 )
+from services.highlight_service import highlight_service
 from services.user_service import user_service
 
 from .schemas import (
@@ -44,6 +45,11 @@ from .schemas import (
     AttemptView,
     AudioPlayResponse,
     AudioPlayResponseData,
+    HighlightCreateRequest,
+    HighlightPatchRequest,
+    HighlightResponse,
+    HighlightResponseData,
+    HighlightView,
     SavedAnswerView,
     SpeakingCommentView,
     SpeakingUploadRequest,
@@ -134,6 +140,7 @@ async def start_attempt(
             isResume=result["is_resume"],
             exam=AttemptExamView(**result["exam"]),
             savedAnswers=[SavedAnswerView(**sa) for sa in result["saved_answers"]],
+            highlights=[HighlightView(**h) for h in result.get("highlights", [])],
             startedAt=result["attempt"]["started_at"],
         ),
     )
@@ -454,6 +461,7 @@ async def get_attempt_detail(
             attempt=_attempt_to_view(detail["attempt"]),
             exam=AttemptDetailExam(**detail["exam"]),
             answers=[_to_answer_view(a) for a in detail["answers"]],
+            highlights=[HighlightView(**h) for h in detail.get("highlights", [])],
             audioPlayCounts=detail.get("audio_play_counts", {}),
         ),
     )
@@ -504,3 +512,97 @@ def _to_answer_view(a: dict) -> AnswerView:
         writingComments=writing_comments,
         speakingComment=speaking_comment,
     )
+
+
+# ===================================================================== #
+# Highlights — student highlight + optional note (owner + in_progress)   #
+# Read path is embedded in resume/detail; there is NO GET list endpoint. #
+# ===================================================================== #
+
+
+@router.post(
+    "/{attempt_id}/highlights",
+    response_model=HighlightResponse,
+    status_code=201,
+)
+async def create_highlight(
+    attempt_id: str,
+    request: HighlightCreateRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Create a highlight on an attempt. Owner + in_progress only.
+
+    `targetKey` is opaque (BE never parses it). See docs/attempt-highlights/.
+    """
+    user = await _resolve_user(current_user)
+    try:
+        h = await highlight_service.create_highlight(
+            attempt_id, user["id"],
+            target_key=request.targetKey,
+            range_start=request.rangeStart,
+            range_end=request.rangeEnd,
+            quoted_text=request.quotedText,
+            note=request.note,
+            color=request.color,
+        )
+    except NotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except PermissionDeniedError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+    except ValidationError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return HighlightResponse(
+        status=201, data=HighlightResponseData(highlight=HighlightView(**h))
+    )
+
+
+@router.patch(
+    "/{attempt_id}/highlights/{highlight_id}",
+    response_model=HighlightResponse,
+)
+async def patch_highlight(
+    attempt_id: str,
+    highlight_id: str,
+    request: HighlightPatchRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Edit a highlight's note/color. Owner + in_progress. 404 if it isn't
+    the caller's highlight (don't leak existence)."""
+    user = await _resolve_user(current_user)
+    try:
+        h = await highlight_service.update_highlight(
+            attempt_id, highlight_id, user["id"],
+            note=request.note,
+            color=request.color,
+            note_set="note" in request.model_fields_set,
+            color_set="color" in request.model_fields_set,
+        )
+    except NotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValidationError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return HighlightResponse(
+        data=HighlightResponseData(highlight=HighlightView(**h))
+    )
+
+
+@router.delete(
+    "/{attempt_id}/highlights/{highlight_id}",
+    status_code=204,
+    response_class=Response,
+)
+async def delete_highlight(
+    attempt_id: str,
+    highlight_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Delete a highlight. Owner + in_progress. 404 if it isn't the caller's."""
+    user = await _resolve_user(current_user)
+    try:
+        await highlight_service.delete_highlight(
+            attempt_id, highlight_id, user["id"]
+        )
+    except NotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValidationError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))

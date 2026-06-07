@@ -281,6 +281,34 @@ CREATE INDEX class_students_class_idx
 
 
 -- ------------------------------------------------------------
+-- attempt_highlights — student highlight + optional note while taking an
+-- attempt (migration 0017). One row per highlight.
+--   target_key: opaque text run locator (FE↔BE convention; BE never
+--   parses it) — e.g. "material:{sectionId}:{idx}:content",
+--   "question:{questionId}:stem", "answer:{questionId}". range_start/end
+--   are char offsets on that run's source string; quoted_text is a
+--   snapshot. Mutation = owner + attempt in_progress (app layer); read via
+--   embed in resume/detail. Overlap allowed. See
+--   services/highlight_service.py + docs/attempt-highlights/.
+-- ------------------------------------------------------------
+CREATE TABLE public.attempt_highlights (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  attempt_id  uuid NOT NULL REFERENCES public.attempts(id) ON DELETE CASCADE,
+  target_key  text NOT NULL,
+  range_start int  NOT NULL CHECK (range_start >= 0),
+  range_end   int  NOT NULL,
+  quoted_text text NOT NULL,
+  note        text,
+  color       text,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  updated_at  timestamptz NOT NULL DEFAULT now(),
+  CHECK (range_end > range_start)
+);
+CREATE INDEX attempt_highlights_attempt_idx
+  ON public.attempt_highlights (attempt_id);
+
+
+-- ------------------------------------------------------------
 -- Row-level security. Defense-in-depth per DEPLOYMENT.md §3.1 / §8 —
 -- the backend connects via the service-role key (which bypasses RLS),
 -- but enabling RLS blocks bare anon/authenticated key holders from
@@ -299,3 +327,4 @@ ALTER TABLE public.writing_comments      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.classes               ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.class_teachers        ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.class_students        ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.attempt_highlights    ENABLE ROW LEVEL SECURITY;

@@ -10,6 +10,7 @@ from services.exceptions import (
     PermissionDeniedError,
     ValidationError,
 )
+from services.highlight_service import highlight_service
 from services.subscription_plans import SUBSCRIPTION_PLANS, PlanTier
 from utils.grading_utils import MANUAL_GRADE_TYPES, grade_question, strip_correct
 
@@ -374,6 +375,7 @@ class AttemptService:
             "attempt": _row_to_attempt(row),
             "exam": exam_tree,
             "saved_answers": [],
+            "highlights": [],  # fresh attempt — never any highlights yet
         }
 
     async def _build_resume_payload(self, conn, active_row) -> dict[str, Any]:
@@ -395,11 +397,13 @@ class AttemptService:
             "Resumed attempt %s (user %s, exam %s, %d saved answers)",
             attempt_id, active_row["user_id"], exam_id, len(saved),
         )
+        highlights = await highlight_service.list_for_attempt(conn, attempt_id)
         return {
             "is_resume": True,
             "attempt": _row_to_attempt(active_row),
             "exam": exam_tree,
             "saved_answers": saved,
+            "highlights": highlights,
         }
 
     async def get_active_attempt(self, user_id: str) -> Optional[dict[str, Any]]:
@@ -856,6 +860,14 @@ class AttemptService:
                 conn, attempt_id
             )
 
+            # Student highlights (+ notes) for this attempt — embedded so the
+            # review screen renders them in one round-trip. See
+            # docs/attempt-highlights/. RBAC is enforced by the caller route
+            # (get_attempt_detail) before this payload is returned.
+            highlights = await highlight_service.list_for_attempt(
+                conn, attempt_id
+            )
+
         is_submitted = attempt["submitted_at"] is not None
         per_answer = []
         for ar in answer_rows:
@@ -905,6 +917,7 @@ class AttemptService:
                 "skill": attempt["exam_skill"],
             },
             "answers": per_answer,
+            "highlights": highlights,
             "audio_play_counts": audio_play_counts,
         }
 
