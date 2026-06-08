@@ -6,6 +6,7 @@ from dependencies import get_current_user, require_admin
 from services.exam_service import exam_service
 from services.exceptions import NotFoundError, ValidationError
 from services.section_service import section_service
+from utils.grading_utils import strip_material_meta
 
 from api.common import BatchDeleteRequest
 
@@ -27,7 +28,10 @@ exam_scoped_router = APIRouter(prefix="/api/exams", tags=["Sections"])
 section_router = APIRouter(prefix="/api/sections", tags=["Sections"])
 
 
-def _to_view(s: dict) -> SectionView:
+def _to_view(s: dict, *, strip_meta: bool = False) -> SectionView:
+    # strip_meta=True for student-facing reads: removes admin-only
+    # material.meta (transcript/description). Admin CRUD keeps it. See §5.4.
+    materials = strip_material_meta(s["materials"]) if strip_meta else s["materials"]
     return SectionView(
         id=s["id"],
         examId=s["exam_id"],
@@ -35,7 +39,7 @@ def _to_view(s: dict) -> SectionView:
         partLabel=s["part_label"],
         type=s["type"],
         instructions=s["instructions"],
-        materials=s["materials"],
+        materials=materials,
         maxAudioPlays=s["max_audio_plays"],
         createdAt=s["created_at"],
         updatedAt=s["updated_at"],
@@ -64,9 +68,12 @@ async def list_sections(
             status_code=status.HTTP_404_NOT_FOUND, detail="Exam not found"
         )
 
+    strip_meta = not _is_privileged(current_user.get("role"))
     sections = await section_service.list_sections_by_exam(exam_id)
     return SectionListResponse(
-        data=SectionListResponseData(items=[_to_view(s) for s in sections]),
+        data=SectionListResponseData(
+            items=[_to_view(s, strip_meta=strip_meta) for s in sections]
+        ),
     )
 
 
@@ -219,7 +226,7 @@ async def get_section(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Section not found"
             )
 
-    view = _to_view(section)
+    view = _to_view(section, strip_meta=not _is_privileged(current_user.get("role")))
 
     includes = {p.strip() for p in (include or "").split(",") if p.strip()}
     if "questions" in includes:

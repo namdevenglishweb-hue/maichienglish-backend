@@ -10,12 +10,14 @@ from services.attempt_service import (
     AudioPlayLimitExceededError,
     attempt_service,
 )
+from services.class_service import class_service
 from services.exceptions import (
     ConflictError,
     NotFoundError,
     PermissionDeniedError,
     ValidationError,
 )
+from services.highlight_service import highlight_service
 from services.user_service import user_service
 
 from .schemas import (
@@ -43,6 +45,11 @@ from .schemas import (
     AttemptView,
     AudioPlayResponse,
     AudioPlayResponseData,
+    HighlightCreateRequest,
+    HighlightPatchRequest,
+    HighlightResponse,
+    HighlightResponseData,
+    HighlightView,
     SavedAnswerView,
     SpeakingCommentView,
     SpeakingUploadRequest,
@@ -75,6 +82,7 @@ def _attempt_to_view(a: dict) -> AttemptView:
         timeSpentSeconds=a["time_spent_seconds"],
         isAbandoned=a.get("is_abandoned", False),
         isFullyGraded=a.get("is_fully_graded", True),
+        mode=a.get("mode", "practice"),
         startedAt=a["started_at"],
         submittedAt=a["submitted_at"],
     )
@@ -111,7 +119,7 @@ async def start_attempt(
     user = await _resolve_user(current_user)
     try:
         result = await attempt_service.start_attempt(
-            user_id=user["id"], exam_id=request.examId
+            user_id=user["id"], exam_id=request.examId, mode=request.mode
         )
     except NotFoundError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
@@ -132,6 +140,7 @@ async def start_attempt(
             isResume=result["is_resume"],
             exam=AttemptExamView(**result["exam"]),
             savedAnswers=[SavedAnswerView(**sa) for sa in result["saved_answers"]],
+            highlights=[HighlightView(**h) for h in result.get("highlights", [])],
             startedAt=result["attempt"]["started_at"],
         ),
     )
@@ -398,6 +407,7 @@ async def get_history(current_user: dict = Depends(get_current_user)):
                     timeSpentSeconds=r["time_spent_seconds"],
                     isAbandoned=r.get("is_abandoned", False),
                     isFullyGraded=r.get("is_fully_graded", True),
+                    mode=r.get("mode", "practice"),
                     startedAt=r["started_at"],
                     submittedAt=r["submitted_at"],
                 )
@@ -414,7 +424,9 @@ async def get_attempt_detail(
     """Get an attempt with per-question breakdown (grouped by section).
 
     - Owner can always view.
-    - Admin/teacher can view any attempt.
+    - Admin can view any attempt.
+    - Teacher can view only attempts of students in a class they teach
+      (class-scoped — see docs/attempt-lifecycle §5.7).
     - Parent can view attempts of their linked children.
     """
     detail = await attempt_service.get_attempt_with_answers(attempt_id)
@@ -428,12 +440,17 @@ async def get_attempt_detail(
 
     owner_id = detail["attempt"]["user_id"]
     is_owner = owner_id == user["id"]
-    is_staff = role in ("admin", "teacher")
+    is_admin = role == "admin"
+    is_teacher_in_class = False
+    if role == "teacher":
+        is_teacher_in_class = await class_service.teacher_shares_class_with(
+            user["id"], owner_id
+        )
     is_parent_of_owner = False
     if role == "parent":
         is_parent_of_owner = await user_service.is_child_of(owner_id, user["id"])
 
-    if not (is_owner or is_staff or is_parent_of_owner):
+    if not (is_owner or is_admin or is_teacher_in_class or is_parent_of_owner):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not allowed to view this attempt",
@@ -444,6 +461,7 @@ async def get_attempt_detail(
             attempt=_attempt_to_view(detail["attempt"]),
             exam=AttemptDetailExam(**detail["exam"]),
             answers=[_to_answer_view(a) for a in detail["answers"]],
+            highlights=[HighlightView(**h) for h in detail.get("highlights", [])],
             audioPlayCounts=detail.get("audio_play_counts", {}),
         ),
     )
@@ -463,6 +481,7 @@ def _to_answer_view(a: dict) -> AnswerView:
                 quotedText=c["quoted_text"],
                 commentText=c["comment_text"],
                 createdBy=c.get("created_by"),
+                createdByName=c.get("created_by_name"),
                 createdAt=c["created_at"],
                 updatedAt=c["updated_at"],
             )
@@ -474,6 +493,7 @@ def _to_answer_view(a: dict) -> AnswerView:
         speaking_comment = SpeakingCommentView(
             commentText=sc["comment_text"],
             createdBy=sc.get("created_by"),
+            createdByName=sc.get("created_by_name"),
             createdAt=sc["created_at"],
         )
     return AnswerView(
@@ -492,3 +512,97 @@ def _to_answer_view(a: dict) -> AnswerView:
         writingComments=writing_comments,
         speakingComment=speaking_comment,
     )
+
+
+# ===================================================================== #
+# Highlights — student highlight + optional note (owner + in_progress)   #
+# Read path is embedded in resume/detail; there is NO GET list endpoint. #
+# ===================================================================== #
+
+
+@router.post(
+    "/{attempt_id}/highlights",
+    response_model=HighlightResponse,
+    status_code=201,
+)
+async def create_highlight(
+    attempt_id: str,
+    request: HighlightCreateRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Create a highlight on an attempt. Owner + in_progress only.
+
+    `targetKey` is opaque (BE never parses it). See docs/attempt-highlights/.
+    """
+    user = await _resolve_user(current_user)
+    try:
+        h = await highlight_service.create_highlight(
+            attempt_id, user["id"],
+            target_key=request.targetKey,
+            range_start=request.rangeStart,
+            range_end=request.rangeEnd,
+            quoted_text=request.quotedText,
+            note=request.note,
+            color=request.color,
+        )
+    except NotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except PermissionDeniedError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+    except ValidationError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return HighlightResponse(
+        status=201, data=HighlightResponseData(highlight=HighlightView(**h))
+    )
+
+
+@router.patch(
+    "/{attempt_id}/highlights/{highlight_id}",
+    response_model=HighlightResponse,
+)
+async def patch_highlight(
+    attempt_id: str,
+    highlight_id: str,
+    request: HighlightPatchRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Edit a highlight's note/color. Owner + in_progress. 404 if it isn't
+    the caller's highlight (don't leak existence)."""
+    user = await _resolve_user(current_user)
+    try:
+        h = await highlight_service.update_highlight(
+            attempt_id, highlight_id, user["id"],
+            note=request.note,
+            color=request.color,
+            note_set="note" in request.model_fields_set,
+            color_set="color" in request.model_fields_set,
+        )
+    except NotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValidationError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return HighlightResponse(
+        data=HighlightResponseData(highlight=HighlightView(**h))
+    )
+
+
+@router.delete(
+    "/{attempt_id}/highlights/{highlight_id}",
+    status_code=204,
+    response_class=Response,
+)
+async def delete_highlight(
+    attempt_id: str,
+    highlight_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Delete a highlight. Owner + in_progress. 404 if it isn't the caller's."""
+    user = await _resolve_user(current_user)
+    try:
+        await highlight_service.delete_highlight(
+            attempt_id, highlight_id, user["id"]
+        )
+    except NotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValidationError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))

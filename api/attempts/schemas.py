@@ -1,15 +1,24 @@
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
+
+AttemptMode = Literal["practice", "real"]
 
 
 class AttemptStartRequest(BaseModel):
     """Body for POST /api/attempts."""
 
     examId: str = Field(..., description="UUID of a published exam")
+    mode: AttemptMode = Field(
+        default="practice",
+        description="'practice' (thi thử, mặc định) hoặc 'real' (thi thật: "
+        "audio nghe 1 lần + không resume).",
+    )
 
     model_config = {
-        "json_schema_extra": {"example": {"examId": "uuid-of-exam"}}
+        "json_schema_extra": {
+            "example": {"examId": "uuid-of-exam", "mode": "practice"}
+        }
     }
 
 
@@ -83,6 +92,7 @@ class AttemptView(BaseModel):
     timeSpentSeconds: Optional[int] = None
     isAbandoned: bool = False
     isFullyGraded: bool = True
+    mode: AttemptMode = "practice"
     startedAt: Optional[str] = None
     submittedAt: Optional[str] = None
 
@@ -94,19 +104,38 @@ class SavedAnswerView(BaseModel):
     studentAnswer: Any = None
 
 
+class HighlightView(BaseModel):
+    """One student highlight (+ optional note) on an attempt.
+
+    `targetKey` is an opaque text-run locator (BE never parses it).
+    `rangeStart/rangeEnd` are char offsets on that run's source string.
+    """
+
+    id: str
+    targetKey: str
+    rangeStart: int
+    rangeEnd: int
+    quotedText: str
+    note: Optional[str] = None
+    color: Optional[str] = None
+    createdAt: Optional[str] = None
+
+
 class AttemptStartResponseData(BaseModel):
     """Payload returned by POST /api/attempts (Case A new, Case B resume).
 
     `isResume` lets the FE distinguish: false → fresh start (201 wire
     status), true → resume of an existing in-progress attempt (200 wire
     status). `savedAnswers` is empty in the new case and populated with
-    previously-saved answers in the resume case.
+    previously-saved answers in the resume case. `highlights` is empty on a
+    fresh start and carries the attempt's saved highlights on resume.
     """
 
     attemptId: str
     isResume: bool = False
     exam: AttemptExamView
     savedAnswers: list[SavedAnswerView] = Field(default_factory=list)
+    highlights: list[HighlightView] = Field(default_factory=list)
     startedAt: Optional[str] = None
 
 
@@ -128,6 +157,7 @@ class ActiveAttemptData(BaseModel):
     examTitle: str
     examLevel: str
     examSkill: str
+    mode: AttemptMode = "practice"
     startedAt: Optional[str] = None
     savedAnswerCount: int = 0
 
@@ -235,6 +265,7 @@ class WritingCommentView(BaseModel):
     quotedText: str
     commentText: str
     createdBy: Optional[str] = None
+    createdByName: Optional[str] = None  # teacher full_name (for display/print)
     createdAt: str
     updatedAt: str
 
@@ -244,6 +275,7 @@ class SpeakingCommentView(BaseModel):
 
     commentText: str
     createdBy: Optional[str] = None
+    createdByName: Optional[str] = None  # teacher full_name (for display/print)
     createdAt: str
 
 
@@ -279,6 +311,7 @@ class AttemptDetailData(BaseModel):
     attempt: AttemptView
     exam: AttemptDetailExam
     answers: list[AnswerView]
+    highlights: list[HighlightView] = Field(default_factory=list)
     audioPlayCounts: dict[str, dict[str, int]] = Field(
         default_factory=dict,
         description=(
@@ -309,6 +342,7 @@ class AttemptHistoryItem(BaseModel):
     timeSpentSeconds: Optional[int] = None
     isAbandoned: bool = False
     isFullyGraded: bool = True
+    mode: AttemptMode = "practice"
     startedAt: Optional[str] = None
     submittedAt: Optional[str] = None
 
@@ -396,3 +430,44 @@ class SpeakingUploadResponseData(BaseModel):
 class SpeakingUploadResponse(BaseModel):
     status: int = 200
     data: SpeakingUploadResponseData
+
+
+# ---------------------------------------------------------------------------
+# Attempt highlights — student highlight + optional note (docs/attempt-highlights/)
+# ---------------------------------------------------------------------------
+
+
+class HighlightCreateRequest(BaseModel):
+    """Body for POST /api/attempts/{id}/highlights."""
+
+    targetKey: str = Field(..., min_length=1, max_length=200)
+    rangeStart: int = Field(..., ge=0)
+    rangeEnd: int = Field(..., ge=1)
+    quotedText: str = Field(..., min_length=1, max_length=4000)
+    note: Optional[str] = Field(default=None, max_length=2000)
+    color: Optional[str] = Field(default=None, max_length=32)
+
+    @model_validator(mode="after")
+    def _check_range(self):
+        if self.rangeEnd <= self.rangeStart:
+            raise ValueError("rangeEnd must be greater than rangeStart")
+        return self
+
+
+class HighlightPatchRequest(BaseModel):
+    """Body for PATCH /api/attempts/{id}/highlights/{hlId} — edit note/color.
+
+    Omit a field to leave it unchanged; send `null` to clear it.
+    """
+
+    note: Optional[str] = Field(default=None, max_length=2000)
+    color: Optional[str] = Field(default=None, max_length=32)
+
+
+class HighlightResponseData(BaseModel):
+    highlight: HighlightView
+
+
+class HighlightResponse(BaseModel):
+    status: int = 200
+    data: HighlightResponseData

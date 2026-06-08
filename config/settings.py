@@ -56,6 +56,13 @@ class Settings(BaseSettings):
     )
     storage_provider: str = Field(default="supabase", alias="STORAGE_PROVIDER")
 
+    # AI exam generation (docs/exam-ai-generation/) — used from Phase 1+
+    ai_provider: str = Field(default="anthropic", alias="AI_PROVIDER")
+    anthropic_api_key: Optional[str] = Field(default=None, alias="ANTHROPIC_API_KEY")
+    ai_model: str = Field(default="claude-sonnet-4-6", alias="AI_MODEL")
+    ai_max_tokens: int = Field(default=8000, alias="AI_MAX_TOKENS")
+    ai_self_review_rounds: int = Field(default=2, alias="AI_SELF_REVIEW_ROUNDS")
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]

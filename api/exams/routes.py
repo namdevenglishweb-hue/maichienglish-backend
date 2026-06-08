@@ -8,7 +8,7 @@ from services.exceptions import NotFoundError, ValidationError
 from services.question_service import question_service
 from services.section_service import section_service
 from services.user_service import user_service
-from utils.grading_utils import strip_correct
+from utils.grading_utils import strip_correct, strip_material_meta
 
 from .schemas import (
     ExamCreate,
@@ -25,7 +25,10 @@ from .schemas import (
 router = APIRouter(prefix="/api/exams", tags=["Exams"])
 
 
-def _to_view(exam: dict) -> ExamView:
+def _to_view(exam: dict, *, include_meta: bool = True) -> ExamView:
+    # generationMeta is admin/teacher-only audit; students see the badge id
+    # (generatedFromExamId) but not the meta. include_meta defaults True so
+    # admin-only write paths keep it; read paths pass include_meta=is_priv.
     return ExamView(
         id=exam["id"],
         title=exam["title"],
@@ -38,6 +41,8 @@ def _to_view(exam: dict) -> ExamView:
         createdAt=exam["created_at"],
         updatedAt=exam["updated_at"],
         deletedAt=exam["deleted_at"],
+        generatedFromExamId=exam.get("generated_from_exam_id"),
+        generationMeta=exam.get("generation_meta") if include_meta else None,
     )
 
 
@@ -64,7 +69,11 @@ async def _build_sections_payload(
                 partLabel=s["part_label"],
                 type=s["type"],
                 instructions=s["instructions"],
-                materials=s["materials"],
+                # Admin/teacher see material.meta (transcript/description);
+                # students don't (it leaks listening/image answers — §5.4).
+                materials=s["materials"]
+                if is_priv
+                else strip_material_meta(s["materials"]),
                 maxAudioPlays=s["max_audio_plays"],
                 questions=[
                     ExamQuestionPreview(
@@ -99,7 +108,9 @@ async def list_exams(
         level=level, skill=skill, is_published=published
     )
     return ExamListResponse(
-        data=ExamListResponseData(items=[_to_view(e) for e in exams]),
+        data=ExamListResponseData(
+            items=[_to_view(e, include_meta=_is_privileged(role)) for e in exams]
+        ),
     )
 
 
@@ -129,7 +140,7 @@ async def get_exam(
             status_code=status.HTTP_404_NOT_FOUND, detail="Exam not found"
         )
 
-    view = _to_view(exam)
+    view = _to_view(exam, include_meta=is_priv)
 
     includes = {p.strip() for p in (include or "").split(",") if p.strip()}
     if "sections" in includes:

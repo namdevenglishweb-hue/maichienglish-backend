@@ -1,14 +1,20 @@
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from api.admin import router as admin_router
 from api.attempts import router as attempts_router
 from api.auth import router as auth_router
+from api.classes import admin_router as admin_classes_router
+from api.classes import me_router as student_classes_router
+from api.classes import teacher_router as teacher_classes_router
+from api.exam_generations import admin_router as exam_generations_router
 from api.exams import router as exams_router
 from api.parents import router as parents_router
+from api.section_type_prompts import admin_router as section_type_prompts_router
 from api.questions import question_router as questions_router
 from api.questions import section_scoped_router as section_questions_router
 from api.sections import exam_scoped_router as exam_sections_router
@@ -19,6 +25,7 @@ from api.users import router as users_router
 from config.database import close_db_pool, get_db_pool, init_db_pool
 from config.logging import setup_logging
 from config.settings import get_settings
+from services.exceptions import ConflictError
 
 setup_logging(level="DEBUG" if get_settings().debug else "INFO")
 logger = logging.getLogger(__name__)
@@ -47,6 +54,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.exception_handler(ConflictError)
+async def _conflict_handler(request: Request, exc: ConflictError):
+    """Map any uncaught ConflictError → 409 (e.g. publish-lock guards in
+    services/exam_guards.py). Routes that already catch ConflictError
+    locally (e.g. attempts) are unaffected — their handler runs first."""
+    return JSONResponse(
+        status_code=status.HTTP_409_CONFLICT, content={"detail": str(exc)}
+    )
+
 app.include_router(auth_router)
 app.include_router(users_router)
 app.include_router(subscriptions_router)
@@ -59,6 +76,11 @@ app.include_router(questions_router)
 app.include_router(attempts_router)
 app.include_router(parents_router)
 app.include_router(teacher_router)
+app.include_router(admin_classes_router)
+app.include_router(teacher_classes_router)
+app.include_router(student_classes_router)
+app.include_router(exam_generations_router)
+app.include_router(section_type_prompts_router)
 
 
 @app.get("/health")

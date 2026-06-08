@@ -33,6 +33,27 @@ def strip_correct(question_type: str, question_data: dict) -> dict:
     return stripped
 
 
+def strip_material_meta(materials: Any) -> list:
+    """Return a copy of a section's `materials` with each block's admin-only
+    `meta` removed, for student-facing payloads.
+
+    `material.meta.transcript` (audio) is effectively the listening answer and
+    `meta.description` (image) can leak answers, so neither may reach a student
+    (taking the exam or viewing a published exam). Admin/teacher keep it. See
+    docs/exam-ai-generation/exam-ai-generation-design.md §5.4 / §11.1.
+
+    Non-list input → []. Non-dict items pass through untouched.
+    """
+    if not isinstance(materials, list):
+        return []
+    out: list = []
+    for m in materials:
+        if isinstance(m, dict) and "meta" in m:
+            m = {k: v for k, v in m.items() if k != "meta"}
+        out.append(m)
+    return out
+
+
 # Question types whose answers are scored by a human teacher, not by
 # grade_question(). submit_attempt skips auto-grading for these and
 # leaves is_correct=NULL / points_earned=0 until the teacher's grade

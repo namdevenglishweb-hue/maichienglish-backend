@@ -2,6 +2,7 @@ import json
 import logging
 from typing import Any, Optional
 
+from services.exam_guards import assert_exam_has_no_attempts
 from services.exceptions import NotFoundError, ValidationError
 from services.question_service import _validate_question_data
 from services.section_service import (
@@ -26,12 +27,24 @@ def _row_to_exam(row) -> dict[str, Any]:
         "created_at": row["created_at"].isoformat() if row["created_at"] else None,
         "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
         "deleted_at": row["deleted_at"].isoformat() if row["deleted_at"] else None,
+        "generated_from_exam_id": (
+            str(row["generated_from_exam_id"])
+            if row["generated_from_exam_id"] else None
+        ),
+        "generation_meta": _coerce_jsonb(row["generation_meta"]),
     }
+
+
+def _coerce_jsonb(raw):
+    if isinstance(raw, str):
+        return json.loads(raw)
+    return raw
 
 
 _SELECT_COLS = """
     id, title, level, skill, duration_minutes, description,
-    is_published, created_by, created_at, updated_at, deleted_at
+    is_published, created_by, created_at, updated_at, deleted_at,
+    generated_from_exam_id, generation_meta
 """
 
 
@@ -199,6 +212,9 @@ class ExamService:
 
     async def unpublish_exam(self, exam_id: str) -> dict[str, Any]:
         async with self.db.acquire() as conn:
+            # Publish-lock: an exam that already has attempts is frozen — it
+            # cannot be unpublished (and thus cannot have its content edited).
+            await assert_exam_has_no_attempts(conn, exam_id)
             row = await conn.fetchrow(
                 f"""
                 UPDATE public.exams
@@ -255,6 +271,8 @@ class ExamService:
         description: Optional[str] = None,
         created_by: Optional[str] = None,
         sections: Optional[list[dict[str, Any]]] = None,
+        generated_from_exam_id: Optional[str] = None,
+        generation_meta: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Create exam + optional sections + optional questions in 1 transaction.
 
@@ -346,11 +364,14 @@ class ExamService:
                 exam_row = await conn.fetchrow(
                     f"""
                     INSERT INTO public.exams
-                        (title, level, skill, duration_minutes, description, created_by)
-                    VALUES ($1, $2, $3, $4, $5, $6)
+                        (title, level, skill, duration_minutes, description, created_by,
+                         generated_from_exam_id, generation_meta)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
                     RETURNING {_SELECT_COLS}
                     """,
                     title, level, skill, duration_minutes, description, created_by,
+                    generated_from_exam_id,
+                    json.dumps(generation_meta) if generation_meta is not None else None,
                 )
                 exam_id = exam_row["id"]
                 created_sections = 0
