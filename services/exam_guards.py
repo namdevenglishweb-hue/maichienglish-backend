@@ -1,10 +1,10 @@
-"""Publish-lock guards — block editing a published exam's CONTENT.
+"""Content-edit guards — freeze an exam's CONTENT once it has attempts.
 
-docs/exam-publish-lock/. Once an exam is `is_published=true`:
-  - its content (sections / questions / materials) is frozen → 409;
-  - metadata (PATCH exam) is still editable;
-  - it can only be unpublished while it has NO attempts (otherwise frozen
-    forever to protect attempt integrity: scores, highlight offsets, …).
+docs/exam-publish-lock/. The thing worth protecting is attempt integrity
+(scores, highlight offsets, …), so an exam's content (sections / questions /
+materials) is frozen → 409 once it has ANY attempt — regardless of publish
+state. Metadata (PATCH exam) stays editable, and an exam can ALWAYS be
+unpublished (even with attempts).
 
 All guards take an open connection so they run inside the caller's
 transaction, *before* the write. They raise ConflictError (→ 409); the
@@ -17,44 +17,31 @@ from services.exceptions import ConflictError
 
 
 async def assert_exam_content_editable(conn, exam_id) -> None:
-    """409 if the exam is published (content is frozen)."""
-    pub = await conn.fetchval(
-        "SELECT is_published FROM public.exams "
-        "WHERE id = $1 AND deleted_at IS NULL",
-        exam_id,
-    )
-    if pub:  # None (not found) → let caller's not-found path handle it
-        raise ConflictError(
-            "Exam is published; unpublish it first to edit its content"
-        )
-
-
-async def assert_no_published_among(conn, exam_ids) -> None:
-    """Batch variant: 409 if ANY exam in the set is published."""
-    ids = [e for e in (exam_ids or []) if e is not None]
-    if not ids:
-        return
-    pub = await conn.fetchval(
-        "SELECT EXISTS (SELECT 1 FROM public.exams "
-        "WHERE id = ANY($1::uuid[]) AND is_published)",
-        ids,
-    )
-    if pub:
-        raise ConflictError(
-            "One or more target items belong to a published exam; "
-            "unpublish it first to edit its content"
-        )
-
-
-async def assert_exam_has_no_attempts(conn, exam_id) -> None:
-    """409 if the exam already has any attempt (cannot unpublish)."""
-    exists = await conn.fetchval(
+    """409 if the exam has any attempt (content frozen to protect attempts)."""
+    has_attempts = await conn.fetchval(
         "SELECT EXISTS (SELECT 1 FROM public.attempts WHERE exam_id = $1)",
         exam_id,
     )
-    if exists:
+    if has_attempts:
         raise ConflictError(
-            "Exam already has attempts; it can no longer be unpublished or edited"
+            "Exam already has attempts; its content can no longer be edited"
+        )
+
+
+async def assert_no_attempts_among(conn, exam_ids) -> None:
+    """Batch variant: 409 if ANY exam in the set already has attempts."""
+    ids = [e for e in (exam_ids or []) if e is not None]
+    if not ids:
+        return
+    has_attempts = await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM public.attempts "
+        "WHERE exam_id = ANY($1::uuid[]))",
+        ids,
+    )
+    if has_attempts:
+        raise ConflictError(
+            "One or more target items belong to an exam with attempts; "
+            "its content can no longer be edited"
         )
 
 
@@ -87,7 +74,7 @@ async def assert_sections_editable(conn, section_ids) -> None:
         "SELECT DISTINCT exam_id FROM public.sections WHERE id = ANY($1::uuid[])",
         list(section_ids),
     )
-    await assert_no_published_among(conn, [r["exam_id"] for r in rows])
+    await assert_no_attempts_among(conn, [r["exam_id"] for r in rows])
 
 
 async def assert_questions_editable(conn, question_ids) -> None:
@@ -97,4 +84,4 @@ async def assert_questions_editable(conn, question_ids) -> None:
         "JOIN public.sections s ON s.id = q.section_id WHERE q.id = ANY($1::uuid[])",
         list(question_ids),
     )
-    await assert_no_published_among(conn, [r["exam_id"] for r in rows])
+    await assert_no_attempts_among(conn, [r["exam_id"] for r in rows])

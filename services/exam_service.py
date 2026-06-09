@@ -2,7 +2,6 @@ import json
 import logging
 from typing import Any, Optional
 
-from services.exam_guards import assert_exam_has_no_attempts
 from services.exceptions import NotFoundError, ValidationError
 from services.question_service import _validate_question_data
 from services.section_service import (
@@ -212,9 +211,9 @@ class ExamService:
 
     async def unpublish_exam(self, exam_id: str) -> dict[str, Any]:
         async with self.db.acquire() as conn:
-            # Publish-lock: an exam that already has attempts is frozen — it
-            # cannot be unpublished (and thus cannot have its content edited).
-            await assert_exam_has_no_attempts(conn, exam_id)
+            # Unpublish is always allowed (even with attempts). Attempt
+            # integrity is protected by freezing CONTENT once attempts exist
+            # (services/exam_guards.py), not by blocking unpublish.
             row = await conn.fetchrow(
                 f"""
                 UPDATE public.exams
