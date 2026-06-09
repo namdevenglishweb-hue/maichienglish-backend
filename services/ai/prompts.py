@@ -111,12 +111,35 @@ EMIT_SECTION_TOOL: dict[str, Any] = {
             "materials": {
                 "type": "array",
                 "description": "Same length/order/type as source; media url unchanged.",
-                "items": {"type": "object"},
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "type": {"type": "string", "description": "text | audio | image (unchanged from source)."},
+                        "content": {"type": "string", "description": "For text: the new passage."},
+                        "label": {"type": "string"},
+                        "url": {"type": "string", "description": "For audio/image: leave unchanged."},
+                        "alt": {"type": "string"},
+                        "meta": {"type": "object", "description": "For audio/image: transcript/description."},
+                    },
+                },
             },
             "questions": {
                 "type": "array",
                 "description": "Same length/order/question_type as source.",
-                "items": {"type": "object"},
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "question_type": {"type": "string", "description": "Unchanged from source."},
+                        "question_data": {
+                            "type": "object",
+                            "description": "REQUIRED. New content under the SAME shape as the "
+                            "source question's question_data (e.g. stem/options/correct_index, "
+                            "or the {{gap:N}} blank structure). Never omit this wrapper.",
+                        },
+                        "answer_justification": {"type": "string"},
+                    },
+                    "required": ["question_data"],
+                },
             },
         },
         "required": ["materials", "questions"],
@@ -143,7 +166,12 @@ VERIFY_SECTION_TOOL: dict[str, Any] = {
                     "required": ["severity", "problem"],
                 },
             },
-            "fixed_section": {"type": "object"},
+            "fixed_section": {
+                "type": "object",
+                "description": "Optional corrected section in the SAME shape as the "
+                "`emit_section` output (materials[] + questions[] where each question "
+                "keeps its `question_data` wrapper). Omit if no fix needed.",
+            },
         },
         "required": ["is_acceptable", "issues"],
     },
@@ -204,7 +232,10 @@ def render_generate_user_message(payload: dict[str, Any], *, k: int) -> str:
         f"title={ctx.get('title')!r}.\n\n"
         f"{_admin_blocks(payload)}{retry_block}"
         "Rewrite the SOURCE SECTION below following all invariants. Return the "
-        "result via the `emit_section` tool.\n\n"
+        "result via the `emit_section` tool. Each question MUST stay an object "
+        "with `question_type` and a `question_data` object using the SAME keys as "
+        "the source (e.g. stem/options/correct_index) — never flatten or omit the "
+        "`question_data` wrapper. Keep materials in the same order/type.\n\n"
         f"SOURCE SECTION (JSON, includes answer keys + media meta):\n{section_json}"
     )
 
