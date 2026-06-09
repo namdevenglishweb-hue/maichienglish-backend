@@ -16,7 +16,14 @@ import uuid
 
 from storage3 import SyncStorageClient, create_client
 
-from services.storage_service import EXT_FOR_MIME, StorageService, UploadResult
+from services.exceptions import ValidationError
+from services.storage_service import (
+    ALLOWED_TYPES,
+    EXT_FOR_MIME,
+    SIZE_LIMITS,
+    StorageService,
+    UploadResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -73,3 +80,29 @@ class SupabaseStorageAdapter(StorageService):
             self.client.from_(bucket).remove,
             [path],
         )
+
+    async def upload_bytes(
+        self, bucket: str, content_type: str, data: bytes
+    ) -> str:
+        allowed = ALLOWED_TYPES.get(bucket)
+        if allowed is None:
+            raise ValidationError(f"Unknown bucket {bucket!r}")
+        if content_type not in allowed:
+            raise ValidationError(
+                f"content_type {content_type!r} not allowed for bucket {bucket!r}"
+            )
+        limit = SIZE_LIMITS.get(bucket)
+        if limit is not None and len(data) > limit:
+            raise ValidationError(
+                f"image is {len(data)} bytes, over the {limit}-byte limit for {bucket!r}"
+            )
+
+        ext = EXT_FOR_MIME[content_type]
+        path = f"{uuid.uuid4()}{ext}"
+        await asyncio.to_thread(
+            self.client.from_(bucket).upload,
+            path,
+            data,
+            {"content-type": content_type},
+        )
+        return f"{self.base_url}/storage/v1/object/public/{bucket}/{path}"

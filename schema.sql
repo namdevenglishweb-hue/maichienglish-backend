@@ -364,6 +364,32 @@ CREATE INDEX exam_generation_jobs_status_idx
 
 
 -- ------------------------------------------------------------
+-- image_generation_jobs — async single-image generation (Nano Banana /
+--   Gemini 2.5 Flash Image). FE bắn N job cho N ảnh; mỗi job 1 ảnh.
+--   mode edit (sửa source_image_url) | generate (vẽ mới). succeeded →
+--   result_url (bucket images); failed → report.verifyReason (manual).
+--   Independent of exams. See docs/exam-image-generation/ §8.
+-- ------------------------------------------------------------
+CREATE TABLE public.image_generation_jobs (
+  id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  description       text NOT NULL,
+  source_image_url  text,
+  mode              text NOT NULL DEFAULT 'generate'
+                      CHECK (mode IN ('generate', 'edit')),
+  status            text NOT NULL DEFAULT 'pending'
+                      CHECK (status IN ('pending', 'running', 'succeeded', 'failed')),
+  result_url        text,
+  report            jsonb,
+  created_by        uuid REFERENCES public.profiles(id) ON DELETE SET NULL,
+  created_at        timestamptz NOT NULL DEFAULT now(),
+  updated_at        timestamptz NOT NULL DEFAULT now(),
+  finished_at       timestamptz
+);
+CREATE INDEX image_generation_jobs_status_idx
+  ON public.image_generation_jobs (status, created_at DESC);
+
+
+-- ------------------------------------------------------------
 -- Row-level security. Defense-in-depth per DEPLOYMENT.md §3.1 / §8 —
 -- the backend connects via the service-role key (which bypasses RLS),
 -- but enabling RLS blocks bare anon/authenticated key holders from
@@ -385,3 +411,4 @@ ALTER TABLE public.class_students        ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.attempt_highlights    ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.section_type_prompts  ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.exam_generation_jobs  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.image_generation_jobs ENABLE ROW LEVEL SECURITY;

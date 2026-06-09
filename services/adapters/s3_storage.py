@@ -22,3 +22,8 @@ class S3StorageAdapter(StorageService):
 
     async def delete_file(self, bucket: str, path: str) -> None:
         raise NotImplementedError
+
+    async def upload_bytes(
+        self, bucket: str, content_type: str, data: bytes
+    ) -> str:
+        raise NotImplementedError

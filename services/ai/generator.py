@@ -48,11 +48,19 @@ class AIContentGenerator(ABC):
 
 
 def get_ai_generator() -> AIContentGenerator:
-    """Factory — returns the configured provider adapter (`AI_PROVIDER`)."""
+    """Factory — returns the configured provider adapter (`AI_PROVIDER`).
+
+    Default `openrouter` (OpenAI-compatible gateway, many models via slug);
+    `anthropic` stays as an alternative (uses ANTHROPIC_API_KEY directly).
+    """
     from config.settings import get_settings
 
     settings = get_settings()
     provider = settings.ai_provider
+    if provider == "openrouter":
+        from services.ai.adapters.openrouter_generator import OpenRouterGenerator
+
+        return OpenRouterGenerator(settings)
     if provider == "anthropic":
         from services.ai.adapters.anthropic_generator import AnthropicGenerator
 

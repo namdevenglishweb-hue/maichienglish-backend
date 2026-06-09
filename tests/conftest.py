@@ -63,6 +63,7 @@ _SCHEMA_FILE = _PROJECT_ROOT / "schema.sql"
 # Data tables, parent-last for readability. TRUNCATE ... CASCADE cleans
 # all of them in one statement irrespective of order.
 _DATA_TABLES = [
+    "image_generation_jobs",  # no cascade FK to a data table → must clean explicitly
     "exam_generation_jobs",   # FK→exams/sections CASCADE, but listed (children-first)
     "answers",
     "attempt_section_state",

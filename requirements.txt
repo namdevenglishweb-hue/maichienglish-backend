@@ -8,3 +8,4 @@ pyjwt>=2.12,<3
 bcrypt>=4.2,<5
 storage3>=2.19,<2.20
 anthropic>=0.40,<1
+openai>=1.40,<2

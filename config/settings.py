@@ -56,12 +56,32 @@ class Settings(BaseSettings):
     )
     storage_provider: str = Field(default="supabase", alias="STORAGE_PROVIDER")
 
-    # AI exam generation (docs/exam-ai-generation/) — used from Phase 1+
-    ai_provider: str = Field(default="anthropic", alias="AI_PROVIDER")
+    # AI generation — all via OpenRouter (1 key, many models). Model is an
+    # OpenRouter slug, swappable by env. `anthropic` stays as an alt provider.
+    openrouter_api_key: Optional[str] = Field(default=None, alias="OPENROUTER_API_KEY")
+    openrouter_base_url: str = Field(
+        default="https://openrouter.ai/api/v1", alias="OPENROUTER_BASE_URL"
+    )
+
+    # Text generation (docs/exam-ai-generation/)
+    ai_provider: str = Field(default="openrouter", alias="AI_PROVIDER")  # openrouter | anthropic
     anthropic_api_key: Optional[str] = Field(default=None, alias="ANTHROPIC_API_KEY")
-    ai_model: str = Field(default="claude-sonnet-4-6", alias="AI_MODEL")
+    ai_model: str = Field(default="anthropic/claude-sonnet-4.5", alias="AI_MODEL")
     ai_max_tokens: int = Field(default=8000, alias="AI_MAX_TOKENS")
     ai_self_review_rounds: int = Field(default=2, alias="AI_SELF_REVIEW_ROUNDS")
+
+    # Image generation (docs/exam-image-generation/) — off by default
+    image_generation_enabled: bool = Field(
+        default=False, alias="IMAGE_GENERATION_ENABLED"
+    )
+    image_provider: str = Field(default="openrouter", alias="IMAGE_PROVIDER")
+    image_model: str = Field(
+        default="google/gemini-2.5-flash-image-preview", alias="IMAGE_MODEL"
+    )
+    image_verify_model: str = Field(
+        default="google/gemini-2.5-flash", alias="IMAGE_VERIFY_MODEL"
+    )
+    image_verify_rounds: int = Field(default=2, alias="IMAGE_VERIFY_ROUNDS")
 
     @property
     def cors_origins_list(self) -> list[str]:
