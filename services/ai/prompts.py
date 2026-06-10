@@ -106,20 +106,20 @@ EMIT_SECTION_TOOL: dict[str, Any] = {
     "input_schema": {
         "type": "object",
         "properties": {
-            "part_label": {"type": "string"},
-            "instructions": {"type": "string"},
+            "part_label": {"type": ["string", "null"]},
+            "instructions": {"type": ["string", "null"]},
             "materials": {
                 "type": "array",
                 "description": "Same length/order/type as source; media url unchanged.",
                 "items": {
                     "type": "object",
                     "properties": {
-                        "type": {"type": "string", "description": "text | audio | image (unchanged from source)."},
-                        "content": {"type": "string", "description": "For text: the new passage."},
-                        "label": {"type": "string"},
-                        "url": {"type": "string", "description": "For audio/image: leave unchanged."},
-                        "alt": {"type": "string"},
-                        "meta": {"type": "object", "description": "For audio/image: transcript/description."},
+                        "type": {"type": ["string", "null"], "description": "text | audio | image (unchanged from source)."},
+                        "content": {"type": ["string", "null"], "description": "For text: the new passage."},
+                        "label": {"type": ["string", "null"]},
+                        "url": {"type": ["string", "null"], "description": "For audio/image: leave unchanged."},
+                        "alt": {"type": ["string", "null"]},
+                        "meta": {"type": ["object", "null"], "description": "For audio/image: transcript/description."},
                     },
                 },
             },
@@ -129,14 +129,14 @@ EMIT_SECTION_TOOL: dict[str, Any] = {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "question_type": {"type": "string", "description": "Unchanged from source."},
+                        "question_type": {"type": ["string", "null"], "description": "Unchanged from source."},
                         "question_data": {
                             "type": "object",
                             "description": "REQUIRED. New content under the SAME shape as the "
                             "source question's question_data (e.g. stem/options/correct_index, "
                             "or the {{gap:N}} blank structure). Never omit this wrapper.",
                         },
-                        "answer_justification": {"type": "string"},
+                        "answer_justification": {"type": ["string", "null"]},
                     },
                     "required": ["question_data"],
                 },
@@ -159,18 +159,18 @@ VERIFY_SECTION_TOOL: dict[str, Any] = {
                     "type": "object",
                     "properties": {
                         "severity": {"type": "string", "enum": ["critical", "minor"]},
-                        "question_position": {"type": "integer"},
+                        "question_position": {"type": ["integer", "null"]},
                         "problem": {"type": "string"},
-                        "fix": {"type": "string"},
+                        "fix": {"type": ["string", "null"]},
                     },
                     "required": ["severity", "problem"],
                 },
             },
             "fixed_section": {
-                "type": "object",
+                "type": ["object", "null"],
                 "description": "Optional corrected section in the SAME shape as the "
                 "`emit_section` output (materials[] + questions[] where each question "
-                "keeps its `question_data` wrapper). Omit if no fix needed.",
+                "keeps its `question_data` wrapper). null/omit if no fix needed.",
             },
         },
         "required": ["is_acceptable", "issues"],
