@@ -68,10 +68,11 @@ class AISettingsService:
         A field explicitly set to None clears it (→ falls back to env default).
         """
         cols = [c for c in _FIELDS if c in fields]
-        # Build: INSERT (id, <cols>, updated_by) VALUES (1, ...) ON CONFLICT (id)
-        #        DO UPDATE SET <cols>=EXCLUDED..., updated_by=..., updated_at=now()
+        # Build: INSERT (id, <cols>, updated_by) VALUES (1, $1, $2, ...) ON CONFLICT
+        #        (id) DO UPDATE SET <cols>=EXCLUDED..., updated_at=now().
+        # `1` (id) is a literal, so the params start at $1.
         set_cols = cols + ["updated_by"]
-        placeholders = ", ".join(f"${i + 2}" for i in range(len(set_cols)))
+        placeholders = ", ".join(f"${i + 1}" for i in range(len(set_cols)))
         col_list = ", ".join(set_cols)
         updates = ", ".join(f"{c} = EXCLUDED.{c}" for c in set_cols)
         params = [fields[c] for c in cols] + [updated_by]
