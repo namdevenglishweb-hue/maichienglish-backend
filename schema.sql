@@ -390,6 +390,24 @@ CREATE INDEX image_generation_jobs_status_idx
 
 
 -- ------------------------------------------------------------
+-- ai_generation_settings — singleton, runtime-editable AI defaults
+--   (provider/model/max_tokens/self_review_rounds). NULL column = use the
+--   env default. Resolution: per-request override > this row > env. Admins
+--   edit via the API so model/round changes need no redeploy. See
+--   migration 0022.
+-- ------------------------------------------------------------
+CREATE TABLE public.ai_generation_settings (
+  id                 smallint PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+  provider           text,
+  model              text,
+  max_tokens         integer CHECK (max_tokens IS NULL OR max_tokens > 0),
+  self_review_rounds integer CHECK (self_review_rounds IS NULL OR self_review_rounds >= 0),
+  updated_at         timestamptz NOT NULL DEFAULT now(),
+  updated_by         uuid REFERENCES public.profiles(id) ON DELETE SET NULL
+);
+
+
+-- ------------------------------------------------------------
 -- Row-level security. Defense-in-depth per DEPLOYMENT.md §3.1 / §8 —
 -- the backend connects via the service-role key (which bypasses RLS),
 -- but enabling RLS blocks bare anon/authenticated key holders from
@@ -412,3 +430,4 @@ ALTER TABLE public.attempt_highlights    ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.section_type_prompts  ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.exam_generation_jobs  ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.image_generation_jobs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.ai_generation_settings ENABLE ROW LEVEL SECURITY;

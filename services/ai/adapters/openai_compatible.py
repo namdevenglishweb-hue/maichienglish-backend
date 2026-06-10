@@ -34,7 +34,7 @@ class OpenAICompatibleGenerator(AIContentGenerator):
 
     def __init__(
         self, *, api_key: str, base_url: str, model: str, max_tokens: int,
-        key_env: str, provider: str,
+        key_env: str, provider: str, extra_create: dict | None = None,
     ) -> None:
         if not api_key:
             raise RuntimeError(
@@ -45,6 +45,10 @@ class OpenAICompatibleGenerator(AIContentGenerator):
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         self._model = model
         self._max_tokens = max_tokens
+        # Provider-specific extra kwargs for chat.completions.create (e.g. Gemini
+        # sets reasoning_effort=none so thinking tokens don't leak into the
+        # forced function call).
+        self._extra_create = extra_create or {}
         self.model = model        # effective model (override or env) — for provenance
         self.provider = provider
         self.usage: dict[str, int] = {"input": 0, "output": 0}
@@ -77,6 +81,7 @@ class OpenAICompatibleGenerator(AIContentGenerator):
             ],
             tools=[_as_openai_tool(tool)],
             tool_choice={"type": "function", "function": {"name": tool["name"]}},
+            **self._extra_create,
         )
         self._track_usage(response)
         choice = response.choices[0]

@@ -487,8 +487,7 @@ class ExamGenerationService:
         _validate_k(k)
         src = await self._load_exam_for_gen(source_exam_id)
         _assert_source_media_meta(src["sections"])
-        gen = generator or get_ai_generator(provider=provider, model=model)
-        rounds = _resolve_rounds(rounds)
+        gen, rounds = await _resolve_generation(generator, provider, model, rounds)
         type_prompts = await section_type_prompt_service.load_map()
         section_prompts = section_prompts or {}
         exam_context = {"level": src["level"], "skill": src["skill"], "title": src["title"]}
@@ -564,8 +563,7 @@ class ExamGenerationService:
         _validate_k(k)
         src = await self._load_exam_for_gen(source_exam_id)
         _assert_source_media_meta(src["sections"])
-        gen = generator or get_ai_generator(provider=provider, model=model)
-        rounds = _resolve_rounds(rounds)
+        gen, rounds = await _resolve_generation(generator, provider, model, rounds)
         type_prompts = await section_type_prompt_service.load_map()
         section_prompts = section_prompts or {}
         exam_context = {"level": src["level"], "skill": src["skill"], "title": src["title"]}
@@ -607,8 +605,7 @@ class ExamGenerationService:
         _validate_k(k)
         section, exam_context = await self.load_section_for_gen(source_section_id)
         _assert_source_media_meta([section])
-        gen = generator or get_ai_generator(provider=provider, model=model)
-        rounds = _resolve_rounds(rounds)
+        gen, rounds = await _resolve_generation(generator, provider, model, rounds)
         type_prompts = await section_type_prompt_service.load_map()
         gsec, srep = await generate_one_section(
             section, k, exam_context=exam_context, generator=gen,
@@ -670,11 +667,23 @@ class ExamGenerationService:
         return {"exam": result, "warning": warning}
 
 
-def _resolve_rounds(rounds: Optional[int]) -> int:
-    if rounds is not None:
-        return rounds
-    from config.settings import get_settings
-    return get_settings().ai_self_review_rounds
+async def _resolve_generation(generator, provider, model, rounds):
+    """Resolve the generator + self-review rounds.
+
+    Precedence per field: explicit per-request override > DB
+    ai_generation_settings > env default. An injected `generator` (tests) is
+    used as-is; only `rounds` is still resolved.
+    """
+    from services.ai_settings_service import ai_settings_service
+    eff = await ai_settings_service.get_effective()
+    if generator is None:
+        generator = get_ai_generator(
+            provider=provider or eff["provider"],
+            model=model or eff["model"],
+            max_tokens=eff["max_tokens"],
+        )
+    rounds = rounds if rounds is not None else eff["self_review_rounds"]
+    return generator, rounds
 
 
 def _build_meta(source_exam_id, k, gen, section_prompts, report) -> dict[str, Any]:

@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 class AnthropicGenerator(AIContentGenerator):
-    def __init__(self, settings, *, model=None) -> None:
+    def __init__(self, settings, *, model=None, max_tokens=None) -> None:
         if not settings.anthropic_api_key:
             raise RuntimeError(
                 "ANTHROPIC_API_KEY is not set — required when AI_PROVIDER=anthropic."
@@ -26,7 +26,7 @@ class AnthropicGenerator(AIContentGenerator):
 
         self._client = AsyncAnthropic(api_key=settings.anthropic_api_key)
         self._model = model or settings.ai_model
-        self._max_tokens = settings.ai_max_tokens
+        self._max_tokens = max_tokens or settings.ai_max_tokens
         self.model = self._model        # effective model — for provenance
         self.provider = "anthropic"
         # Cumulative token usage across this generator's lifetime (one run).

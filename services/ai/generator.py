@@ -47,15 +47,18 @@ class AIContentGenerator(ABC):
         ...
 
 
-KNOWN_PROVIDERS = ("openrouter", "groq", "anthropic")
+KNOWN_PROVIDERS = ("openrouter", "groq", "gemini", "anthropic")
 
 
-def get_ai_generator(*, provider: str | None = None, model: str | None = None) -> AIContentGenerator:
+def get_ai_generator(
+    *, provider: str | None = None, model: str | None = None,
+    max_tokens: int | None = None,
+) -> AIContentGenerator:
     """Factory — returns a provider adapter.
 
-    `provider`/`model` override the env defaults (`AI_PROVIDER`/`AI_MODEL`) for
-    a single run — lets the FE pick a model per request without a redeploy.
-    Providers: `openrouter` (default, gateway, many models via slug), `groq`
+    `provider`/`model`/`max_tokens` override the resolved defaults for a single
+    run (caller resolves per-request > DB settings > env). Providers:
+    `openrouter` (default, gateway, many models via slug), `groq` & `gemini`
     (direct, OpenAI-compatible), `anthropic` (direct SDK). Adding another
     OpenAI-compatible provider = a thin subclass of OpenAICompatibleGenerator
     + a branch here.
@@ -67,13 +70,17 @@ def get_ai_generator(*, provider: str | None = None, model: str | None = None) -
     if provider == "openrouter":
         from services.ai.adapters.openrouter_generator import OpenRouterGenerator
 
-        return OpenRouterGenerator(settings, model=model)
+        return OpenRouterGenerator(settings, model=model, max_tokens=max_tokens)
     if provider == "groq":
         from services.ai.adapters.groq_generator import GroqGenerator
 
-        return GroqGenerator(settings, model=model)
+        return GroqGenerator(settings, model=model, max_tokens=max_tokens)
+    if provider == "gemini":
+        from services.ai.adapters.gemini_generator import GeminiGenerator
+
+        return GeminiGenerator(settings, model=model, max_tokens=max_tokens)
     if provider == "anthropic":
         from services.ai.adapters.anthropic_generator import AnthropicGenerator
 
-        return AnthropicGenerator(settings, model=model)
+        return AnthropicGenerator(settings, model=model, max_tokens=max_tokens)
     raise ValueError(f"Unsupported AI_PROVIDER: {provider!r}")

@@ -251,7 +251,8 @@ async def test_generate_exam_model_override(db, client, auth_headers, make_exam,
                               "aiModel": "groq/test-model", "aiProvider": "groq"},
                         headers=admin)
     assert r.status_code == 202
-    assert captured == {"model": "groq/test-model", "provider": "groq"}
+    assert captured.get("model") == "groq/test-model"
+    assert captured.get("provider") == "groq"
 
 
 # --------------------------------------------------------------------------

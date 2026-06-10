@@ -22,6 +22,7 @@ from config.settings import get_settings
 _OPENAI_COMPAT = {
     "openrouter": lambda s: (s.openrouter_api_key, s.openrouter_base_url),
     "groq": lambda s: (s.groq_api_key, s.groq_base_url),
+    "gemini": lambda s: (s.gemini_api_key, s.gemini_base_url),
 }
 
 

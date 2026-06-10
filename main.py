@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from api.admin import router as admin_router
+from api.ai_settings import admin_router as ai_settings_router
 from api.attempts import router as attempts_router
 from api.auth import router as auth_router
 from api.classes import admin_router as admin_classes_router
@@ -83,6 +84,7 @@ app.include_router(student_classes_router)
 app.include_router(exam_generations_router)
 app.include_router(section_type_prompts_router)
 app.include_router(image_generations_router)
+app.include_router(ai_settings_router)
 
 
 @app.get("/health")

@@ -175,6 +175,7 @@ async def list_models(provider: str | None = Query(default=None)):
     creds = {
         "openrouter": (s.openrouter_api_key, s.openrouter_base_url),
         "groq": (s.groq_api_key, s.groq_base_url),
+        "gemini": (s.gemini_api_key, s.gemini_base_url),
     }.get(provider)
     if not creds:
         return {"provider": provider, "models": []}

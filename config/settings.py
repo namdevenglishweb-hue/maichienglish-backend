@@ -69,6 +69,13 @@ class Settings(BaseSettings):
         default="https://api.groq.com/openai/v1", alias="GROQ_BASE_URL"
     )
 
+    # Gemini — Google's OpenAI-compatible endpoint (direct, "real" Gemini)
+    gemini_api_key: Optional[str] = Field(default=None, alias="GEMINI_API_KEY")
+    gemini_base_url: str = Field(
+        default="https://generativelanguage.googleapis.com/v1beta/openai/",
+        alias="GEMINI_BASE_URL",
+    )
+
     # Text generation (docs/exam-ai-generation/)
     ai_provider: str = Field(default="openrouter", alias="AI_PROVIDER")  # openrouter | groq | anthropic
     anthropic_api_key: Optional[str] = Field(default=None, alias="ANTHROPIC_API_KEY")
