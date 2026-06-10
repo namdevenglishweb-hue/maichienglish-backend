@@ -355,3 +355,51 @@ def test_normalize_noop_when_already_contiguous():
 def test_form_completion_in_allowed_types():
     assert "form_completion" in ALLOWED_TYPES
     assert len(ALLOWED_TYPES) == 7
+
+
+# --------------------------------------------------------------------------
+# Per-request model/provider override (FE picks model without redeploy)
+# --------------------------------------------------------------------------
+
+class _StubSettings:
+    ai_provider = "openrouter"
+    ai_model = "env-model"
+    ai_max_tokens = 1000
+    openrouter_api_key = "fake-key"
+    openrouter_base_url = "http://example.invalid/v1"
+    groq_api_key = "fake-key"
+    groq_base_url = "http://example.invalid/v1"
+
+
+def test_get_ai_generator_override(monkeypatch):
+    from services.ai.generator import get_ai_generator
+    monkeypatch.setattr("config.settings.get_settings", lambda: _StubSettings())
+    g = get_ai_generator(provider="groq", model="override-model")
+    assert type(g).__name__ == "GroqGenerator"
+    assert g.model == "override-model" and g.provider == "groq"
+
+
+def test_get_ai_generator_defaults_to_env(monkeypatch):
+    from services.ai.generator import get_ai_generator
+    monkeypatch.setattr("config.settings.get_settings", lambda: _StubSettings())
+    g = get_ai_generator()  # no override
+    assert type(g).__name__ == "OpenRouterGenerator"
+    assert g.model == "env-model" and g.provider == "openrouter"
+
+
+def test_get_ai_generator_unknown_provider(monkeypatch):
+    from services.ai.generator import get_ai_generator
+    monkeypatch.setattr("config.settings.get_settings", lambda: _StubSettings())
+    with pytest.raises(ValueError):
+        get_ai_generator(provider="bogus")
+
+
+def test_build_meta_records_actual_model():
+    class _Gen:
+        model = "groq/some-model"
+        provider = "groq"
+        usage = {"input": 5, "output": 2}
+    meta = G._build_meta("src-exam", 2, _Gen(), {"s1": "p"},
+                         {"media_todos": [], "self_review": {}})
+    assert meta["model"] == "groq/some-model" and meta["provider"] == "groq"
+    assert meta["k"] == 2 and meta["token_usage"] == {"input": 5, "output": 2}

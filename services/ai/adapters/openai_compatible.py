@@ -45,6 +45,8 @@ class OpenAICompatibleGenerator(AIContentGenerator):
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         self._model = model
         self._max_tokens = max_tokens
+        self.model = model        # effective model (override or env) — for provenance
+        self.provider = provider
         self.usage: dict[str, int] = {"input": 0, "output": 0}
 
     async def generate_section(self, payload: dict[str, Any], *, k: int) -> dict[str, Any]:

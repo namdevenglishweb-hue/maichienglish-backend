@@ -7,7 +7,19 @@ from pydantic import BaseModel, Field
 from api.exams.schemas import ExamView
 
 
-class GenerateExamRequest(BaseModel):
+class _ModelOverride(BaseModel):
+    """Optional per-request AI model/provider override (else env defaults).
+
+    Lets the FE/admin try different models without a redeploy. `aiProvider` ∈
+    {openrouter, groq, anthropic}; `aiModel` is the provider-specific id
+    (e.g. llama-3.3-70b-versatile, google/gemini-2.5-pro, claude-sonnet-4-6).
+    """
+
+    aiModel: Optional[str] = Field(default=None, description="Override AI_MODEL for this run.")
+    aiProvider: Optional[str] = Field(default=None, description="Override AI_PROVIDER for this run.")
+
+
+class GenerateExamRequest(_ModelOverride):
     """Mode 1 — whole exam, auto-save (POST /api/admin/exam-generations)."""
 
     sourceExamId: str
@@ -21,7 +33,7 @@ class GenerateExamRequest(BaseModel):
     )
 
 
-class GenerateSectionRequest(BaseModel):
+class GenerateSectionRequest(_ModelOverride):
     """Mode 2 single part (POST .../section)."""
 
     sourceSectionId: str
@@ -29,7 +41,7 @@ class GenerateSectionRequest(BaseModel):
     sectionPrompt: Optional[str] = None
 
 
-class PreviewRequest(BaseModel):
+class PreviewRequest(_ModelOverride):
     """Mode 2 all-parts preview, no save (POST .../preview)."""
 
     sourceExamId: str

@@ -11,6 +11,7 @@ import logging
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 
 from dependencies import get_current_user, require_admin
+from services.ai.generator import KNOWN_PROVIDERS
 from services.exceptions import NotFoundError, ValidationError
 from services.exam_generation_service import exam_generation_service
 from services.generation_job_service import (
@@ -45,6 +46,15 @@ async def _admin_id(current_user: dict) -> str | None:
     return profile["id"] if profile else None
 
 
+def _check_provider(provider: str | None) -> None:
+    """400 on an unknown aiProvider override (an invalid model just fails the job)."""
+    if provider and provider not in KNOWN_PROVIDERS:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown aiProvider {provider!r}; allowed: {', '.join(KNOWN_PROVIDERS)}",
+        )
+
+
 # --------------------------------------------------------------------- #
 # Create-job endpoints (202 + jobId, run in background)                  #
 # --------------------------------------------------------------------- #
@@ -59,6 +69,7 @@ async def generate_exam(
     current_user: dict = Depends(get_current_user),
 ):
     """Mode 1 — generate a whole exam, all-or-nothing, auto-saved as a draft."""
+    _check_provider(request.aiProvider)
     try:
         await exam_generation_service.precheck_exam_source(request.sourceExamId)
     except NotFoundError as e:
@@ -75,6 +86,7 @@ async def generate_exam(
         run_generation_job, job_id=job["jobId"], scope="exam",
         source_exam_id=request.sourceExamId, k=request.k, title=request.title,
         created_by=admin_id, section_prompts=request.sectionPrompts,
+        model=request.aiModel, provider=request.aiProvider,
     )
     return JobAcceptedResponse(jobId=job["jobId"], status=job["status"])
 
@@ -88,6 +100,7 @@ async def generate_section(
     current_user: dict = Depends(get_current_user),
 ):
     """Mode 2 single part — returns the section payload in report.sections[0]."""
+    _check_provider(request.aiProvider)
     try:
         await exam_generation_service.precheck_section_source(request.sourceSectionId)
     except NotFoundError as e:
@@ -107,6 +120,7 @@ async def generate_section(
         k=request.k,
         section_prompts={request.sourceSectionId: request.sectionPrompt}
         if request.sectionPrompt else None,
+        model=request.aiModel, provider=request.aiProvider,
     )
     return JobAcceptedResponse(jobId=job["jobId"], status=job["status"])
 
@@ -120,6 +134,7 @@ async def generate_preview(
     current_user: dict = Depends(get_current_user),
 ):
     """Mode 2 — generate all parts at once, per-part status, NOT saved."""
+    _check_provider(request.aiProvider)
     try:
         await exam_generation_service.precheck_exam_source(request.sourceExamId)
     except NotFoundError as e:
@@ -135,6 +150,7 @@ async def generate_preview(
         run_generation_job, job_id=job["jobId"], scope="exam_preview",
         source_exam_id=request.sourceExamId, k=request.k,
         section_prompts=request.sectionPrompts,
+        model=request.aiModel, provider=request.aiProvider,
     )
     return JobAcceptedResponse(jobId=job["jobId"], status=job["status"])
 
@@ -142,6 +158,37 @@ async def generate_preview(
 # --------------------------------------------------------------------- #
 # Poll / manage                                                         #
 # --------------------------------------------------------------------- #
+
+
+@admin_router.get("/models")
+async def list_models(provider: str | None = Query(default=None)):
+    """Available model ids for an OpenAI-compatible provider (FE dropdown).
+
+    Defaults to the env provider. Returns [] for providers without a listing
+    API (e.g. anthropic). Declared BEFORE /{job_id} so it isn't shadowed.
+    """
+    from config.settings import get_settings
+
+    s = get_settings()
+    provider = provider or s.ai_provider
+    _check_provider(provider)
+    creds = {
+        "openrouter": (s.openrouter_api_key, s.openrouter_base_url),
+        "groq": (s.groq_api_key, s.groq_base_url),
+    }.get(provider)
+    if not creds:
+        return {"provider": provider, "models": []}
+    api_key, base_url = creds
+    if not api_key:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=f"No API key for {provider}")
+    from openai import AsyncOpenAI
+
+    client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+    try:
+        listed = await client.models.list()
+    except Exception as e:  # noqa: BLE001 — surface provider error as 502
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=f"{provider} models list failed: {e}")
+    return {"provider": provider, "models": sorted(m.id for m in listed.data)}
 
 
 @admin_router.get("/{job_id}", response_model=JobView)

@@ -482,11 +482,12 @@ class ExamGenerationService:
         section_prompts: Optional[dict[str, str]] = None,
         generator=None, rounds: Optional[int] = None,
         progress_cb: ProgressCb = None, dry_run: bool = False,
+        model: Optional[str] = None, provider: Optional[str] = None,
     ) -> dict[str, Any]:
         _validate_k(k)
         src = await self._load_exam_for_gen(source_exam_id)
         _assert_source_media_meta(src["sections"])
-        gen = generator or get_ai_generator()
+        gen = generator or get_ai_generator(provider=provider, model=model)
         rounds = _resolve_rounds(rounds)
         type_prompts = await section_type_prompt_service.load_map()
         section_prompts = section_prompts or {}
@@ -558,11 +559,12 @@ class ExamGenerationService:
         section_prompts: Optional[dict[str, str]] = None,
         generator=None, rounds: Optional[int] = None,
         progress_cb: ProgressCb = None,
+        model: Optional[str] = None, provider: Optional[str] = None,
     ) -> dict[str, Any]:
         _validate_k(k)
         src = await self._load_exam_for_gen(source_exam_id)
         _assert_source_media_meta(src["sections"])
-        gen = generator or get_ai_generator()
+        gen = generator or get_ai_generator(provider=provider, model=model)
         rounds = _resolve_rounds(rounds)
         type_prompts = await section_type_prompt_service.load_map()
         section_prompts = section_prompts or {}
@@ -599,12 +601,13 @@ class ExamGenerationService:
         self, source_section_id: str, k: int, *,
         section_prompt: Optional[str] = None, generator=None,
         rounds: Optional[int] = None,
+        model: Optional[str] = None, provider: Optional[str] = None,
     ) -> dict[str, Any]:
         """Mode 2 single part — returns the generated section payload (no save)."""
         _validate_k(k)
         section, exam_context = await self.load_section_for_gen(source_section_id)
         _assert_source_media_meta([section])
-        gen = generator or get_ai_generator()
+        gen = generator or get_ai_generator(provider=provider, model=model)
         rounds = _resolve_rounds(rounds)
         type_prompts = await section_type_prompt_service.load_map()
         gsec, srep = await generate_one_section(
@@ -679,7 +682,9 @@ def _build_meta(source_exam_id, k, gen, section_prompts, report) -> dict[str, An
     s = get_settings()
     return {
         "source_exam_id": source_exam_id, "k": k,
-        "provider": s.ai_provider, "model": s.ai_model,
+        # actual provider/model used (FE override or env default), for provenance
+        "provider": getattr(gen, "provider", s.ai_provider),
+        "model": getattr(gen, "model", s.ai_model),
         "section_prompts": section_prompts,
         "media_todos": report.get("media_todos", []),
         "self_review": report.get("self_review", {}),

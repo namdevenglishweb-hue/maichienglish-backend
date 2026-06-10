@@ -206,7 +206,8 @@ async def test_generate_exam_validation(db, client, auth_headers, make_exam):
 async def test_generate_exam_accepts_and_creates_job(
     db, client, auth_headers, make_exam, monkeypatch):
     monkeypatch.setattr(
-        "services.exam_generation_service.get_ai_generator", lambda: FakeGen())
+        "services.exam_generation_service.get_ai_generator",
+        lambda **kw: FakeGen())  # accepts provider=/model= overrides
     src = await make_exam(skill="reading", sections=_reading_sections())
     r = await client.post("/api/admin/exam-generations",
                         json={"sourceExamId": src["id"], "k": 3},
@@ -221,6 +222,36 @@ async def test_generate_exam_accepts_and_creates_job(
     body = r.json()
     assert body["scope"] == "exam"
     assert body["status"] in ("pending", "running", "succeeded")
+
+
+async def test_generate_exam_model_override(db, client, auth_headers, make_exam, monkeypatch):
+    """Per-request override: unknown aiProvider → 400; valid override → 202 +
+    provenance records the override model (not the env default)."""
+    admin = auth_headers("admin@x.com", role="admin")
+
+    # Unknown provider rejected up front (before precheck).
+    r = await client.post("/api/admin/exam-generations",
+                        json={"sourceExamId": "x", "k": 2, "aiProvider": "bogus"},
+                        headers=admin)
+    assert r.status_code == 400
+
+    # Valid override accepted; the FakeGen reports its (overridden) model.
+    captured = {}
+
+    def _fake(**kw):
+        captured.update(kw)
+        g = FakeGen()
+        g.model, g.provider = kw.get("model"), kw.get("provider")
+        return g
+
+    monkeypatch.setattr("services.exam_generation_service.get_ai_generator", _fake)
+    src = await make_exam(skill="reading", sections=_reading_sections())
+    r = await client.post("/api/admin/exam-generations",
+                        json={"sourceExamId": src["id"], "k": 2,
+                              "aiModel": "groq/test-model", "aiProvider": "groq"},
+                        headers=admin)
+    assert r.status_code == 202
+    assert captured == {"model": "groq/test-model", "provider": "groq"}
 
 
 # --------------------------------------------------------------------------

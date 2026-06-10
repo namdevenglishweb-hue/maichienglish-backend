@@ -47,28 +47,33 @@ class AIContentGenerator(ABC):
         ...
 
 
-def get_ai_generator() -> AIContentGenerator:
-    """Factory — returns the configured provider adapter (`AI_PROVIDER`).
+KNOWN_PROVIDERS = ("openrouter", "groq", "anthropic")
 
-    `openrouter` (default, gateway with many models via slug), `groq` (direct,
-    OpenAI-compatible), or `anthropic` (direct SDK). Adding another
+
+def get_ai_generator(*, provider: str | None = None, model: str | None = None) -> AIContentGenerator:
+    """Factory — returns a provider adapter.
+
+    `provider`/`model` override the env defaults (`AI_PROVIDER`/`AI_MODEL`) for
+    a single run — lets the FE pick a model per request without a redeploy.
+    Providers: `openrouter` (default, gateway, many models via slug), `groq`
+    (direct, OpenAI-compatible), `anthropic` (direct SDK). Adding another
     OpenAI-compatible provider = a thin subclass of OpenAICompatibleGenerator
     + a branch here.
     """
     from config.settings import get_settings
 
     settings = get_settings()
-    provider = settings.ai_provider
+    provider = provider or settings.ai_provider
     if provider == "openrouter":
         from services.ai.adapters.openrouter_generator import OpenRouterGenerator
 
-        return OpenRouterGenerator(settings)
+        return OpenRouterGenerator(settings, model=model)
     if provider == "groq":
         from services.ai.adapters.groq_generator import GroqGenerator
 
-        return GroqGenerator(settings)
+        return GroqGenerator(settings, model=model)
     if provider == "anthropic":
         from services.ai.adapters.anthropic_generator import AnthropicGenerator
 
-        return AnthropicGenerator(settings)
+        return AnthropicGenerator(settings, model=model)
     raise ValueError(f"Unsupported AI_PROVIDER: {provider!r}")
