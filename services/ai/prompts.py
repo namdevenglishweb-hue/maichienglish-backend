@@ -20,17 +20,20 @@ from typing import Any, Optional
 # ---------------------------------------------------------------------------
 
 K_INSTRUCTIONS: dict[int, str] = {
-    1: ("K=1 (minimal): change ONLY proper nouns, numbers and place names. "
-        "Keep the same topic, difficulty, length and sentence structures."),
-    2: ("K=2 (light): swap names plus a few minor details and reword a handful "
-        "of sentences. Keep the overall topic and difficulty."),
-    3: ("K=3 (moderate): change the topic/scenario (e.g. football -> badminton). "
-        "Keep the same difficulty, length and question style."),
-    4: ("K=4 (heavy): use a new scenario and reword almost everything; you may "
-        "restructure sentences. Keep the same difficulty band and question count."),
-    5: ("K=5 (near-new): write an essentially new passage of the same exam type "
-        "and difficulty. Preserve only the structural mechanics (number of "
-        "questions, their types, the answering/marking scheme)."),
+    1: ("K=1 (minimal): change proper nouns, numbers and place names, and you may "
+        "lightly reword. Same topic and difficulty; stays close to the original."),
+    2: ("K=2 (light): change names + several details AND reword MOST sentences in "
+        "your own words — do NOT leave sentences identical. Same topic and difficulty."),
+    3: ("K=3 (moderate): change the TOPIC/scenario itself (e.g. football → cooking) "
+        "and write largely new sentences. Keep the same difficulty, length and "
+        "question style."),
+    4: ("K=4 (heavy): a NEW scenario; rewrite essentially everything with fresh "
+        "wording and sentence structures. Keep the same difficulty band and "
+        "question count."),
+    5: ("K=5 (near-new): write a BRAND-NEW passage on a DIFFERENT subject of the "
+        "same exam type and difficulty. Someone who has seen the source must NOT "
+        "recognise it — keep NONE of the original wording or storyline, only the "
+        "structural mechanics (number/types of questions, the marking scheme)."),
 }
 
 MIN_K, MAX_K = 1, 5
@@ -40,12 +43,21 @@ MIN_K, MAX_K = 1, 5
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT_GENERATE = """\
-You rewrite a single section of a real English exam (KET/PET/IELTS style) into \
-a NEW version with different content but the SAME structure. This is a real exam, \
-so correctness matters above everything: the material and the questions must be \
-mutually consistent and every answer key must be correct.
+You create a NEW version of one section of a real English exam (KET/PET/IELTS \
+style). It must keep the same structural MECHANICS as the source but have \
+GENUINELY DIFFERENT content — how much you change is set by the K directive in \
+the user message. This is a real exam, so correctness matters above all: the \
+material and questions must be mutually consistent and every answer key correct.
 
-HARD INVARIANTS — never break these (they are also enforced in code):
+VARY THE CONTENT — DO NOT CLONE (this is the #1 failure to avoid):
+- "Same structure" means only the COUNT and TYPES of materials/questions/options \
+and the marking scheme — NOT the wording. Keeping the original sentences, \
+phrasing or storyline and merely swapping names is a FAILURE for any K ≥ 2.
+- Obey the K directive for how far to move topic / scenario / wording. At K ≥ 3 \
+the topic or scenario itself must change; at K = 5 the passage must read as a \
+brand-new text a previous test-taker would not recognise.
+
+HARD INVARIANTS — never break these (also enforced in code):
 - Keep the SAME number of materials, in the same order, each the same type.
 - For audio/image materials: keep the file `url` byte-for-byte. You may only \
 rewrite the text content and the `meta` (audio.meta.transcript / \
@@ -57,9 +69,6 @@ actually be correct given the new content.
 - For fill_blank: keep the SAME number of blanks; every `{{gap:N}}` marker in \
 text must stay and resolve to a question. (form_completion sections have no \
 `{{gap:N}}` — keep the per-blank label/prefix/postfix structure in question_data.)
-
-WHAT YOU CHANGE (scaled by K): passage/text content, transcripts/descriptions, \
-stems, option texts, fill-in answers, part_label/instructions wording.
 
 QUALITY BAR: every question must be answerable from this section's material \
 alone; distractors must be plausible-but-wrong with exactly one correct option; \
@@ -227,12 +236,14 @@ def render_generate_user_message(payload: dict[str, Any], *, k: int) -> str:
         if retry else ""
     )
     return (
-        f"{K_INSTRUCTIONS[k]}\n\n"
+        f"VARIATION LEVEL — {K_INSTRUCTIONS[k]}\n\n"
         f"Exam context: level={ctx.get('level')}, skill={ctx.get('skill')}, "
         f"title={ctx.get('title')!r}.\n\n"
         f"{_admin_blocks(payload)}{retry_block}"
-        "Rewrite the SOURCE SECTION below following all invariants. Return the "
-        "result via the `emit_section` tool. Each question MUST stay an object "
+        "Produce a NEW section from the SOURCE below: APPLY the variation level "
+        "above (genuinely change the content that much — do not just swap names "
+        "unless K=1) while keeping every structural invariant. Return the result "
+        "via the `emit_section` tool. Each question MUST stay an object "
         "with `question_type` and a `question_data` object using the SAME keys as "
         "the source (e.g. stem/options/correct_index) — never flatten or omit the "
         "`question_data` wrapper. Keep materials in the same order/type.\n\n"
