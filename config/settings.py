@@ -63,8 +63,14 @@ class Settings(BaseSettings):
         default="https://openrouter.ai/api/v1", alias="OPENROUTER_BASE_URL"
     )
 
+    # Groq — also OpenAI-compatible (direct, not via OpenRouter)
+    groq_api_key: Optional[str] = Field(default=None, alias="GROQ_API_KEY")
+    groq_base_url: str = Field(
+        default="https://api.groq.com/openai/v1", alias="GROQ_BASE_URL"
+    )
+
     # Text generation (docs/exam-ai-generation/)
-    ai_provider: str = Field(default="openrouter", alias="AI_PROVIDER")  # openrouter | anthropic
+    ai_provider: str = Field(default="openrouter", alias="AI_PROVIDER")  # openrouter | groq | anthropic
     anthropic_api_key: Optional[str] = Field(default=None, alias="ANTHROPIC_API_KEY")
     ai_model: str = Field(default="anthropic/claude-sonnet-4.5", alias="AI_MODEL")
     ai_max_tokens: int = Field(default=8000, alias="AI_MAX_TOKENS")
