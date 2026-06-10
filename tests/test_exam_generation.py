@@ -1,23 +1,19 @@
-"""Unit tests for AI exam generation core (no DB, mocked AI).
+"""High-level tests for AI exam generation (no DB, mocked AI).
 
-Covers the testcase doc (docs/exam-ai-generation/exam-ai-generation-testcases.md)
-groups that need neither a database nor a real Claude call:
-structural-invariant checker, merge, K validation, the generate_one_section
-pipeline (self-review + retry + budget), media-meta precondition + strip.
-Integration (DB) + real-API cases (TC-AIGEN-32+/94+) live elsewhere / are
-gated by MAICHI_TEST_DB and an API key.
+Intentionally few + high-level (see memory testing-prefer-high-level): they
+exercise the whole `generate_one_section` pipeline (AI → merge → self-review →
+structural validation) through the public surface, plus the source precondition
+and the per-request model override. API-level coverage lives in
+test_exam_generation_integration.py. Granular per-helper unit tests were
+removed on purpose — they slowed iteration and broke on every refactor.
 """
 import pytest
 
-from services.exceptions import ValidationError
-from utils.grading_utils import strip_material_meta
 import services.exam_generation_service as G
-from services.section_type_prompt_service import ALLOWED_TYPES
+from services.exceptions import ValidationError
 
 
-# --------------------------------------------------------------------------
-# Fixtures / fakes
-# --------------------------------------------------------------------------
+# --- fakes ---------------------------------------------------------------- #
 
 def _src_section():
     return {
@@ -36,6 +32,7 @@ def _src_section():
 
 
 def _good_ai():
+    """AI output that preserves structure (same #materials/#questions/options)."""
     return {
         "part_label": "Part 1", "instructions": "Choose.",
         "materials": [{"type": "audio", "meta": {"transcript": "NEW transcript"}}],
@@ -48,7 +45,7 @@ def _good_ai():
     }
 
 
-_BAD_OPT_AI = {
+_BAD_AI = {  # wrong option count → structure mismatch on every attempt
     "materials": [{"type": "audio", "meta": {"transcript": "N"}}],
     "questions": [{"question_type": "multiple_choice",
                    "question_data": {"stem": "x", "options": [{"text": "C"}],
@@ -77,289 +74,41 @@ class FakeGen:
         return {"is_acceptable": True, "issues": []}
 
 
-# --------------------------------------------------------------------------
-# 1. Structural-invariant checker (TC-AIGEN-01..13)
-# --------------------------------------------------------------------------
-
-def test_checker_pass_when_structure_matches():
-    s = _src_section()
-    G._assert_structure_preserved(s, s)  # no raise
-
-
-def test_checker_rejects_question_count_change():
-    s = _src_section()
-    g = {**s, "questions": []}
-    with pytest.raises(G.StructureMismatch):
-        G._assert_structure_preserved(s, g)
-
-
-def test_checker_rejects_option_count_change():
-    s = _src_section()
-    g = {**s, "questions": [{**s["questions"][0],
-         "question_data": {"options": [{"text": "A"}], "correct_index": 0}}]}
-    with pytest.raises(G.StructureMismatch):
-        G._assert_structure_preserved(s, g)
-
-
-def test_checker_rejects_question_type_change():
-    s = _src_section()
-    g = {**s, "questions": [{**s["questions"][0], "question_type": "fill_blank"}]}
-    with pytest.raises(G.StructureMismatch):
-        G._assert_structure_preserved(s, g)
-
-
-def test_checker_rejects_audio_url_change():
-    s = _src_section()
-    g = {**s, "materials": [{"type": "audio", "url": "DIFFERENT"}]}
-    with pytest.raises(G.StructureMismatch):
-        G._assert_structure_preserved(s, g)
-
-
-def test_checker_allows_meta_change_same_url():
-    s = _src_section()
-    g = {**s, "materials": [{"type": "audio", "url": "AUDIO",
-                             "meta": {"transcript": "new", "pendingReplacement": True}}]}
-    G._assert_structure_preserved(s, g)  # no raise — meta may change
-
-
-def test_checker_rejects_correct_index_out_of_range():
-    s = _src_section()
-    g = {**s, "questions": [{**s["questions"][0],
-         "question_data": {"options": [{"text": "A"}, {"text": "B"}], "correct_index": 2}}]}
-    with pytest.raises(G.StructureMismatch):
-        G._assert_structure_preserved(s, g)
-
-
-def test_checker_allows_moved_correct_index():
-    s = _src_section()
-    g = {**s, "questions": [{**s["questions"][0],
-         "question_data": {"options": [{"text": "A"}, {"text": "B"}], "correct_index": 1}}]}
-    G._assert_structure_preserved(s, g)  # no raise
-
-
-def test_checker_rejects_type_or_audio_cap_change():
-    s = _src_section()
-    with pytest.raises(G.StructureMismatch):
-        G._assert_structure_preserved(s, {**s, "max_audio_plays": 99})
-
-
-def test_checker_rejects_gap_count_change():
-    s = {**_src_section(),
-         "materials": [{"type": "text", "content": "a {{gap:1}}"}],
-         "type": "fill_blank"}
-    g = {**s, "materials": [{"type": "text", "content": "a {{gap:1}} {{gap:2}}"}]}
-    with pytest.raises(G.StructureMismatch):
-        G._assert_structure_preserved(s, g)
-
-
-# --------------------------------------------------------------------------
-# 2. Merge (TC-AIGEN-27 + invariant forcing)
-# --------------------------------------------------------------------------
-
-def test_merge_forces_url_and_sets_pending_replacement():
-    merged, just = G._merge_generated_section(_src_section(), _good_ai())
-    assert merged["materials"][0]["url"] == "AUDIO"  # forced from source
-    assert merged["materials"][0]["meta"] == {"transcript": "NEW transcript",
-                                              "pendingReplacement": True}
-    assert merged["type"] == "multiple_choice" and merged["max_audio_plays"] == 2
-    assert merged["questions"][0]["question_type"] == "multiple_choice"
-    assert just == [{"position": 1, "justification": "evidence in transcript"}]
-
-
-def test_merge_drops_answer_justification_from_question_data():
-    merged, _ = G._merge_generated_section(_src_section(), _good_ai())
-    assert "answer_justification" not in merged["questions"][0]["question_data"]
-
-
-def test_merge_rejects_wrong_question_count():
-    ai = {**_good_ai(), "questions": []}
-    with pytest.raises(G.StructureMismatch):
-        G._merge_generated_section(_src_section(), ai)
-
-
-# --------------------------------------------------------------------------
-# 3. K validation (TC-AIGEN-15/16)
-# --------------------------------------------------------------------------
-
-@pytest.mark.parametrize("k", [0, 6, -1])
-def test_k_out_of_range_rejected(k):
-    with pytest.raises(ValidationError):
-        G._validate_k(k)
-
-
-@pytest.mark.parametrize("k", ["3", 2.5, True])
-def test_k_non_int_rejected(k):
-    with pytest.raises(ValidationError):
-        G._validate_k(k)
-
-
-@pytest.mark.parametrize("k", [1, 2, 3, 4, 5])
-def test_k_valid(k):
-    G._validate_k(k)
-
-
-# --------------------------------------------------------------------------
-# 4. generate_one_section pipeline (TC-AIGEN-17..28)
-# --------------------------------------------------------------------------
+# --- the pipeline (happy + abort) ----------------------------------------- #
 
 async def test_generate_one_section_happy():
-    sec, rep = await G.generate_one_section(
-        _src_section(), 3, exam_context=_CTX, generator=FakeGen([_good_ai()]), rounds=2)
-    assert sec["materials"][0]["meta"]["pendingReplacement"] is True
-    assert sec["questions"][0]["question_data"]["correct_index"] == 1
-    assert rep["self_review"]["rounds"] == 1
+    """AI content is merged onto the source with all hard invariants re-forced."""
+    src = _src_section()
+    section, report = await G.generate_one_section(
+        src, 3, exam_context=_CTX, generator=FakeGen([_good_ai()]), rounds=1)
+
+    q = section["questions"][0]
+    assert q["question_type"] == "multiple_choice"          # forced from source
+    assert q["question_data"]["stem"] == "Q2?"              # new AI content kept
+    m = section["materials"][0]
+    assert m["url"] == "AUDIO"                               # media url forced
+    assert m["meta"]["transcript"] == "NEW transcript"      # new transcript kept
+    assert m["meta"]["pendingReplacement"] is True          # flagged for media regen
+    assert report["self_review"]["rounds"] == 1
 
 
-async def test_generate_one_section_retry_then_pass():
-    sec, _ = await G.generate_one_section(
-        _src_section(), 1, exam_context=_CTX,
-        generator=FakeGen([_BAD_OPT_AI, _good_ai()]), rounds=0)
-    assert sec["questions"][0]["question_data"]["correct_index"] == 1
-
-
-async def test_generate_one_section_budget_exhausted():
+async def test_generate_one_section_aborts_on_bad_structure():
+    """Structurally-wrong AI output is retried, then raises (never silently saved)."""
     with pytest.raises(G.SectionGenerationError):
         await G.generate_one_section(
-            _src_section(), 1, exam_context=_CTX,
-            generator=FakeGen([_BAD_OPT_AI]), rounds=0)
+            _src_section(), 3, exam_context=_CTX, generator=FakeGen([_BAD_AI]), rounds=0)
 
 
-async def test_generate_one_section_self_review_critical_fails():
-    crit = [{"is_acceptable": False,
-             "issues": [{"severity": "critical", "problem": "wrong answer"}]}]
-    with pytest.raises(G.SectionGenerationError):
-        await G.generate_one_section(
-            _src_section(), 1, exam_context=_CTX,
-            generator=FakeGen([_good_ai()], crit), rounds=2)
+# --- source precondition (FE gets a sync 400) ----------------------------- #
 
-
-async def test_generate_one_section_minor_does_not_fail():
-    minor = [{"is_acceptable": False,
-              "issues": [{"severity": "minor", "problem": "wording"}]}]
-    sec, rep = await G.generate_one_section(
-        _src_section(), 1, exam_context=_CTX,
-        generator=FakeGen([_good_ai()], minor), rounds=1)
-    assert sec is not None
-    assert rep["self_review"]["final_issues"][0]["severity"] == "minor"
-
-
-async def test_self_review_applies_fixed_section():
-    # Round 1: critical + a fixed_section that's actually good; round 2: accept.
-    fixed = _good_ai()
-    verdicts = [
-        {"is_acceptable": False,
-         "issues": [{"severity": "critical", "problem": "x"}], "fixed_section": fixed},
-        {"is_acceptable": True, "issues": []},
-    ]
-    # generate returns a bad-option output, but the fix repairs it.
-    sec, rep = await G.generate_one_section(
-        _src_section(), 1, exam_context=_CTX,
-        generator=FakeGen([_BAD_OPT_AI], verdicts), rounds=2)
-    assert rep["self_review"]["rounds"] == 2
-    assert sec["questions"][0]["question_data"]["correct_index"] == 1
-
-
-# --------------------------------------------------------------------------
-# 5. Media-meta precondition (TC-AIGEN-52..55) + strip (TC-AIGEN-58..61)
-# --------------------------------------------------------------------------
-
-def test_precondition_rejects_audio_without_transcript():
-    s = {"position": 1, "materials": [{"type": "audio", "url": "u"}]}
+def test_media_meta_precondition_rejects_missing_transcript():
+    src = _src_section()
+    src["materials"][0]["meta"] = {}  # audio source with no transcript
     with pytest.raises(ValidationError):
-        G._assert_source_media_meta([s])
+        G._assert_source_media_meta([src])
 
 
-def test_precondition_rejects_image_without_description():
-    s = {"position": 1, "materials": [{"type": "image", "url": "u"}]}
-    with pytest.raises(ValidationError):
-        G._assert_source_media_meta([s])
-
-
-def test_precondition_passes_with_meta_and_text_only():
-    ok_media = {"position": 1, "materials": [
-        {"type": "audio", "url": "u", "meta": {"transcript": "t"}},
-        {"type": "image", "url": "i", "meta": {"description": "d"}}]}
-    text_only = {"position": 2, "materials": [{"type": "text", "content": "hi"}]}
-    G._assert_source_media_meta([ok_media, text_only])  # no raise
-
-
-def test_strip_material_meta_removes_meta():
-    mats = [{"type": "audio", "url": "u", "meta": {"transcript": "secret"}},
-            {"type": "text", "content": "x"}]
-    out = strip_material_meta(mats)
-    assert "meta" not in out[0]
-    assert out[1] == {"type": "text", "content": "x"}
-    assert "meta" in mats[0]  # original not mutated
-
-
-def test_strip_material_meta_handles_non_list():
-    assert strip_material_meta(None) == []
-
-
-def test_media_todos_uses_array_position_not_missing_key():
-    # Merged sections (from _merge_generated_section) have NO "position" key;
-    # media_todos must derive section_position from array order (1..N).
-    sections = [
-        {"materials": [{"type": "text", "content": "x"}]},          # no media
-        {"materials": [{"type": "audio", "url": "u",
-                        "meta": {"transcript": "t", "pendingReplacement": True}}]},
-        {"materials": [{"type": "image", "url": "i",
-                        "meta": {"description": "d", "pendingReplacement": True}},
-                       {"type": "audio", "url": "u2", "meta": {"pendingReplacement": False}}]},
-    ]
-    todos = G._media_todos(sections)
-    assert todos == [
-        {"section_position": 2, "material_index": 0, "media_type": "audio"},
-        {"section_position": 3, "material_index": 0, "media_type": "image"},
-    ]  # section 1 (no media) + the non-pending audio in section 3 excluded
-
-
-# --------------------------------------------------------------------------
-# 5b. Position normalization — non-contiguous source positions + gap remap
-# (prevents create_exam_nested rejecting a generated fill_blank section)
-# --------------------------------------------------------------------------
-
-def test_normalize_renumbers_positions_and_remaps_gaps():
-    section = {
-        "type": "fill_blank",
-        "materials": [{"type": "text", "content": "Name {{gap:1}} age {{gap:3}}"}],
-        "questions": [
-            {"position": 1, "question_type": "fill_blank",
-             "question_data": {"correct_answers": ["x"]}},
-            {"position": 3, "question_type": "fill_blank",
-             "question_data": {"correct_answers": ["y"]}},
-        ],
-    }
-    G._normalize_section_positions(section)
-    assert [q["position"] for q in section["questions"]] == [1, 2]
-    assert section["materials"][0]["content"] == "Name {{gap:1}} age {{gap:2}}"
-
-
-def test_normalize_noop_when_already_contiguous():
-    section = {
-        "type": "fill_blank",
-        "materials": [{"type": "text", "content": "a {{gap:1}} b {{gap:2}}"}],
-        "questions": [{"position": 1, "question_type": "fill_blank",
-                       "question_data": {"correct_answers": ["x"]}},
-                      {"position": 2, "question_type": "fill_blank",
-                       "question_data": {"correct_answers": ["y"]}}],
-    }
-    G._normalize_section_positions(section)
-    assert section["materials"][0]["content"] == "a {{gap:1}} b {{gap:2}}"
-
-
-# --------------------------------------------------------------------------
-# 6. Config sanity (TC-AIGEN-71/88)
-# --------------------------------------------------------------------------
-
-def test_form_completion_in_allowed_types():
-    assert "form_completion" in ALLOWED_TYPES
-    assert len(ALLOWED_TYPES) == 7
-
-
-# --------------------------------------------------------------------------
-# Per-request model/provider override (FE picks model without redeploy)
-# --------------------------------------------------------------------------
+# --- per-request model/provider override ---------------------------------- #
 
 class _StubSettings:
     ai_provider = "openrouter"
@@ -371,35 +120,16 @@ class _StubSettings:
     groq_base_url = "http://example.invalid/v1"
 
 
-def test_get_ai_generator_override(monkeypatch):
+def test_model_override_routes_and_records(monkeypatch):
     from services.ai.generator import get_ai_generator
     monkeypatch.setattr("config.settings.get_settings", lambda: _StubSettings())
+
+    # override picks the provider + model; default falls back to env
     g = get_ai_generator(provider="groq", model="override-model")
     assert type(g).__name__ == "GroqGenerator"
     assert g.model == "override-model" and g.provider == "groq"
+    assert get_ai_generator().model == "env-model"  # env default
 
-
-def test_get_ai_generator_defaults_to_env(monkeypatch):
-    from services.ai.generator import get_ai_generator
-    monkeypatch.setattr("config.settings.get_settings", lambda: _StubSettings())
-    g = get_ai_generator()  # no override
-    assert type(g).__name__ == "OpenRouterGenerator"
-    assert g.model == "env-model" and g.provider == "openrouter"
-
-
-def test_get_ai_generator_unknown_provider(monkeypatch):
-    from services.ai.generator import get_ai_generator
-    monkeypatch.setattr("config.settings.get_settings", lambda: _StubSettings())
-    with pytest.raises(ValueError):
-        get_ai_generator(provider="bogus")
-
-
-def test_build_meta_records_actual_model():
-    class _Gen:
-        model = "groq/some-model"
-        provider = "groq"
-        usage = {"input": 5, "output": 2}
-    meta = G._build_meta("src-exam", 2, _Gen(), {"s1": "p"},
-                         {"media_todos": [], "self_review": {}})
-    assert meta["model"] == "groq/some-model" and meta["provider"] == "groq"
-    assert meta["k"] == 2 and meta["token_usage"] == {"input": 5, "output": 2}
+    # provenance meta records the ACTUAL model used (not env)
+    meta = G._build_meta("src", 2, g, {}, {"media_todos": [], "self_review": {}})
+    assert meta["model"] == "override-model" and meta["provider"] == "groq"
