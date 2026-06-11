@@ -17,6 +17,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 import time
 
@@ -88,7 +89,10 @@ async def main() -> None:
     try:
         from services.exam_generation_service import exam_generation_service as svc
         for i, (sid, k, provider, model, version) in enumerate(runs, 1):
-            tag = f"{sid[:8]}_{(model or provider).replace('/', '-')}_k{k}_{version}"
+            # run index prefix → unique even for repeated combos; sanitize →
+            # Windows-safe for model ids containing ':' etc. (review M3)
+            raw = f"{sid[:8]}_{model or provider}_k{k}_{version}"
+            tag = f"{i:02d}_" + re.sub(r"[^A-Za-z0-9._-]", "-", raw)
             print(f"[{i}/{len(runs)}] {tag} ({model}) ...", flush=True)
             r = await _run_one(svc, sid, k, provider, model, version, args.rounds)
             r.update({"section_id": sid, "k": k, "provider": provider,

@@ -426,7 +426,18 @@ class AttemptService:
                        e.title AS exam_title, e.level AS exam_level,
                        e.skill AS exam_skill,
                        (SELECT COUNT(*) FROM public.answers ans
-                          WHERE ans.attempt_id = a.id)::int AS saved_answer_count
+                          WHERE ans.attempt_id = a.id)::int AS saved_answer_count,
+                       -- answered = rows holding an actual value; a save that
+                       -- cleared the answer to null keeps its row, so
+                       -- saved_answer_count overcounts "questions done"
+                       (SELECT COUNT(*) FROM public.answers ans
+                          WHERE ans.attempt_id = a.id
+                            AND ans.student_answer IS NOT NULL)::int AS answered_count,
+                       (SELECT COUNT(*) FROM public.questions q
+                          JOIN public.sections s ON s.id = q.section_id
+                          WHERE s.exam_id = a.exam_id
+                            AND q.deleted_at IS NULL
+                            AND s.deleted_at IS NULL)::int AS total_questions
                 FROM public.attempts a
                 JOIN public.exams e ON e.id = a.exam_id
                 WHERE a.user_id = $1
@@ -446,6 +457,8 @@ class AttemptService:
             "mode": row["mode"],
             "startedAt": row["started_at"].isoformat() if row["started_at"] else None,
             "savedAnswerCount": row["saved_answer_count"],
+            "answeredCount": row["answered_count"],
+            "totalQuestions": row["total_questions"],
         }
 
     async def _enforce_tier_limit(self, conn, user_id: str) -> None:

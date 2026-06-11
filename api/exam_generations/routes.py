@@ -209,6 +209,21 @@ async def list_models(provider: str | None = Query(default=None)):
     return {"provider": provider, "models": sorted(m.id for m in listed.data)}
 
 
+@admin_router.get("/model-catalog")
+async def model_catalog():
+    """Curated model list for the FE generation dropdown.
+
+    Short hand-picked list (provider + model + label + note) of combos
+    verified with the pipeline, plus the currently-effective default
+    (ai-settings DB override or env). Edit the list in ONE place:
+    services/ai/catalog.py. For the full raw provider listing use
+    GET /models. Declared BEFORE /{job_id} so it isn't shadowed.
+    """
+    from services.ai.catalog import get_model_catalog
+
+    return await get_model_catalog()
+
+
 @admin_router.get("/{job_id}", response_model=JobView)
 async def get_job(job_id: str):
     try:
@@ -251,11 +266,13 @@ async def save_assembled_exam(
     request: AssembleRequest,
     current_user: dict = Depends(get_current_user),
 ):
+    _check_prompt_version(request.promptVersion)
     try:
         result = await exam_generation_service.assemble_generated_exam(
             request.sourceExamId, request.sections, title=request.title,
             created_by=await _admin_id(current_user), k=request.k,
             section_prompts=request.sectionPrompts,
+            prompt_version=request.promptVersion,
         )
     except NotFoundError as e:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(e))

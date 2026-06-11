@@ -260,8 +260,13 @@ def _validate_prompt_version(version: Optional[str]) -> str:
 _WORD = re.compile(r"[a-zA-Z']+")
 
 
-def _bigram_set(text: Optional[str]) -> set:
-    words = _WORD.findall(_GAP_MARKER.sub(" ", (text or "").lower()))
+def _safe_text(value: Any) -> str:
+    """jsonb fields are untrusted — anything non-string counts as empty."""
+    return value if isinstance(value, str) else ""
+
+
+def _bigram_set(text: Any) -> set:
+    words = _WORD.findall(_GAP_MARKER.sub(" ", _safe_text(text).lower()))
     if len(words) < 2:
         return set(words)
     return {(words[i], words[i + 1]) for i in range(len(words) - 1)}
@@ -299,11 +304,16 @@ def compute_verbatim_overlap(
             ))
 
     def _question_text(q: dict[str, Any]) -> str:
-        qd = q.get("question_data") or {}
-        parts = [str(qd.get("stem") or "")]
-        for o in qd.get("options") or []:
-            if isinstance(o, dict) and o.get("text"):
-                parts.append(str(o["text"]))
+        qd = q.get("question_data") if isinstance(q.get("question_data"), dict) else {}
+        parts = [_safe_text(qd.get("stem"))]
+        for o in qd.get("options") or []:  # MC + matching (shared shape)
+            if isinstance(o, dict):
+                parts.append(_safe_text(o.get("text")))
+        # fill_blank / form_completion: answers + per-blank presentation text
+        for ans in qd.get("correct_answers") or []:
+            parts.append(_safe_text(ans))
+        for key in ("label", "prefix", "postfix"):
+            parts.append(_safe_text(qd.get(key)))
         return " ".join(p for p in parts if p)
 
     sq, gq = source.get("questions") or [], generated.get("questions") or []
@@ -316,12 +326,15 @@ def compute_verbatim_overlap(
     total_w = 0
     mx = 0.0
     for path, a, b in pairs:
+        src_words = len(_WORD.findall(_safe_text(a).lower()))
+        if src_words == 0:
+            # nothing measurable on the source side — recording a 0.0 with
+            # weight would silently dilute weighted_avg (review finding H2)
+            continue
         ov = _jaccard(_bigram_set(a), _bigram_set(b))
-        src_words = len(_WORD.findall((a or "").lower()))
         fields.append({"path": path, "overlap": round(ov, 3), "src_words": src_words})
-        w = max(src_words, 1)
-        weighted += ov * w
-        total_w += w
+        weighted += ov * src_words
+        total_w += src_words
         mx = max(mx, ov)
     return {
         "max": round(mx, 3),
@@ -414,11 +427,17 @@ async def generate_one_section(
                                 if i.get("severity") == "critical")
                 )
             _validate_section_structure(source_section, section)
+            try:
+                overlap = compute_verbatim_overlap(source_section, section)
+            except Exception:  # noqa: BLE001 — shadow metric must NEVER fail a job
+                logger.warning("verbatim-overlap metric failed (ignored)", exc_info=True)
+                overlap = {"max": None, "weighted_avg": None, "fields": [],
+                           "error": "metric_failed"}
             return section, {
                 "self_review": review,
                 "justifications": justifications,
                 "prompt_version": version,
-                "verbatim_overlap": compute_verbatim_overlap(source_section, section),
+                "verbatim_overlap": overlap,
             }
         except (StructureMismatch, ValidationError) as e:
             last_err = str(e)
@@ -742,9 +761,15 @@ class ExamGenerationService:
         self, source_exam_id: str, sections: list[dict[str, Any]], *,
         title: Optional[str] = None, created_by: Optional[str] = None,
         k: Optional[int] = None, section_prompts: Optional[dict[str, str]] = None,
+        prompt_version: Optional[str] = None,
     ) -> dict[str, Any]:
         if not sections:
             raise ValidationError("sections must not be empty")
+        # Provenance only — assemble never calls AI. None = FE didn't say
+        # (parts may even mix versions); do NOT default to v1 here, that
+        # would fabricate provenance.
+        if prompt_version is not None:
+            prompt_version = _validate_prompt_version(prompt_version)
         async with self.db.acquire() as conn:
             src = await conn.fetchrow(
                 "SELECT title, level, skill, duration_minutes, description FROM "
@@ -759,6 +784,7 @@ class ExamGenerationService:
 
         meta = {
             "source_exam_id": source_exam_id, "k": k, "via": "assemble",
+            "prompt_version": prompt_version,
             "section_prompts": section_prompts or {},
             "media_todos": _media_todos(sections),
         }

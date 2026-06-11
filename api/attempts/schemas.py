@@ -159,7 +159,22 @@ class ActiveAttemptData(BaseModel):
     examSkill: str
     mode: AttemptMode = "practice"
     startedAt: Optional[str] = None
-    savedAnswerCount: int = 0
+    savedAnswerCount: int = Field(
+        default=0,
+        description="Saved answer ROWS (includes answers cleared back to null). "
+        "Kept for backward-compat — for a progress bar use answeredCount.",
+    )
+    answeredCount: int = Field(
+        default=0,
+        description="Questions with an actual saved value (student_answer "
+        "IS NOT NULL) — the 'questions done' number for the resume-card "
+        "progress bar.",
+    )
+    totalQuestions: int = Field(
+        default=0,
+        description="Active (non-deleted) questions in the exam — the "
+        "progress-bar denominator.",
+    )
 
 
 class ActiveAttemptResponse(BaseModel):

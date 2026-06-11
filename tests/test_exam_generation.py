@@ -178,6 +178,22 @@ async def test_pipeline_records_version_and_shadow_overlap():
             rounds=0, prompt_version="v999")
 
 
+def test_model_catalog_entries_are_valid():
+    """Curated catalog stays consistent with the provider registry —
+    a typo'd provider here would 500 the FE dropdown or fail every job."""
+    from services.ai.catalog import CURATED_MODELS
+    from services.ai.generator import KNOWN_PROVIDERS
+
+    assert CURATED_MODELS, "catalog must not be empty"
+    seen = set()
+    for entry in CURATED_MODELS:
+        assert entry["provider"] in KNOWN_PROVIDERS
+        assert entry["model"] and entry["label"]
+        key = (entry["provider"], entry["model"])
+        assert key not in seen, f"duplicate catalog entry {key}"
+        seen.add(key)
+
+
 def test_verbatim_overlap_metric_separates_copy_from_rewrite():
     """1.0 on a verbatim copy, low on a genuine rewrite; gap markers ignored."""
     src = {

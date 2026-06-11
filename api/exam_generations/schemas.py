@@ -64,6 +64,11 @@ class AssembleRequest(BaseModel):
     k: Optional[int] = Field(default=None, ge=1, le=5)
     sections: list[dict[str, Any]] = Field(..., min_length=1)
     sectionPrompts: Optional[dict[str, str]] = None
+    promptVersion: Optional[str] = Field(
+        default=None,
+        description="Prompt version the parts were generated with (provenance "
+        "for generation_meta). Unknown version → 400.",
+    )
 
 
 class JobAcceptedResponse(BaseModel):
