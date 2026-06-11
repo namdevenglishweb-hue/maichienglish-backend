@@ -139,8 +139,8 @@ def test_model_override_routes_and_records(monkeypatch):
 
 def test_prompt_version_registry_resolves_and_rejects():
     from services.ai import prompts
-    assert prompts.get_prompt_version(None).name == "v1"     # default
-    assert prompts.get_prompt_version("v2").name == "v2"
+    assert prompts.get_prompt_version(None).name == "v2"     # default (promoted 2026-06-11)
+    assert prompts.get_prompt_version("v1").name == "v1"     # legacy opt-out stays selectable
     with pytest.raises(ValueError):
         prompts.get_prompt_version("v999")
 

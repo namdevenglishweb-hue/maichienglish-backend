@@ -347,8 +347,8 @@ class PromptVersion:
 PROMPT_VERSIONS: dict[str, PromptVersion] = {
     "v1": PromptVersion(
         name="v1",
-        description="Baseline (production default) — verify judges the "
-                    "generated section alone.",
+        description="Legacy baseline — verify judges the generated section "
+                    "alone (no source). Kept selectable as fallback.",
         system_generate=SYSTEM_PROMPT_GENERATE,
         system_verify=SYSTEM_PROMPT_VERIFY,
         render_generate=lambda payload, k: render_generate_user_message(payload, k=k),
@@ -356,8 +356,9 @@ PROMPT_VERSIONS: dict[str, PromptVersion] = {
     ),
     "v2": PromptVersion(
         name="v2",
-        description="Anti-clone candidate — verify also receives the source "
-                    "section + K directive and flags/fixes near-copies.",
+        description="Anti-clone (production default since 2026-06-11) — verify "
+                    "also receives the source section + K directive and "
+                    "flags/fixes near-copies.",
         system_generate=SYSTEM_PROMPT_GENERATE,  # unchanged: K scale awaits client
         system_verify=SYSTEM_PROMPT_VERIFY_V2,
         render_generate=lambda payload, k: render_generate_user_message(payload, k=k),
@@ -365,7 +366,10 @@ PROMPT_VERSIONS: dict[str, PromptVersion] = {
     ),
 }
 
-DEFAULT_PROMPT_VERSION = "v1"
+# Promoted v1 → v2 on 2026-06-11 after A/B (v2 lower weighted-avg overlap in
+# 5/6 paired runs; judge with source context catches name-only clones). v1
+# stays in the registry as an explicit opt-out (promptVersion: "v1").
+DEFAULT_PROMPT_VERSION = "v2"
 
 
 def get_prompt_version(name: Optional[str] = None) -> PromptVersion:
