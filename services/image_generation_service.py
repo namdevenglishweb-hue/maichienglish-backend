@@ -57,12 +57,20 @@ async def generate_one_image(
     last_reason = "unknown"
 
     for attempt in range(1, attempts + 1):
+        # Feed the reviewer's rejection back into the retry — regenerating
+        # with the identical prompt mostly reproduces the identical failure
+        # (mirrors exam-gen's retry_error mechanism).
+        desc = description if attempt == 1 else (
+            f"{description}\n\nYOUR PREVIOUS IMAGE WAS REJECTED by the reviewer "
+            f"for this reason: {last_reason}. Generate a new image that fixes "
+            "exactly that problem."
+        )
         if mode == "edit":
             img, mime = await gen.edit_image(
-                source_image_url, description, exam_context=exam_context
+                source_image_url, desc, exam_context=exam_context
             )
         else:
-            img, mime = await gen.generate_image(description, exam_context=exam_context)
+            img, mime = await gen.generate_image(desc, exam_context=exam_context)
 
         if verify_rounds == 0:
             url = await store.upload_bytes("images", mime, img)

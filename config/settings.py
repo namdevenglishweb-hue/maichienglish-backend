@@ -88,8 +88,11 @@ class Settings(BaseSettings):
         default=False, alias="IMAGE_GENERATION_ENABLED"
     )
     image_provider: str = Field(default="openrouter", alias="IMAGE_PROVIDER")
+    # NOTE: the old "-preview" slug was retired from OpenRouter (404 "No
+    # endpoints found") — this GA slug is its replacement (verified live
+    # 2026-06-11 via scripts/smoke_image_gen.py).
     image_model: str = Field(
-        default="google/gemini-2.5-flash-image-preview", alias="IMAGE_MODEL"
+        default="google/gemini-2.5-flash-image", alias="IMAGE_MODEL"
     )
     image_verify_model: str = Field(
         default="google/gemini-2.5-flash", alias="IMAGE_VERIFY_MODEL"
