@@ -71,6 +71,43 @@ class AssembleRequest(BaseModel):
     )
 
 
+class ModelListResponse(BaseModel):
+    """GET /models — raw passthrough of every model id the provider offers.
+
+    Power-user listing (long, unlabeled). For the FE dropdown prefer
+    GET /model-catalog (curated + labels + default)."""
+
+    provider: str = Field(..., description="Provider that was queried (defaults to env).")
+    models: list[str] = Field(
+        default_factory=list,
+        description="Provider-reported model ids, sorted. Empty for providers "
+        "without a listing API (e.g. anthropic direct).",
+    )
+
+
+class ModelInfo(BaseModel):
+    """One curated model entry (services/ai/catalog.py — the single place to edit)."""
+
+    provider: str = Field(..., description="One of generator.KNOWN_PROVIDERS.")
+    model: str = Field(..., description="Provider-specific model id/slug.")
+    label: str = Field(..., description="Human-readable name for the dropdown.")
+    note: Optional[str] = Field(default=None, description="Caveat/hint shown in the picker.")
+
+
+class ModelDefault(BaseModel):
+    """The currently-effective default (per-request > ai-settings DB > env)."""
+
+    provider: str
+    model: str
+
+
+class ModelCatalogResponse(BaseModel):
+    """GET /model-catalog — curated picker list + effective default."""
+
+    default: ModelDefault
+    models: list[ModelInfo]
+
+
 class JobAcceptedResponse(BaseModel):
     jobId: str
     status: str = "pending"

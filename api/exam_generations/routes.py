@@ -29,6 +29,8 @@ from .schemas import (
     JobAcceptedResponse,
     JobListResponse,
     JobView,
+    ModelCatalogResponse,
+    ModelListResponse,
     PreviewRequest,
 )
 
@@ -177,7 +179,7 @@ async def generate_preview(
 # --------------------------------------------------------------------- #
 
 
-@admin_router.get("/models")
+@admin_router.get("/models", response_model=ModelListResponse)
 async def list_models(provider: str | None = Query(default=None)):
     """Available model ids for an OpenAI-compatible provider (FE dropdown).
 
@@ -209,7 +211,7 @@ async def list_models(provider: str | None = Query(default=None)):
     return {"provider": provider, "models": sorted(m.id for m in listed.data)}
 
 
-@admin_router.get("/model-catalog")
+@admin_router.get("/model-catalog", response_model=ModelCatalogResponse)
 async def model_catalog():
     """Curated model list for the FE generation dropdown.
 
