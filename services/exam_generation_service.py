@@ -16,6 +16,7 @@ and every result is re-validated in code (`_validate_section_structure`).
 """
 
 import logging
+import random as _random
 import re
 from typing import Any, Awaitable, Callable, Optional
 
@@ -384,6 +385,106 @@ def _media_todos(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Balanced answer-key shuffle — post-process by CODE, never by prompt.
+# Ported from the client amendment §6 (maichienglish-feature-ai-exam-generation,
+# lib/exam-gen/postprocess.ts): models cluster keys (A-A-A-A-A observed; a
+# prompt rule still clustered 3/5), and plain per-question Fisher-Yates still
+# puts 3/5 keys on one position ~37% of the time. So: rejection-sample target
+# key positions under a balance cap of ceil(n_questions/n_options) (5q/4opt =
+# max 2 per position), then Fisher-Yates the distractors into the other slots.
+# answer_justification references content, not positions — unaffected.
+# ---------------------------------------------------------------------------
+
+
+def shuffle_answer_keys(
+    section: dict[str, Any], *, rng: Optional[_random.Random] = None
+) -> dict[str, Any]:
+    """Reorder MC options in-place with a balanced key distribution.
+
+    Scope (by request): question_type == 'multiple_choice' ONLY — matching /
+    fill_blank / form_completion / writing / speaking are never touched.
+    For `multiple_choice_shared` sections every question shows the SAME
+    option table (the FE detects this via identical lists), so a single
+    shared permutation is applied instead of per-question shuffles.
+    Answers are preserved: only positions + correct_index move together.
+    """
+    rng = rng or _random
+    qds = []
+    for q in section.get("questions") or []:
+        if not isinstance(q, dict):
+            continue
+        qd = q.get("question_data")
+        if (
+            q.get("question_type") == "multiple_choice"
+            and isinstance(qd, dict)
+            and isinstance(qd.get("options"), list)
+            and len(qd["options"]) >= 2
+            and isinstance(qd.get("correct_index"), int)
+            and not isinstance(qd.get("correct_index"), bool)
+            and 0 <= qd["correct_index"] < len(qd["options"])
+        ):
+            qds.append(qd)
+    if not qds:
+        return section
+
+    if section.get("type") == "multiple_choice_shared":
+        first = qds[0]["options"]
+        if all(qd["options"] == first for qd in qds):
+            # One permutation for the whole shared table.
+            perm = list(range(len(first)))
+            rng.shuffle(perm)
+            shared = [first[i] for i in perm]
+            new_index_of_old = {old: new for new, old in enumerate(perm)}
+            for qd in qds:
+                qd["options"] = list(shared)
+                qd["correct_index"] = new_index_of_old[qd["correct_index"]]
+            return section
+        # degenerate shared section (differing lists) → per-question below
+
+    # Sample target key positions PER GROUP of equal option count. Sampling
+    # in range(max_options) and folding with `% len(opts)` skews and clusters
+    # the shorter lists (review finding: 4×2-option keys landed on one
+    # position in 66/2000 runs). Per-group sampling needs no modulo; for the
+    # normal uniform-count section there is exactly one group, so behaviour
+    # is unchanged.
+    groups: dict[int, list[dict[str, Any]]] = {}
+    for qd in qds:
+        groups.setdefault(len(qd["options"]), []).append(qd)
+
+    for n_opts, group in groups.items():
+        n = len(group)
+        cap = -(-n // n_opts)  # ceil — always satisfiable (cap*n_opts >= n)
+        targets: list[int] = []
+        for _ in range(1000):  # rejection sampling; loop is a seatbelt
+            candidate = [rng.randrange(n_opts) for _ in range(n)]
+            counts = [0] * n_opts
+            for t in candidate:
+                counts[t] += 1
+            if max(counts) <= cap:
+                targets = candidate
+                break
+        else:  # statistically unreachable (~0.37^1000) — keep property visible
+            logger.warning("shuffle_answer_keys: balance not reached in 1000 tries")
+            targets = candidate
+
+        for qd, t in zip(group, targets):
+            opts = qd["options"]
+            correct = opts[qd["correct_index"]]
+            distractors = [o for i, o in enumerate(opts) if i != qd["correct_index"]]
+            rng.shuffle(distractors)
+            merged_opts, d = [], 0
+            for i in range(len(opts)):
+                if i == t:
+                    merged_opts.append(correct)
+                else:
+                    merged_opts.append(distractors[d])
+                    d += 1
+            qd["options"] = merged_opts
+            qd["correct_index"] = t
+    return section
+
+
+# ---------------------------------------------------------------------------
 # Core — one section through the full pipeline (§2.1, §7, §8, §9.2)
 # ---------------------------------------------------------------------------
 
@@ -426,6 +527,10 @@ async def generate_one_section(
                     + "; ".join(i.get("problem", "") for i in review["final_issues"]
                                 if i.get("severity") == "critical")
                 )
+            # Post-process by code (all prompt versions): balanced key shuffle
+            # AFTER the final (possibly judge-fixed) section, BEFORE Tầng B so
+            # validation runs on the exact artifact that gets persisted.
+            shuffle_answer_keys(section)
             _validate_section_structure(source_section, section)
             try:
                 overlap = compute_verbatim_overlap(source_section, section)
