@@ -55,6 +55,17 @@ def _check_provider(provider: str | None) -> None:
         )
 
 
+def _check_prompt_version(version: str | None) -> None:
+    """400 on an unknown promptVersion override (registry-driven, like provider)."""
+    if version is None:
+        return
+    from services.ai import prompts as ai_prompts
+    try:
+        ai_prompts.get_prompt_version(version)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
 # --------------------------------------------------------------------- #
 # Create-job endpoints (202 + jobId, run in background)                  #
 # --------------------------------------------------------------------- #
@@ -70,6 +81,7 @@ async def generate_exam(
 ):
     """Mode 1 — generate a whole exam, all-or-nothing, auto-saved as a draft."""
     _check_provider(request.aiProvider)
+    _check_prompt_version(request.promptVersion)
     try:
         await exam_generation_service.precheck_exam_source(request.sourceExamId)
     except NotFoundError as e:
@@ -87,6 +99,7 @@ async def generate_exam(
         source_exam_id=request.sourceExamId, k=request.k, title=request.title,
         created_by=admin_id, section_prompts=request.sectionPrompts,
         model=request.aiModel, provider=request.aiProvider,
+        prompt_version=request.promptVersion,
     )
     return JobAcceptedResponse(jobId=job["jobId"], status=job["status"])
 
@@ -101,6 +114,7 @@ async def generate_section(
 ):
     """Mode 2 single part — returns the section payload in report.sections[0]."""
     _check_provider(request.aiProvider)
+    _check_prompt_version(request.promptVersion)
     try:
         await exam_generation_service.precheck_section_source(request.sourceSectionId)
     except NotFoundError as e:
@@ -121,6 +135,7 @@ async def generate_section(
         section_prompts={request.sourceSectionId: request.sectionPrompt}
         if request.sectionPrompt else None,
         model=request.aiModel, provider=request.aiProvider,
+        prompt_version=request.promptVersion,
     )
     return JobAcceptedResponse(jobId=job["jobId"], status=job["status"])
 
@@ -135,6 +150,7 @@ async def generate_preview(
 ):
     """Mode 2 — generate all parts at once, per-part status, NOT saved."""
     _check_provider(request.aiProvider)
+    _check_prompt_version(request.promptVersion)
     try:
         await exam_generation_service.precheck_exam_source(request.sourceExamId)
     except NotFoundError as e:
@@ -151,6 +167,7 @@ async def generate_preview(
         source_exam_id=request.sourceExamId, k=request.k,
         section_prompts=request.sectionPrompts,
         model=request.aiModel, provider=request.aiProvider,
+        prompt_version=request.promptVersion,
     )
     return JobAcceptedResponse(jobId=job["jobId"], status=job["status"])
 

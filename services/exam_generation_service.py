@@ -239,6 +239,97 @@ def _validate_k(k: Any) -> None:
         raise ValidationError(f"k must be an integer in [{prompts.MIN_K},{prompts.MAX_K}]")
 
 
+def _validate_prompt_version(version: Optional[str]) -> str:
+    """Resolve + validate a promptVersion (None → default). 400 at the route."""
+    try:
+        return prompts.get_prompt_version(version).name
+    except ValueError as e:
+        raise ValidationError(str(e))
+
+
+# ---------------------------------------------------------------------------
+# Verbatim-overlap metric — SHADOW MODE ONLY (pure, no AI, no enforcement).
+# Word-bigram Jaccard between the source's and the generated section's
+# content-bearing text (passages, transcripts, descriptions, stems+options).
+# Scaffolding ({{gap:N}} markers, urls, counts) is excluded — it must stay
+# identical by design and would inflate the score. Recorded in reports +
+# generation_meta so v1/v2 A/B runs produce comparable numbers; thresholds/
+# enforcement are deliberately NOT here yet (pending real-data tuning).
+# ---------------------------------------------------------------------------
+
+_WORD = re.compile(r"[a-zA-Z']+")
+
+
+def _bigram_set(text: Optional[str]) -> set:
+    words = _WORD.findall(_GAP_MARKER.sub(" ", (text or "").lower()))
+    if len(words) < 2:
+        return set(words)
+    return {(words[i], words[i + 1]) for i in range(len(words) - 1)}
+
+
+def _jaccard(a: set, b: set) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def compute_verbatim_overlap(
+    source: dict[str, Any], generated: dict[str, Any]
+) -> dict[str, Any]:
+    """Per-field overlap [0..1] + summary. 1.0 = verbatim copy of the source."""
+    pairs: list[tuple[str, Optional[str], Optional[str]]] = []
+    sm, gm = source.get("materials") or [], generated.get("materials") or []
+    for i, (s, g) in enumerate(zip(sm, gm)):
+        if not (isinstance(s, dict) and isinstance(g, dict)):
+            continue
+        t = s.get("type")
+        if t == "text":
+            pairs.append((f"materials[{i}].content", s.get("content"), g.get("content")))
+        elif t == "audio":
+            pairs.append((
+                f"materials[{i}].meta.transcript",
+                (s.get("meta") or {}).get("transcript"),
+                (g.get("meta") or {}).get("transcript"),
+            ))
+        elif t == "image":
+            pairs.append((
+                f"materials[{i}].meta.description",
+                (s.get("meta") or {}).get("description"),
+                (g.get("meta") or {}).get("description"),
+            ))
+
+    def _question_text(q: dict[str, Any]) -> str:
+        qd = q.get("question_data") or {}
+        parts = [str(qd.get("stem") or "")]
+        for o in qd.get("options") or []:
+            if isinstance(o, dict) and o.get("text"):
+                parts.append(str(o["text"]))
+        return " ".join(p for p in parts if p)
+
+    sq, gq = source.get("questions") or [], generated.get("questions") or []
+    for i, (s, g) in enumerate(zip(sq, gq)):
+        if isinstance(s, dict) and isinstance(g, dict):
+            pairs.append((f"questions[{i}]", _question_text(s), _question_text(g)))
+
+    fields: list[dict[str, Any]] = []
+    weighted = 0.0
+    total_w = 0
+    mx = 0.0
+    for path, a, b in pairs:
+        ov = _jaccard(_bigram_set(a), _bigram_set(b))
+        src_words = len(_WORD.findall((a or "").lower()))
+        fields.append({"path": path, "overlap": round(ov, 3), "src_words": src_words})
+        w = max(src_words, 1)
+        weighted += ov * w
+        total_w += w
+        mx = max(mx, ov)
+    return {
+        "max": round(mx, 3),
+        "weighted_avg": round(weighted / total_w, 3) if total_w else 0.0,
+        "fields": fields,
+    }
+
+
 def _normalize_section_positions(section: dict[str, Any]) -> dict[str, Any]:
     """Renumber active questions to a contiguous 1..N and remap `{{gap:N}}`
     markers in text materials to match.
@@ -293,15 +384,19 @@ async def generate_one_section(
     type_prompt: Optional[str] = None,
     section_prompt: Optional[str] = None,
     rounds: int = 2,
+    prompt_version: Optional[str] = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Produce one validated section, or raise SectionGenerationError.
 
     Returns (merged_section, section_report). The section_report has
-    `self_review` ({rounds, final_issues}) and `justifications`.
+    `self_review` ({rounds, final_issues}), `justifications`,
+    `prompt_version` and the shadow `verbatim_overlap` metric.
     """
+    version = _validate_prompt_version(prompt_version)
     payload = prompts.build_section_payload(
         source_section, exam_context,
         type_prompt=type_prompt, section_prompt=section_prompt,
+        prompt_version=version,
     )
     last_err = "unknown"
     review: dict[str, Any] = {"rounds": 0, "final_issues": []}
@@ -319,7 +414,12 @@ async def generate_one_section(
                                 if i.get("severity") == "critical")
                 )
             _validate_section_structure(source_section, section)
-            return section, {"self_review": review, "justifications": justifications}
+            return section, {
+                "self_review": review,
+                "justifications": justifications,
+                "prompt_version": version,
+                "verbatim_overlap": compute_verbatim_overlap(source_section, section),
+            }
         except (StructureMismatch, ValidationError) as e:
             last_err = str(e)
             payload = {**payload, "retry_error": last_err}
@@ -483,8 +583,10 @@ class ExamGenerationService:
         generator=None, rounds: Optional[int] = None,
         progress_cb: ProgressCb = None, dry_run: bool = False,
         model: Optional[str] = None, provider: Optional[str] = None,
+        prompt_version: Optional[str] = None,
     ) -> dict[str, Any]:
         _validate_k(k)
+        prompt_version = _validate_prompt_version(prompt_version)
         src = await self._load_exam_for_gen(source_exam_id)
         _assert_source_media_meta(src["sections"])
         gen, rounds = await _resolve_generation(generator, provider, model, rounds)
@@ -497,6 +599,7 @@ class ExamGenerationService:
             "sections_total": total, "sections_ok": 0, "sections": [],
             "self_review": {}, "media_todos": [], "token_usage": {},
             "section_prompts": section_prompts,
+            "prompt_version": prompt_version, "verbatim_overlap": {},
         }
         gen_sections: list[dict[str, Any]] = []
         for idx, sec in enumerate(src["sections"]):
@@ -512,7 +615,7 @@ class ExamGenerationService:
                     sec, k, exam_context=exam_context, generator=gen,
                     type_prompt=type_prompts.get(sec["type"]),
                     section_prompt=section_prompts.get(str(sec["id"])),
-                    rounds=rounds,
+                    rounds=rounds, prompt_version=prompt_version,
                 )
             except SectionGenerationError as e:
                 report["token_usage"] = getattr(gen, "usage", {})
@@ -526,6 +629,7 @@ class ExamGenerationService:
                 "position": new_pos, "source_position": sec["position"], "status": "ok",
             })
             report["self_review"][str(new_pos)] = srep["self_review"]
+            report["verbatim_overlap"][str(new_pos)] = srep["verbatim_overlap"]
 
         if len(gen_sections) != total:  # defensive (§9.3.3)
             raise GenerationAborted("generated section count mismatch", report)
@@ -537,7 +641,8 @@ class ExamGenerationService:
             report["new_exam_id"] = None
             report["dry_run"] = True
             return report
-        meta = _build_meta(source_exam_id, k, gen, section_prompts, report)
+        meta = _build_meta(source_exam_id, k, gen, section_prompts, report,
+                           prompt_version=prompt_version)
         result = await exam_service.create_exam_nested(
             title=title or f"{src['title']} (AI K{k})",
             level=src["level"], skill=src["skill"],
@@ -559,8 +664,10 @@ class ExamGenerationService:
         generator=None, rounds: Optional[int] = None,
         progress_cb: ProgressCb = None,
         model: Optional[str] = None, provider: Optional[str] = None,
+        prompt_version: Optional[str] = None,
     ) -> dict[str, Any]:
         _validate_k(k)
+        prompt_version = _validate_prompt_version(prompt_version)
         src = await self._load_exam_for_gen(source_exam_id)
         _assert_source_media_meta(src["sections"])
         gen, rounds = await _resolve_generation(generator, provider, model, rounds)
@@ -582,10 +689,11 @@ class ExamGenerationService:
                     sec, k, exam_context=exam_context, generator=gen,
                     type_prompt=type_prompts.get(sec["type"]),
                     section_prompt=section_prompts.get(str(sec["id"])),
-                    rounds=rounds,
+                    rounds=rounds, prompt_version=prompt_version,
                 )
                 entry.update({"status": "ok", "section": gsec,
-                              "self_review": srep["self_review"]})
+                              "self_review": srep["self_review"],
+                              "verbatim_overlap": srep["verbatim_overlap"]})
             except SectionGenerationError as e:
                 entry.update({"status": "failed", "reason": str(e)})  # per-part (§9.6)
             out.append(entry)
@@ -593,6 +701,7 @@ class ExamGenerationService:
             "sections": out, "sections_total": total,
             "sections_ok": sum(1 for e in out if e["status"] == "ok"),
             "token_usage": getattr(gen, "usage", {}),
+            "prompt_version": prompt_version,
         }
 
     async def generate_one_part(
@@ -600,9 +709,11 @@ class ExamGenerationService:
         section_prompt: Optional[str] = None, generator=None,
         rounds: Optional[int] = None,
         model: Optional[str] = None, provider: Optional[str] = None,
+        prompt_version: Optional[str] = None,
     ) -> dict[str, Any]:
         """Mode 2 single part — returns the generated section payload (no save)."""
         _validate_k(k)
+        prompt_version = _validate_prompt_version(prompt_version)
         section, exam_context = await self.load_section_for_gen(source_section_id)
         _assert_source_media_meta([section])
         gen, rounds = await _resolve_generation(generator, provider, model, rounds)
@@ -611,13 +722,16 @@ class ExamGenerationService:
             section, k, exam_context=exam_context, generator=gen,
             type_prompt=type_prompts.get(section["type"]),
             section_prompt=section_prompt, rounds=rounds,
+            prompt_version=prompt_version,
         )
         return {
             "sections": [{
                 "source_section_id": section["id"], "position": section["position"],
                 "status": "ok", "section": gsec, "self_review": srep["self_review"],
+                "verbatim_overlap": srep["verbatim_overlap"],
             }],
             "token_usage": getattr(gen, "usage", {}),
+            "prompt_version": prompt_version,
         }
 
     # ------------------------------------------------------------------
@@ -686,7 +800,8 @@ async def _resolve_generation(generator, provider, model, rounds):
     return generator, rounds
 
 
-def _build_meta(source_exam_id, k, gen, section_prompts, report) -> dict[str, Any]:
+def _build_meta(source_exam_id, k, gen, section_prompts, report, *,
+                prompt_version: Optional[str] = None) -> dict[str, Any]:
     from config.settings import get_settings
     s = get_settings()
     return {
@@ -694,9 +809,12 @@ def _build_meta(source_exam_id, k, gen, section_prompts, report) -> dict[str, An
         # actual provider/model used (FE override or env default), for provenance
         "provider": getattr(gen, "provider", s.ai_provider),
         "model": getattr(gen, "model", s.ai_model),
+        "prompt_version": prompt_version or prompts.DEFAULT_PROMPT_VERSION,
         "section_prompts": section_prompts,
         "media_todos": report.get("media_todos", []),
         "self_review": report.get("self_review", {}),
+        # shadow anti-clone metric (per new section position) — audit only
+        "verbatim_overlap": report.get("verbatim_overlap", {}),
         "token_usage": getattr(gen, "usage", {}),
     }
 

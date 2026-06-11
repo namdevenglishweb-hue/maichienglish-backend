@@ -181,6 +181,7 @@ async def run_generation_job(
     created_by: Optional[str] = None,
     section_prompts: Optional[dict[str, str]] = None,
     model: Optional[str] = None, provider: Optional[str] = None,
+    prompt_version: Optional[str] = None,
 ) -> None:
     """Drive one job to a terminal state. Swallows all errors into job status."""
     svc = generation_job_service
@@ -199,7 +200,7 @@ async def run_generation_job(
             report = await exam_generation_service.generate_similar_exam(
                 source_exam_id, k, created_by=created_by, title=title,
                 section_prompts=section_prompts, progress_cb=progress_cb,
-                model=model, provider=provider,
+                model=model, provider=provider, prompt_version=prompt_version,
             )
             await svc.finish(job_id, "succeeded", report=report,
                               result_exam_id=report.get("new_exam_id"))
@@ -207,13 +208,14 @@ async def run_generation_job(
             report = await exam_generation_service.generate_sections_preview(
                 source_exam_id, k, section_prompts=section_prompts,
                 progress_cb=progress_cb, model=model, provider=provider,
+                prompt_version=prompt_version,
             )
             await svc.finish(job_id, "succeeded", report=report)
         elif scope == "section":
             report = await exam_generation_service.generate_one_part(
                 target_section_id, k,
                 section_prompt=(section_prompts or {}).get(str(target_section_id)),
-                model=model, provider=provider,
+                model=model, provider=provider, prompt_version=prompt_version,
             )
             await svc.finish(job_id, "succeeded", report=report)
         else:

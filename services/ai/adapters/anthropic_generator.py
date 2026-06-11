@@ -37,18 +37,20 @@ class AnthropicGenerator(AIContentGenerator):
     # ------------------------------------------------------------------
 
     async def generate_section(self, payload: dict[str, Any], *, k: int) -> dict[str, Any]:
+        pv = prompts.get_prompt_version(payload.get("prompt_version"))
         return await self._call_tool(
-            system_prompt=prompts.SYSTEM_PROMPT_GENERATE,
-            user_message=prompts.render_generate_user_message(payload, k=k),
+            system_prompt=pv.system_generate,
+            user_message=pv.render_generate(payload, k),
             tool=prompts.EMIT_SECTION_TOOL,
         )
 
     async def verify_section(
         self, section: dict[str, Any], payload: dict[str, Any], *, k: int
     ) -> dict[str, Any]:
+        pv = prompts.get_prompt_version(payload.get("prompt_version"))
         return await self._call_tool(
-            system_prompt=prompts.SYSTEM_PROMPT_VERIFY,
-            user_message=prompts.render_verify_user_message(section, payload),
+            system_prompt=pv.system_verify,
+            user_message=pv.render_verify(section, payload, k),
             tool=prompts.VERIFY_SECTION_TOOL,
         )
 

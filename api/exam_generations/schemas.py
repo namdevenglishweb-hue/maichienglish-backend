@@ -17,6 +17,12 @@ class _ModelOverride(BaseModel):
 
     aiModel: Optional[str] = Field(default=None, description="Override AI_MODEL for this run.")
     aiProvider: Optional[str] = Field(default=None, description="Override AI_PROVIDER for this run.")
+    promptVersion: Optional[str] = Field(
+        default=None,
+        description="Prompt-pipeline version for this run (e.g. 'v1', 'v2'). "
+        "Default v1 (production baseline). Unknown version → 400. "
+        "Combine with aiModel/aiProvider to A/B {version × model}.",
+    )
 
 
 class GenerateExamRequest(_ModelOverride):

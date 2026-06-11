@@ -13,7 +13,8 @@ Design contract reminders:
 """
 
 import json
-from typing import Any, Optional
+from dataclasses import dataclass
+from typing import Any, Callable, Optional
 
 # ---------------------------------------------------------------------------
 # K — variation level (§3). 1 = minimal, 5 = near-new (structure preserved).
@@ -197,17 +198,21 @@ def build_section_payload(
     *,
     type_prompt: Optional[str] = None,
     section_prompt: Optional[str] = None,
+    prompt_version: Optional[str] = None,
 ) -> dict[str, Any]:
     """Assemble the provider-neutral payload for one section (§6.1).
 
     `source_section` carries type/part_label/instructions/max_audio_plays/
     materials (with meta) /questions (WITH answers — not stripped, §1).
+    `prompt_version` rides in the payload so adapters resolve the right
+    prompt set without a signature change (see PROMPT_VERSIONS).
     """
     return {
         "exam_context": exam_context,
         "section": source_section,
         "type_prompt": type_prompt,
         "section_prompt": section_prompt,
+        "prompt_version": prompt_version or DEFAULT_PROMPT_VERSION,
     }
 
 
@@ -268,3 +273,107 @@ def render_verify_user_message(
         "anything is wrong, return a corrected `fixed_section`.\n\n"
         f"GENERATED SECTION (JSON):\n{section_json}"
     )
+
+
+# ---------------------------------------------------------------------------
+# v2 — verify pass also sees the SOURCE + the K directive, so the judge can
+# detect (and fix) name-only clones. The GENERATE side is identical to v1 on
+# purpose: the K scale is awaiting a client decision and must not change here.
+# ---------------------------------------------------------------------------
+
+SYSTEM_PROMPT_VERIFY_V2 = SYSTEM_PROMPT_VERIFY + """
+
+SIMILARITY CHECK (you also receive the SOURCE section and the K directive \
+used for generation):
+- Judge whether the generated content differs enough from the source for that \
+K. If K >= 2 and the text/transcript/questions are essentially the source with \
+only names, numbers or places swapped, report severity 'critical' with problem \
+'near-copy of source', and return a `fixed_section` that genuinely rewrites \
+the content to the K directive while preserving every structural invariant \
+(same counts/types/options, media urls unchanged, answers correct).
+- At K = 1 staying close to the source is EXPECTED — only flag when the text \
+is a verbatim copy with nothing meaningfully changed.
+- The SOURCE is reference material, NOT the answer key: if the SOURCE itself \
+contains an error (e.g. its correct_index contradicts its own transcript), do \
+NOT fail the generated section for diverging from it. Judge the GENERATED \
+section on its own internal consistency — its answers must be correct given \
+ITS OWN material/transcript.\
+"""
+
+
+def render_verify_user_message_v2(
+    section: dict[str, Any], payload: dict[str, Any], *, k: int
+) -> str:
+    """v2 user turn for verify_section: source + K directive + generated."""
+    ctx = payload.get("exam_context") or {}
+    source_json = json.dumps(payload.get("section") or {}, ensure_ascii=False, indent=2)
+    section_json = json.dumps(section, ensure_ascii=False, indent=2)
+    admin = _admin_blocks(payload)
+    intent = (
+        f"Admin intent to respect (preference):\n\n{admin}" if admin else ""
+    )
+    return (
+        f"Exam context: level={ctx.get('level')}, skill={ctx.get('skill')}.\n\n"
+        f"VARIATION LEVEL USED — {K_INSTRUCTIONS[k]}\n\n"
+        f"{intent}"
+        "Judge the GENERATED SECTION below (including the SIMILARITY CHECK "
+        "against the SOURCE) and report via `report_review`. If anything is "
+        "wrong, return a corrected `fixed_section`.\n\n"
+        f"SOURCE SECTION (JSON, the original being varied):\n{source_json}\n\n"
+        f"GENERATED SECTION (JSON):\n{section_json}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Prompt-version registry. Adding a v3 = one more PromptVersion entry here —
+# no if/else anywhere else. The version travels inside the payload
+# (`payload["prompt_version"]`, set by build_section_payload) so adapter
+# signatures stay unchanged.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PromptVersion:
+    name: str
+    description: str
+    system_generate: str
+    system_verify: str
+    # (payload, k) -> user message
+    render_generate: Callable[[dict[str, Any], int], str]
+    # (generated_section, payload, k) -> user message
+    render_verify: Callable[[dict[str, Any], dict[str, Any], int], str]
+
+
+PROMPT_VERSIONS: dict[str, PromptVersion] = {
+    "v1": PromptVersion(
+        name="v1",
+        description="Baseline (production default) — verify judges the "
+                    "generated section alone.",
+        system_generate=SYSTEM_PROMPT_GENERATE,
+        system_verify=SYSTEM_PROMPT_VERIFY,
+        render_generate=lambda payload, k: render_generate_user_message(payload, k=k),
+        render_verify=lambda section, payload, k: render_verify_user_message(section, payload),
+    ),
+    "v2": PromptVersion(
+        name="v2",
+        description="Anti-clone candidate — verify also receives the source "
+                    "section + K directive and flags/fixes near-copies.",
+        system_generate=SYSTEM_PROMPT_GENERATE,  # unchanged: K scale awaits client
+        system_verify=SYSTEM_PROMPT_VERIFY_V2,
+        render_generate=lambda payload, k: render_generate_user_message(payload, k=k),
+        render_verify=lambda section, payload, k: render_verify_user_message_v2(section, payload, k=k),
+    ),
+}
+
+DEFAULT_PROMPT_VERSION = "v1"
+
+
+def get_prompt_version(name: Optional[str] = None) -> PromptVersion:
+    """Resolve a prompt version by name (None/'' → default). ValueError if unknown."""
+    key = name or DEFAULT_PROMPT_VERSION
+    try:
+        return PROMPT_VERSIONS[key]
+    except KeyError:
+        raise ValueError(
+            f"Unknown promptVersion {key!r}; allowed: {', '.join(sorted(PROMPT_VERSIONS))}"
+        )

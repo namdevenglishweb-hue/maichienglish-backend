@@ -133,3 +133,71 @@ def test_model_override_routes_and_records(monkeypatch):
     # provenance meta records the ACTUAL model used (not env)
     meta = G._build_meta("src", 2, g, {}, {"media_todos": [], "self_review": {}})
     assert meta["model"] == "override-model" and meta["provider"] == "groq"
+
+
+# --- prompt-version registry (v1 default; v2 verify sees source + K) ------- #
+
+def test_prompt_version_registry_resolves_and_rejects():
+    from services.ai import prompts
+    assert prompts.get_prompt_version(None).name == "v1"     # default
+    assert prompts.get_prompt_version("v2").name == "v2"
+    with pytest.raises(ValueError):
+        prompts.get_prompt_version("v999")
+
+
+def test_v2_verify_message_includes_source_and_k_but_v1_does_not():
+    """The whole point of v2: the judge can see what it's comparing against."""
+    from services.ai import prompts
+    payload = prompts.build_section_payload(
+        _src_section(), _CTX, prompt_version="v2")
+    generated = {"materials": [], "questions": []}
+
+    v2_msg = prompts.get_prompt_version("v2").render_verify(generated, payload, 3)
+    assert "SOURCE SECTION" in v2_msg
+    assert "old transcript" in v2_msg                        # source content present
+    assert prompts.K_INSTRUCTIONS[3] in v2_msg               # K directive present
+
+    v1_msg = prompts.get_prompt_version("v1").render_verify(generated, payload, 3)
+    assert "old transcript" not in v1_msg                    # v1 unchanged (baseline)
+
+
+async def test_pipeline_records_version_and_shadow_overlap():
+    """generate_one_section threads promptVersion + reports the overlap metric."""
+    src = _src_section()
+    _, report = await G.generate_one_section(
+        src, 3, exam_context=_CTX, generator=FakeGen([_good_ai()]),
+        rounds=1, prompt_version="v2")
+    assert report["prompt_version"] == "v2"
+    ov = report["verbatim_overlap"]
+    assert 0.0 <= ov["weighted_avg"] <= ov["max"] <= 1.0
+    assert ov["fields"]                                      # per-field breakdown
+
+    with pytest.raises(ValidationError):                     # unknown version → 400
+        await G.generate_one_section(
+            src, 3, exam_context=_CTX, generator=FakeGen([_good_ai()]),
+            rounds=0, prompt_version="v999")
+
+
+def test_verbatim_overlap_metric_separates_copy_from_rewrite():
+    """1.0 on a verbatim copy, low on a genuine rewrite; gap markers ignored."""
+    src = {
+        "materials": [{"type": "text",
+                       "content": "Tom plays {{gap:1}} football every sunny weekend afternoon"}],
+        "questions": [{"question_type": "multiple_choice",
+                       "question_data": {"stem": "What does Tom play?",
+                                         "options": [{"text": "football"}, {"text": "tennis"}]}}],
+    }
+    copy = {
+        "materials": [{"type": "text",
+                       "content": "Tom plays {{gap:1}} football every sunny weekend afternoon"}],
+        "questions": src["questions"],
+    }
+    rewrite = {
+        "materials": [{"type": "text",
+                       "content": "Mai practises {{gap:1}} badminton at the city hall on Mondays"}],
+        "questions": [{"question_type": "multiple_choice",
+                       "question_data": {"stem": "Where does Mai practise?",
+                                         "options": [{"text": "city hall"}, {"text": "school gym"}]}}],
+    }
+    assert G.compute_verbatim_overlap(src, copy)["max"] == 1.0
+    assert G.compute_verbatim_overlap(src, rewrite)["max"] < 0.3
