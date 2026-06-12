@@ -210,5 +210,8 @@ Thumbs.db
 .claude/
 
 # Project docs — kept local-only; README.md stays tracked for GitHub.
+# Exception: docs/public/ is the FE-facing doc set served by GET /api/docs —
+# those files ARE committed (curated copies only; internal docs stay local).
 *.md
 !README.md
+!docs/public/*.md

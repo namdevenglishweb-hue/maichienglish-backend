@@ -16,6 +16,7 @@ from api.exam_generations import admin_router as exam_generations_router
 from api.exams import router as exams_router
 from api.image_generations import admin_router as image_generations_router
 from api.parents import router as parents_router
+from api.public_docs import router as public_docs_router
 from api.section_type_prompts import admin_router as section_type_prompts_router
 from api.questions import question_router as questions_router
 from api.questions import section_scoped_router as section_questions_router
@@ -85,6 +86,7 @@ app.include_router(exam_generations_router)
 app.include_router(section_type_prompts_router)
 app.include_router(image_generations_router)
 app.include_router(ai_settings_router)
+app.include_router(public_docs_router)
 
 
 @app.get("/health")
