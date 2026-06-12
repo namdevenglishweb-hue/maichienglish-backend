@@ -408,6 +408,20 @@ CREATE TABLE public.ai_generation_settings (
 
 
 -- ------------------------------------------------------------
+-- section_skill_maps — cached ANALYZE output per section (exam-gen v3 spec
+--   mode). Hash-keyed lazy invalidation; `model` audit-only. Migration 0023.
+-- ------------------------------------------------------------
+CREATE TABLE public.section_skill_maps (
+  section_id  uuid PRIMARY KEY REFERENCES public.sections(id) ON DELETE CASCADE,
+  skill_map   jsonb NOT NULL,
+  source_hash text NOT NULL,
+  model       text,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  updated_at  timestamptz NOT NULL DEFAULT now()
+);
+
+
+-- ------------------------------------------------------------
 -- Row-level security. Defense-in-depth per DEPLOYMENT.md §3.1 / §8 —
 -- the backend connects via the service-role key (which bypasses RLS),
 -- but enabling RLS blocks bare anon/authenticated key holders from
@@ -431,3 +445,4 @@ ALTER TABLE public.section_type_prompts  ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.exam_generation_jobs  ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.image_generation_jobs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.ai_generation_settings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.section_skill_maps    ENABLE ROW LEVEL SECURITY;

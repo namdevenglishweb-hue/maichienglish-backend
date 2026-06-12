@@ -58,7 +58,7 @@ class OpenAICompatibleGenerator(AIContentGenerator):
         return await self._call_tool(
             system_prompt=pv.system_generate,
             user_message=pv.render_generate(payload, k),
-            tool=prompts.EMIT_SECTION_TOOL,
+            tool=pv.emit_section_tool or prompts.EMIT_SECTION_TOOL,
         )
 
     async def verify_section(
@@ -71,9 +71,24 @@ class OpenAICompatibleGenerator(AIContentGenerator):
             tool=prompts.VERIFY_SECTION_TOOL,
         )
 
+    async def analyze_section(self, payload: dict[str, Any]) -> dict[str, Any]:
+        pv = prompts.get_prompt_version(payload.get("prompt_version"))
+        if not pv.system_analyze or not pv.render_analyze:
+            raise RuntimeError(f"prompt version {pv.name!r} has no analyze step")
+        return await self._call_tool(
+            system_prompt=pv.system_analyze,
+            user_message=pv.render_analyze(payload),
+            tool=prompts.EMIT_SKILL_MAP_TOOL,
+            temperature=prompts.ANALYZE_TEMPERATURE,
+        )
+
     async def _call_tool(
-        self, *, system_prompt: str, user_message: str, tool: dict[str, Any]
+        self, *, system_prompt: str, user_message: str, tool: dict[str, Any],
+        temperature: float | None = None,
     ) -> dict[str, Any]:
+        extra: dict[str, Any] = dict(self._extra_create)
+        if temperature is not None:  # only the NEW analyze path sets this
+            extra["temperature"] = temperature
         response = await self._client.chat.completions.create(
             model=self._model,
             max_tokens=self._max_tokens,
@@ -83,7 +98,7 @@ class OpenAICompatibleGenerator(AIContentGenerator):
             ],
             tools=[_as_openai_tool(tool)],
             tool_choice={"type": "function", "function": {"name": tool["name"]}},
-            **self._extra_create,
+            **extra,
         )
         self._track_usage(response)
         choice = response.choices[0]

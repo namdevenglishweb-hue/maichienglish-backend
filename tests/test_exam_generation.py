@@ -178,6 +178,249 @@ async def test_pipeline_records_version_and_shadow_overlap():
             rounds=0, prompt_version="v999")
 
 
+# --- v3 spec mode (docs/exam-gen-v3-spec-mode/) ----------------------------- #
+
+_SPEC_CTX = {"level": "KET", "skill": "reading", "title": "A day at Zorblat Park"}
+
+_SRC_PASSAGE = (
+    "Last summer Mina visited Zorblat Park with her cousin. The famous park "
+    "had a wooden bridge, a small lake and a juggling clown. Mina fed the "
+    "ducks near the bridge while her cousin photographed the clown show."
+)
+
+
+def _spec_src_section():
+    """Plain-MC section that passes every spec-eligibility condition."""
+    return {
+        "id": "sec-1", "position": 1, "type": "multiple_choice",
+        "part_label": "Part 3", "instructions": "Choose the correct answer.",
+        "max_audio_plays": None,
+        "materials": [{"type": "text", "content": _SRC_PASSAGE}],
+        "questions": [{
+            "id": f"q{i}", "position": i + 1, "question_type": "multiple_choice",
+            "points": 1,
+            "question_data": {"stem": f"Question {i + 1} about the park?",
+                              "options": [{"text": f"opt{i}{j}"} for j in range(4)],
+                              "correct_index": 0},
+        } for i in range(3)],
+    }
+
+
+def _spec_ai_section(passage):
+    return {
+        "part_label": "Part 3", "instructions": "Read the text and choose A-D.",
+        "materials": [{"type": "text", "content": passage}],
+        "questions": [{
+            "question_type": "multiple_choice",
+            "question_data": {"stem": f"New question {i}?",
+                              "options": [{"text": f"new{i}{j}"} for j in range(4)],
+                              "correct_index": 1},
+            "answer_justification": "evidence in the new text",
+        } for i in range(3)],
+    }
+
+
+_NEW_PASSAGE = (
+    "Tom joined the school chess club in autumn. The first tournament made "
+    "him nervous, but his coach showed him a simple opening plan and Tom "
+    "finally won his last game on a rainy afternoon at the community hall."
+)
+
+_CLEAN_SKILL_MAP = {
+    "structure": {"exam_level": "KET", "cefr_level": "A2",
+                  "text_genre": "narrative", "word_count_range": [20, 60]},
+    "per_question": [{"position": i + 1, "skill_tested": "detail",
+                      "answer_scope": "single detail",
+                      "distractor_pattern": "plausible but contradicted"}
+                     for i in range(3)],
+    "style_notes": "simple past narration",
+}
+
+
+class FakeSpecGen:
+    """Spec-capable fake: analyze + generate + verify, with call counters."""
+
+    def __init__(self, skill_maps=None, passage=_NEW_PASSAGE, verdicts=None):
+        self.usage = {"input": 1, "output": 2}
+        self.model = "fake-model"
+        self._skill_maps = skill_maps or [_CLEAN_SKILL_MAP]
+        self._passage = passage
+        self._v = verdicts or []
+        self.analyze_calls = self.generate_calls = self.verify_calls = 0
+
+    async def analyze_section(self, payload):
+        r = self._skill_maps[min(self.analyze_calls, len(self._skill_maps) - 1)]
+        self.analyze_calls += 1
+        return r
+
+    async def generate_section(self, payload, *, k):
+        self.generate_calls += 1
+        return _spec_ai_section(self._passage)
+
+    async def verify_section(self, section, payload, *, k):
+        self.verify_calls += 1
+        if self._v:
+            return self._v[min(self.verify_calls - 1, len(self._v) - 1)]
+        return {"is_acceptable": True, "issues": []}
+
+
+class FakeSkillMapCache:
+    def __init__(self):
+        self.rows: dict[str, tuple[dict, str]] = {}
+
+    async def get(self, section_id, source_hash):
+        row = self.rows.get(section_id)
+        return row[0] if row and row[1] == source_hash else None
+
+    async def upsert(self, section_id, skill_map, source_hash, model):
+        self.rows[section_id] = (skill_map, source_hash)
+
+
+def test_spec_core_assignment_matrix():
+    """Orchestration gate (K, level) + MC-core eligibility — design §3."""
+    from services.ai import spec_mode as S
+
+    good = _spec_src_section()
+    assert S.assign_core(good, 3, "KET") == "multiple_choice"
+    assert S.assign_core(good, 2, "KET") is None          # gate: K < 3
+    assert S.assign_core(good, 5, "IELTS") is None        # gate: level
+    bad_type = {**good, "type": "multiple_choice_shared"}
+    assert S.assign_core(bad_type, 5, "KET") is None      # MC-shared deferred
+    two_mats = {**good, "materials": good["materials"] * 2}
+    assert S.assign_core(two_mats, 5, "KET") is None      # needs exactly 1
+    import copy
+    pic = copy.deepcopy(good)
+    pic["questions"][0]["question_data"]["options"][0] = {"image_url": "x.png"}
+    assert S.assign_core(pic, 5, "KET") is None           # picture-MC
+    mixed = copy.deepcopy(good)
+    mixed["questions"][1]["question_data"]["options"] = [{"text": "a"}, {"text": "b"}]
+    assert S.assign_core(mixed, 5, "KET") is None         # mixed option counts
+
+
+def test_spec_pure_functions():
+    from services.ai import spec_mode as S
+
+    src = _spec_src_section()
+    block = S.build_blocklist(src)
+    assert "zorblat" in block                  # proper noun mid-sentence
+    assert "mina" in block                     # proper noun
+    assert "choose" not in block               # instructions are EXCLUDED (N3)
+    assert S.find_leaks('{"note": "distractors recycle"}', ["actor"]) == []
+    assert S.find_leaks('{"text_genre": "a Zorblat brochure"}', block) == ["zorblat"]
+
+    pct, common = S.trigram_overlap(_SRC_PASSAGE, _SRC_PASSAGE)
+    assert pct == 100.0 and common >= 3
+    assert S.similarity_violation(_SRC_PASSAGE, _SRC_PASSAGE) is not None
+    assert S.similarity_violation(_NEW_PASSAGE, _SRC_PASSAGE) is None
+
+    h1 = S.section_source_hash({"b": 1, "a": [1, 2]})
+    h2 = S.section_source_hash({"a": [1, 2], "b": 1})
+    assert h1 == h2                            # key-order invariant (N6)
+
+    facts = S.derive_structure_facts(src, "KET")
+    assert facts["num_questions"] == 3 and facts["options_per_question"] == 4
+    lying_map = {"structure": {"num_questions": 99, "text_genre": "g"}}
+    merged = S.merge_structure(lying_map, facts)
+    assert merged["structure"]["num_questions"] == 3   # code overrides ANALYZE (N10)
+    assert merged["structure"]["text_genre"] == "g"    # qualitative kept
+
+    assert S.word_count_violation("one two three", [10, 60]) is not None
+    assert S.word_count_violation(" ".join(["w"] * 30), [20, 60]) is None
+    assert S.word_count_violation(" ".join(["w"] * 18), [20, 60]) is None  # ±15%
+    # models emit JSON floats for integer fields — guard must NOT be skipped
+    assert S.word_count_violation("one two three", [10.0, 60.0]) is not None
+
+
+async def test_spec_pipeline_happy_and_cache():
+    """Full spec path: analyze→leak→facts→seed→generate→checks→verify; report
+    carries mode/topic/seed/hash/trigram; 2nd run hits the cache."""
+    import random
+
+    cache = FakeSkillMapCache()
+    gen = FakeSpecGen()
+    section, report = await G.generate_one_section(
+        _spec_src_section(), 5, exam_context=_SPEC_CTX, generator=gen,
+        rounds=1, prompt_version="v3", rng=random.Random(1),
+        skill_map_cache_override=cache)
+
+    assert report["mode"] == "spec" and report["core"] == "multiple_choice"
+    assert report["prompt_version"] == "v3"
+    assert report["topic"] and report["diversity_seed"]["narrator"]
+    assert report["skill_map_hash"] in {v[1] for v in cache.rows.values()}
+    assert report["trigram_overlap_pct"] < 10
+    assert section["materials"][0]["content"] == _NEW_PASSAGE
+    assert section["instructions"] == "Read the text and choose A-D."  # from AI, not source
+    assert section["questions"][0]["points"] == 1                      # forced from source
+    assert gen.analyze_calls == 1
+
+    gen2 = FakeSpecGen()
+    await G.generate_one_section(
+        _spec_src_section(), 5, exam_context=_SPEC_CTX, generator=gen2,
+        rounds=1, prompt_version="v3", rng=random.Random(2),
+        skill_map_cache_override=cache)
+    assert gen2.analyze_calls == 0             # cache hit — no re-analyze
+
+
+def test_spec_invariant_source_never_in_prompts():
+    """DoD #1: source text/title never reach spec generate/verify prompts —
+    including the retry branch and the admin-topic branch."""
+    from services.ai import prompts
+
+    pv = prompts.get_prompt_version("v3")
+    payload = {
+        "prompt_version": "v3",
+        "exam_context": {"level": "KET", "skill": "reading"},  # NO title (B2)
+        "spec": _CLEAN_SKILL_MAP, "topic": "a chess club", "genre": "narrative",
+        "diversity_seed": {"narrator": "a teenage boy"},
+        "retry_error": "trigram overlap 14.2%, 5 common trigrams; limit 10%",
+    }
+    gen_msg = pv.render_generate(payload, 3)
+    verify_msg = pv.render_verify(_spec_ai_section(_NEW_PASSAGE), payload, 3)
+    for banned in ("Zorblat", "Mina", "juggling clown", "A day at Zorblat Park"):
+        assert banned not in gen_msg and banned not in verify_msg
+    assert "PER-QUESTION SPEC" in gen_msg                  # K=3 gets per_question
+    assert "PER-QUESTION SPEC" not in pv.render_generate(payload, 5)  # K=5 doesn't
+    assert "per_question" not in verify_msg                # verify structure-only (#14)
+
+
+async def test_spec_analyze_leak_exhausts_budget():
+    """Skill map keeps leaking a blocklisted term → ANALYZE_DOMAIN_LEAK after
+    1+2 attempts; nothing cached."""
+    leaky = {**_CLEAN_SKILL_MAP,
+             "style_notes": "a story about the Zorblat attraction"}
+    cache = FakeSkillMapCache()
+    gen = FakeSpecGen(skill_maps=[leaky])
+    with pytest.raises(G.SectionGenerationError, match="ANALYZE_DOMAIN_LEAK"):
+        await G.generate_one_section(
+            _spec_src_section(), 5, exam_context=_SPEC_CTX, generator=gen,
+            rounds=1, prompt_version="v3", skill_map_cache_override=cache)
+    assert gen.analyze_calls == 3 and gen.generate_calls == 0
+    assert not cache.rows
+
+
+async def test_spec_trigram_guard_blocks_clones():
+    """Generated material = source verbatim → guard trips on every attempt
+    (before any verify call) → section fails within the generate budget."""
+    cache = FakeSkillMapCache()
+    gen = FakeSpecGen(passage=_SRC_PASSAGE)  # clone of the source
+    with pytest.raises(G.SectionGenerationError, match="trigram overlap"):
+        await G.generate_one_section(
+            _spec_src_section(), 5, exam_context=_SPEC_CTX, generator=gen,
+            rounds=1, prompt_version="v3", skill_map_cache_override=cache)
+    assert gen.generate_calls == 3 and gen.verify_calls == 0  # guard BEFORE verify
+
+
+async def test_spec_ineligible_falls_back_to_rewrite():
+    """v3 + ineligible section (K=2 here) → rewrite path, mode recorded,
+    provenance version stays v3."""
+    src = _src_section()  # audio section from the older fixtures — ineligible
+    _, report = await G.generate_one_section(
+        src, 2, exam_context=_CTX, generator=FakeGen([_good_ai()]),
+        rounds=1, prompt_version="v3")
+    assert report["mode"] == "rewrite"
+    assert report["prompt_version"] == "v3"
+
+
 # --- balanced answer-key shuffle (post-process by code, client §6 port) ---- #
 
 def _mc_section(n=5, n_options=4, type_="multiple_choice", shared_options=None):

@@ -46,6 +46,15 @@ class AIContentGenerator(ABC):
         """
         ...
 
+    @abstractmethod
+    async def analyze_section(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """v3 spec mode (docs/exam-gen-v3-spec-mode/): produce the abstract
+        skill map of a source section — the ONLY call that sees the source.
+        Runs at ANALYZE_TEMPERATURE (0.2). Returns the `emit_skill_map` tool
+        input. Raises RuntimeError when the resolved prompt version has no
+        analyze configuration (rewrite-only versions)."""
+        ...
+
 
 KNOWN_PROVIDERS = ("openrouter", "groq", "gemini", "anthropic")
 

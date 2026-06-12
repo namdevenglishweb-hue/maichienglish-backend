@@ -33,6 +33,11 @@ logger = logging.getLogger(__name__)
 STRUCTURAL_RETRIES = 2  # re-generate attempts on top of the first (§9.2)
 ProgressCb = Optional[Callable[[int, int], Awaitable[None]]]
 
+# v3 spec provenance keys copied from a section report into job report /
+# generation_meta (Mode 1) — docs/exam-gen-v3-spec-mode/ §11.
+_SPEC_REPORT_KEYS = ("mode", "core", "topic", "diversity_seed",
+                     "skill_map_hash", "trigram_overlap_pct")
+
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -119,12 +124,16 @@ def _assert_structure_preserved(
 
 
 def _merge_generated_section(
-    source: dict[str, Any], ai_out: dict[str, Any]
+    source: dict[str, Any], ai_out: dict[str, Any], *, strict_spec: bool = False
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Merge AI content onto the source, re-imposing all hard invariants.
 
     Returns (merged_section, justifications). Raises StructureMismatch when the
     AI returned the wrong number of materials/questions (cannot merge by index).
+
+    `strict_spec` (v3 spec mode, design §4.7/N13): missing material content /
+    instructions / part_label ⇒ FAIL instead of falling back to the source —
+    a fallback would splice source text/flavour into a "brand-new" section.
     """
     src_mats = source.get("materials") or []
     ai_mats = ai_out.get("materials") or []
@@ -137,11 +146,13 @@ def _merge_generated_section(
         am = am if isinstance(am, dict) else {}
         t = sm.get("type")
         if t == "text":
+            if strict_spec and not (am.get("content") or "").strip():
+                raise StructureMismatch("materials missing content (no source fallback in spec mode)")
             m: dict[str, Any] = {
                 "type": "text",
                 "content": am.get("content") or sm.get("content") or "",
             }
-            label = am.get("label", sm.get("label"))
+            label = am.get("label") if strict_spec else am.get("label", sm.get("label"))
             if label:
                 m["label"] = label
         elif t in ("audio", "image"):
@@ -193,6 +204,13 @@ def _merge_generated_section(
                 {"position": pos, "justification": aq["answer_justification"]}
             )
 
+    if strict_spec and not (
+        (ai_out.get("part_label") or "").strip()
+        and (ai_out.get("instructions") or "").strip()
+    ):
+        raise StructureMismatch(
+            "part_label/instructions missing (no source fallback in spec mode)"
+        )
     merged = {
         "type": source.get("type"),
         "part_label": ai_out.get("part_label") or source.get("part_label"),
@@ -485,6 +503,271 @@ def shuffle_answer_keys(
 
 
 # ---------------------------------------------------------------------------
+# v3 SPEC MODE — skill-map cache + the spec engine
+# (docs/exam-gen-v3-spec-mode/exam-gen-v3-spec-mode-design.md §4-§8)
+# ---------------------------------------------------------------------------
+
+ANALYZE_RETRIES = 2  # re-run ANALYZE on leak, on top of the first attempt
+# Spec-capable versions fall back to this registry entry for ineligible
+# sections (docs §10.4). Single definition so a registry rename can't 500.
+REWRITE_FALLBACK_VERSION = "v2"
+
+
+def _analyze_view(section: dict[str, Any]) -> dict[str, Any]:
+    """Content view of the source for ANALYZE (ids dropped — they don't
+    affect content and would churn the cache hash on re-import)."""
+    return {
+        "type": section.get("type"),
+        "part_label": section.get("part_label"),
+        "instructions": section.get("instructions"),
+        "materials": section.get("materials") or [],
+        "questions": [{
+            "position": q.get("position"),
+            "question_type": q.get("question_type"),
+            "question_data": q.get("question_data"),
+            "points": q.get("points"),
+        } for q in section.get("questions") or []],
+    }
+
+
+class SkillMapCache:
+    """CRUD over section_skill_maps (migration 0023). Hash-keyed lazy
+    invalidation; concurrent analyze+upsert = last write wins (accepted)."""
+
+    def __init__(self, db_pool=None):
+        self._db_pool = db_pool
+
+    @property
+    def db(self):
+        if self._db_pool is None:
+            from config.database import get_db_pool
+            self._db_pool = get_db_pool()
+        return self._db_pool
+
+    async def get(self, section_id: str, source_hash: str) -> Optional[dict[str, Any]]:
+        import json as _json
+        async with self.db.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT skill_map FROM public.section_skill_maps "
+                "WHERE section_id = $1 AND source_hash = $2",
+                section_id, source_hash,
+            )
+        if not row:
+            return None
+        raw = row["skill_map"]
+        return _json.loads(raw) if isinstance(raw, str) else raw
+
+    async def upsert(self, section_id: str, skill_map: dict[str, Any],
+                     source_hash: str, model: Optional[str]) -> None:
+        import json as _json
+        async with self.db.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO public.section_skill_maps
+                    (section_id, skill_map, source_hash, model)
+                VALUES ($1, $2::jsonb, $3, $4)
+                ON CONFLICT (section_id) DO UPDATE SET
+                    skill_map = EXCLUDED.skill_map,
+                    source_hash = EXCLUDED.source_hash,
+                    model = EXCLUDED.model,
+                    updated_at = now()
+                """,
+                section_id, _json.dumps(skill_map), source_hash, model,
+            )
+
+
+skill_map_cache = SkillMapCache()
+
+
+async def _get_or_analyze_skill_map(
+    source_section: dict[str, Any],
+    scrub_ctx: dict[str, Any],
+    generator,
+    version: str,
+    cache: SkillMapCache,
+) -> tuple[dict[str, Any], str]:
+    """Cache lookup → ANALYZE → leak check (budget 1+2, separate from the
+    generate budget) → upsert. Raises SectionGenerationError on
+    ANALYZE_DOMAIN_LEAK (a dirty skill map must never be used OR cached)."""
+    import json as _json
+    from services.ai import spec_mode
+
+    view = _analyze_view(source_section)
+    analyze_payload: dict[str, Any] = {
+        "prompt_version": version, "exam_context": scrub_ctx, "section": view,
+    }
+    source_hash = spec_mode.section_source_hash(
+        {"exam_context": scrub_ctx, "section": view})
+
+    blocklist = spec_mode.build_blocklist(source_section)
+    section_id = source_section.get("id")
+    if section_id:
+        cached = await cache.get(str(section_id), source_hash)
+        # Re-run the (free, pure) leak check on cache hits too — a map cached
+        # under an older/weaker blocklist heuristic must not bypass the
+        # current one (review finding); a leaky hit is treated as a miss.
+        if cached is not None and not spec_mode.find_leaks(
+                _json.dumps(cached, ensure_ascii=False), blocklist):
+            return cached, source_hash
+
+    leaks: list[str] = []
+    for _ in range(1 + ANALYZE_RETRIES):
+        skill_map = await generator.analyze_section(analyze_payload)
+        leaks = spec_mode.find_leaks(
+            _json.dumps(skill_map, ensure_ascii=False), blocklist)
+        if not leaks:
+            if section_id:
+                await cache.upsert(str(section_id), skill_map, source_hash,
+                                   getattr(generator, "model", None))
+            return skill_map, source_hash
+        analyze_payload = {**analyze_payload, "leak_feedback": leaks}
+    raise SectionGenerationError(
+        f"ANALYZE_DOMAIN_LEAK: skill map still leaked {len(leaks)} source "
+        f"term(s) after {1 + ANALYZE_RETRIES} attempts"
+    )
+
+
+def _spec_code_checks(
+    section: dict[str, Any], spec: dict[str, Any], src_material: str,
+    rng: Optional[_random.Random],
+) -> None:
+    """Design §4 steps 8-10: word-count → shuffle → trigram guard. Pure code,
+    runs BEFORE verify (each failure costs 0 AI calls). Failure messages are
+    numbers/labels only (M3 — they feed retry_error into the next prompt)."""
+    from services.ai import spec_mode
+
+    material_text = (section.get("materials") or [{}])[0].get("content") or ""
+    err = spec_mode.word_count_violation(
+        material_text, (spec.get("structure") or {}).get("word_count_range"))
+    if err:
+        raise StructureMismatch(err)
+    shuffle_answer_keys(section, rng=rng)
+    err = spec_mode.similarity_violation(material_text, src_material)
+    if err:
+        raise StructureMismatch(err)
+
+
+async def _spec_verify(
+    source_section: dict[str, Any],
+    section: dict[str, Any],
+    payload: dict[str, Any],
+    k: int,
+    generator,
+    rounds: int,
+    spec: dict[str, Any],
+    src_material: str,
+    rng: Optional[_random.Random],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Spec-mode verify flow (design §4 step 11 / F2 — NEW flow, not
+    _self_review): judge sees STRUCTURE spec + generated only. On critical +
+    fixed_section: merge strict → re-run code checks (8-10) → PASS = accept
+    WITHOUT re-verify (client parity); FAIL/no fix = hard error → next
+    GENERATE round."""
+    if rounds <= 0:
+        return section, {"rounds": 0, "final_issues": []}
+    issues: list[dict[str, Any]] = []
+    done = 0
+    for _ in range(rounds):
+        verdict = await generator.verify_section(section, payload, k=k)
+        done += 1
+        issues = verdict.get("issues") or []
+        criticals = [i for i in issues if i.get("severity") == "critical"]
+        if not criticals:
+            return section, {"rounds": done, "final_issues": issues}
+        fixed = verdict.get("fixed_section")
+        if not isinstance(fixed, dict):
+            raise StructureMismatch(
+                "self-review left critical issues: "
+                + "; ".join(i.get("problem", "") for i in criticals)
+            )
+        section, _ = _merge_generated_section(source_section, fixed, strict_spec=True)
+        _spec_code_checks(section, spec, src_material, rng)  # raises on fail
+        return section, {"rounds": done, "final_issues": issues}  # accept, no re-verify
+    return section, {"rounds": done, "final_issues": issues}
+
+
+async def _generate_section_spec(
+    source_section: dict[str, Any],
+    k: int,
+    *,
+    core: str,
+    exam_context: dict[str, Any],
+    generator,
+    section_prompt: Optional[str] = None,
+    rounds: int = 2,
+    version: str = "v3",
+    rng: Optional[_random.Random] = None,
+    cache: Optional[SkillMapCache] = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The spec engine. RECEIVES `core` — never routes (design §2). Only
+    core="multiple_choice" exists this round; future cores plug in here."""
+    if core != "multiple_choice":
+        raise SectionGenerationError(f"unknown spec core {core!r}")
+    from services.ai import spec_mode
+    from services.ai.topic_pool import pick_topic_and_seed
+
+    rng = rng or _random
+    cache = cache or skill_map_cache
+    level = exam_context.get("level")
+    # B2: spec prompts may see ONLY level+skill — never title/description
+    # (the source exam's title routinely names the very topic to hide).
+    scrub_ctx = {"level": level, "skill": exam_context.get("skill")}
+
+    skill_map, sm_hash = await _get_or_analyze_skill_map(
+        source_section, scrub_ctx, generator, version, cache)
+    facts = spec_mode.derive_structure_facts(source_section, level)
+    spec = spec_mode.merge_structure(skill_map, facts)
+    src_material = (source_section.get("materials") or [{}])[0].get("content") or ""
+
+    last_err: Optional[str] = None
+    review: dict[str, Any] = {"rounds": 0, "final_issues": []}
+    for _ in range(1 + STRUCTURAL_RETRIES):
+        # M4: topic+seed RE-ROLLED every generate attempt (admin topic stays);
+        # the seed that gets logged is the successful round's.
+        ts = pick_topic_and_seed(level, rng, admin_topic=section_prompt)
+        payload: dict[str, Any] = {
+            "prompt_version": version, "exam_context": scrub_ctx, "spec": spec,
+            "topic": ts["topic"], "genre": ts["genre"],
+            "diversity_seed": ts["diversity_seed"],
+        }
+        if last_err:
+            payload["retry_error"] = last_err  # numbers/labels only (M3)
+        try:
+            ai_out = await generator.generate_section(payload, k=k)
+            section, justifications = _merge_generated_section(
+                source_section, ai_out, strict_spec=True)
+            _spec_code_checks(section, spec, src_material, rng)
+            section, review = await _spec_verify(
+                source_section, section, payload, k, generator, rounds,
+                spec, src_material, rng)
+            _validate_section_structure(source_section, section)
+            try:
+                overlap = compute_verbatim_overlap(source_section, section)
+            except Exception:  # noqa: BLE001 — shadow metric never fails a job
+                logger.warning("verbatim-overlap metric failed (ignored)", exc_info=True)
+                overlap = {"max": None, "weighted_avg": None, "fields": [],
+                           "error": "metric_failed"}
+            pct, _common = spec_mode.trigram_overlap(
+                (section.get("materials") or [{}])[0].get("content") or "",
+                src_material)
+            return section, {
+                "self_review": review,
+                "justifications": justifications,
+                "prompt_version": version,
+                "verbatim_overlap": overlap,
+                "mode": "spec",
+                "core": core,
+                "topic": ts["topic"],
+                "diversity_seed": ts["diversity_seed"],
+                "skill_map_hash": sm_hash,
+                "trigram_overlap_pct": round(pct, 1),
+            }
+        except (StructureMismatch, ValidationError) as e:
+            last_err = str(e)
+    raise SectionGenerationError(last_err or "unknown", review=review)
+
+
+# ---------------------------------------------------------------------------
 # Core — one section through the full pipeline (§2.1, §7, §8, §9.2)
 # ---------------------------------------------------------------------------
 
@@ -499,18 +782,45 @@ async def generate_one_section(
     section_prompt: Optional[str] = None,
     rounds: int = 2,
     prompt_version: Optional[str] = None,
+    rng: Optional[_random.Random] = None,
+    skill_map_cache_override: Optional[SkillMapCache] = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Produce one validated section, or raise SectionGenerationError.
 
     Returns (merged_section, section_report). The section_report has
     `self_review` ({rounds, final_issues}), `justifications`,
-    `prompt_version` and the shadow `verbatim_overlap` metric.
+    `prompt_version` and the shadow `verbatim_overlap` metric; on
+    spec-capable versions it also carries `mode` (+ spec provenance).
+
+    HOST of the thin core assigner (design §2/F1): orchestration gate (K,
+    level) + core eligibility decide spec-vs-rewrite; the spec engine below
+    RECEIVES the core and never routes.
     """
     version = _validate_prompt_version(prompt_version)
+    pv = prompts.get_prompt_version(version)
+
+    adapter_version = version
+    mode: Optional[str] = None
+    if pv.spec_mode:
+        from services.ai import spec_mode
+        core = spec_mode.assign_core(
+            source_section, k, (exam_context or {}).get("level"))
+        if core:
+            return await _generate_section_spec(
+                source_section, k, core=core, exam_context=exam_context,
+                generator=generator, section_prompt=section_prompt,
+                rounds=rounds, version=version, rng=rng,
+                cache=skill_map_cache_override,
+            )
+        # Rewrite fallback: adapter-level config = v2 (docs §10.4); the
+        # service still reports prompt_version=v3 + mode=rewrite.
+        adapter_version = REWRITE_FALLBACK_VERSION
+        mode = "rewrite"
+
     payload = prompts.build_section_payload(
         source_section, exam_context,
         type_prompt=type_prompt, section_prompt=section_prompt,
-        prompt_version=version,
+        prompt_version=adapter_version,
     )
     last_err = "unknown"
     review: dict[str, Any] = {"rounds": 0, "final_issues": []}
@@ -538,12 +848,15 @@ async def generate_one_section(
                 logger.warning("verbatim-overlap metric failed (ignored)", exc_info=True)
                 overlap = {"max": None, "weighted_avg": None, "fields": [],
                            "error": "metric_failed"}
-            return section, {
+            report: dict[str, Any] = {
                 "self_review": review,
                 "justifications": justifications,
                 "prompt_version": version,
                 "verbatim_overlap": overlap,
             }
+            if mode:  # spec-capable version that fell back to rewrite
+                report["mode"] = mode
+            return section, report
         except (StructureMismatch, ValidationError) as e:
             last_err = str(e)
             payload = {**payload, "retry_error": last_err}
@@ -749,9 +1062,14 @@ class ExamGenerationService:
                 })
                 raise GenerationAborted(f"section {new_pos}: {e}", report)
             gen_sections.append(gsec)
-            report["sections"].append({
+            entry = {
                 "position": new_pos, "source_position": sec["position"], "status": "ok",
-            })
+            }
+            spec_extras = {key: srep[key] for key in _SPEC_REPORT_KEYS if key in srep}
+            entry.update(spec_extras)
+            report["sections"].append(entry)
+            if spec_extras:
+                report.setdefault("spec_provenance", {})[str(new_pos)] = spec_extras
             report["self_review"][str(new_pos)] = srep["self_review"]
             report["verbatim_overlap"][str(new_pos)] = srep["verbatim_overlap"]
 
@@ -818,6 +1136,8 @@ class ExamGenerationService:
                 entry.update({"status": "ok", "section": gsec,
                               "self_review": srep["self_review"],
                               "verbatim_overlap": srep["verbatim_overlap"]})
+                entry.update({key: srep[key] for key in _SPEC_REPORT_KEYS
+                              if key in srep})
             except SectionGenerationError as e:
                 entry.update({"status": "failed", "reason": str(e)})  # per-part (§9.6)
             out.append(entry)
@@ -848,12 +1168,14 @@ class ExamGenerationService:
             section_prompt=section_prompt, rounds=rounds,
             prompt_version=prompt_version,
         )
+        entry = {
+            "source_section_id": section["id"], "position": section["position"],
+            "status": "ok", "section": gsec, "self_review": srep["self_review"],
+            "verbatim_overlap": srep["verbatim_overlap"],
+        }
+        entry.update({key: srep[key] for key in _SPEC_REPORT_KEYS if key in srep})
         return {
-            "sections": [{
-                "source_section_id": section["id"], "position": section["position"],
-                "status": "ok", "section": gsec, "self_review": srep["self_review"],
-                "verbatim_overlap": srep["verbatim_overlap"],
-            }],
+            "sections": [entry],
             "token_usage": getattr(gen, "usage", {}),
             "prompt_version": prompt_version,
         }
@@ -946,6 +1268,10 @@ def _build_meta(source_exam_id, k, gen, section_prompts, report, *,
         "self_review": report.get("self_review", {}),
         # shadow anti-clone metric (per new section position) — audit only
         "verbatim_overlap": report.get("verbatim_overlap", {}),
+        # v3 spec provenance (mode/topic/seed/hash/trigram per section).
+        # Mode 1 only by design — the assemble path can't carry it (docs
+        # exam-gen-v3-spec-mode §11, decision #17).
+        "spec_provenance": report.get("spec_provenance", {}),
         "token_usage": getattr(gen, "usage", {}),
     }
 
