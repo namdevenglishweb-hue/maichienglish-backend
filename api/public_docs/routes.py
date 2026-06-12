@@ -37,14 +37,23 @@ _PUBLIC_DIR = Path(__file__).resolve().parents[2] / "docs" / "public"
 
 # HARD ALLOWLIST — adding a doc to the API is an explicit code change here
 # (plus committing the file under docs/public/), never a filesystem effect.
-PUBLIC_DOCS: dict[str, str] = {
-    "exam-ai-generation-design": "exam-ai-generation-design.md",
-    "exam-ai-generation-frontend": "exam-ai-generation-frontend.md",
-    "exam-image-generation-design": "exam-image-generation-design.md",
-    "exam-image-generation-frontend": "exam-image-generation-frontend.md",
-    "exam-gen-v3-spec-mode-design": "exam-gen-v3-spec-mode-design.md",
-    "exam-gen-v3-spec-mode-frontend": "exam-gen-v3-spec-mode-frontend.md",
-}
+_PUBLIC_SLUGS = [
+    # AI features (round 1)
+    "exam-ai-generation-design", "exam-ai-generation-frontend",
+    "exam-image-generation-design", "exam-image-generation-frontend",
+    "exam-gen-v3-spec-mode-design", "exam-gen-v3-spec-mode-frontend",
+    # remaining per-feature design+frontend (round 2, 2026-06-12)
+    "attempt-highlights-design", "attempt-highlights-frontend",
+    "attempt-lifecycle-design", "attempt-lifecycle-frontend",
+    "class-management-design", "class-management-frontend",
+    "email-design", "email-frontend",
+    "exam-mode-design", "exam-mode-frontend",
+    "exam-publish-lock-design", "exam-publish-lock-frontend",
+    "session-management-design", "session-management-frontend",
+    "teacher-grading-design", "teacher-grading-frontend",
+    "writing-speaking-design", "writing-speaking-frontend",
+]
+PUBLIC_DOCS: dict[str, str] = {slug: f"{slug}.md" for slug in _PUBLIC_SLUGS}
 
 _FRONTMATTER_UPDATED = re.compile(r"^last-updated:\s*(\S+)", re.MULTILINE)
 _H1 = re.compile(r"^#\s+(.+)$", re.MULTILINE)
