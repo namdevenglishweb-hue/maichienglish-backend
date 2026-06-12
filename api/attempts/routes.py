@@ -308,7 +308,7 @@ async def record_audio_play(
 @router.post(
     "/{attempt_id}/speaking-upload",
     response_model=SpeakingUploadResponse,
-    status_code=200,
+    status_code=status.HTTP_200_OK,
 )
 async def speaking_upload(
     attempt_id: str,
@@ -523,7 +523,7 @@ def _to_answer_view(a: dict) -> AnswerView:
 @router.post(
     "/{attempt_id}/highlights",
     response_model=HighlightResponse,
-    status_code=201,
+    status_code=status.HTTP_201_CREATED,
 )
 async def create_highlight(
     attempt_id: str,
@@ -588,7 +588,7 @@ async def patch_highlight(
 
 @router.delete(
     "/{attempt_id}/highlights/{highlight_id}",
-    status_code=204,
+    status_code=status.HTTP_204_NO_CONTENT,
     response_class=Response,
 )
 async def delete_highlight(

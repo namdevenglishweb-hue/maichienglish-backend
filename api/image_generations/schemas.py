@@ -21,23 +21,41 @@ class GenerateImageRequest(BaseModel):
 
 
 class ImageJobAcceptedResponse(BaseModel):
-    jobId: str
-    status: str = "pending"
+    """202 body for image generation — poll GET /{jobId} for the result."""
+
+    jobId: str = Field(..., description="Id of the created background image job.")
+    status: str = Field(default="pending", description="Initial job status (always 'pending').")
 
 
 class ImageJobView(BaseModel):
-    jobId: str
-    status: str
-    mode: str
-    description: str
-    sourceImageUrl: Optional[str] = None
-    resultUrl: Optional[str] = None
-    report: Optional[dict[str, Any]] = None
-    createdAt: Optional[str] = None
-    updatedAt: Optional[str] = None
-    finishedAt: Optional[str] = None
+    """Polled image-generation job state."""
+
+    jobId: str = Field(..., description="Job id.")
+    status: str = Field(..., description="pending | running | done | failed.")
+    mode: str = Field(..., description="'create' or 'edit' (edit when sourceImageUrl was given).")
+    description: str = Field(..., description="What the image was asked to depict.")
+    sourceImageUrl: Optional[str] = Field(
+        default=None, description="Original image URL for edit mode, if any."
+    )
+    resultUrl: Optional[str] = Field(
+        default=None, description="Uploaded result image URL once the job finishes."
+    )
+    report: Optional[dict[str, Any]] = Field(
+        default=None, description="Diagnostics/result payload from the generation run."
+    )
+    createdAt: Optional[str] = Field(default=None, description="ISO-8601 creation time.")
+    updatedAt: Optional[str] = Field(default=None, description="ISO-8601 last-update time.")
+    finishedAt: Optional[str] = Field(default=None, description="ISO-8601 completion time.")
+
+
+class ImageJobListResponseData(BaseModel):
+    """List payload — `items` per §10.10 list convention."""
+
+    items: list[ImageJobView]
 
 
 class ImageJobListResponse(BaseModel):
+    """Wrapped response for GET /api/admin/image-generations."""
+
     status: int = 200
-    data: dict[str, list[ImageJobView]]
+    data: ImageJobListResponseData

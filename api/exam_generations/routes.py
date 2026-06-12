@@ -28,6 +28,7 @@ from .schemas import (
     GenerateSectionRequest,
     JobAcceptedResponse,
     JobListResponse,
+    JobListResponseData,
     JobView,
     ModelCatalogResponse,
     ModelListResponse,
@@ -197,7 +198,7 @@ async def list_models(provider: str | None = Query(default=None)):
         "gemini": (s.gemini_api_key, s.gemini_base_url),
     }.get(provider)
     if not creds:
-        return {"provider": provider, "models": []}
+        return ModelListResponse(provider=provider, models=[])
     api_key, base_url = creds
     if not api_key:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=f"No API key for {provider}")
@@ -208,7 +209,7 @@ async def list_models(provider: str | None = Query(default=None)):
         listed = await client.models.list()
     except Exception as e:  # noqa: BLE001 — surface provider error as 502
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=f"{provider} models list failed: {e}")
-    return {"provider": provider, "models": sorted(m.id for m in listed.data)}
+    return ModelListResponse(provider=provider, models=sorted(m.id for m in listed.data))
 
 
 @admin_router.get("/model-catalog", response_model=ModelCatalogResponse)
@@ -223,7 +224,7 @@ async def model_catalog():
     """
     from services.ai.catalog import get_model_catalog
 
-    return await get_model_catalog()
+    return ModelCatalogResponse(**await get_model_catalog())
 
 
 @admin_router.get("/{job_id}", response_model=JobView)
@@ -244,7 +245,9 @@ async def list_jobs(
     jobs = await generation_job_service.list_jobs(
         status=status_, scope=scope, limit=limit, offset=offset
     )
-    return JobListResponse(data={"items": [JobView(**j) for j in jobs]})
+    return JobListResponse(
+        data=JobListResponseData(items=[JobView(**j) for j in jobs])
+    )
 
 
 @admin_router.post("/{job_id}/cancel", response_model=JobView)

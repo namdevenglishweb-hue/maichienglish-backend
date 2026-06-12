@@ -97,8 +97,8 @@ class ModelInfo(BaseModel):
 class ModelDefault(BaseModel):
     """The currently-effective default (per-request > ai-settings DB > env)."""
 
-    provider: str
-    model: str
+    provider: str = Field(..., description="Effective default provider id.")
+    model: str = Field(..., description="Effective default model id for that provider.")
 
 
 class ModelCatalogResponse(BaseModel):
@@ -109,39 +109,67 @@ class ModelCatalogResponse(BaseModel):
 
 
 class JobAcceptedResponse(BaseModel):
-    jobId: str
-    status: str = "pending"
+    """202 body for create-job endpoints — poll GET /{jobId} for progress."""
+
+    jobId: str = Field(..., description="Id of the created background job.")
+    status: str = Field(default="pending", description="Initial job status (always 'pending').")
 
 
 class JobView(BaseModel):
     """Polled job state (§14.2). `report` shape varies by scope."""
 
-    jobId: str
-    scope: str
-    status: str
-    sourceExamId: str
-    targetSectionId: Optional[str] = None
-    k: int
-    title: Optional[str] = None
-    sectionsTotal: Optional[int] = None
-    sectionsDone: int = 0
-    currentSection: Optional[int] = None
-    resultExamId: Optional[str] = None
-    report: Optional[dict[str, Any]] = None
-    abortedReason: Optional[str] = None
-    createdAt: Optional[str] = None
-    updatedAt: Optional[str] = None
-    finishedAt: Optional[str] = None
+    jobId: str = Field(..., description="Job id.")
+    scope: str = Field(..., description="Job scope: 'exam' | 'section' | 'exam_preview'.")
+    status: str = Field(..., description="pending | running | done | failed | cancelled.")
+    sourceExamId: str = Field(..., description="Source exam the job was generated from.")
+    targetSectionId: Optional[str] = Field(
+        default=None, description="Source section id (section scope only)."
+    )
+    k: int = Field(..., description="Variation level 1..5 the job ran with.")
+    title: Optional[str] = Field(default=None, description="Title of the exam being generated.")
+    sectionsTotal: Optional[int] = Field(
+        default=None, description="Total sections to generate (multi-part scopes)."
+    )
+    sectionsDone: int = Field(default=0, description="Sections completed so far.")
+    currentSection: Optional[int] = Field(
+        default=None, description="1-based index of the section in progress."
+    )
+    resultExamId: Optional[str] = Field(
+        default=None, description="Saved exam id once a Mode-1 job finishes."
+    )
+    report: Optional[dict[str, Any]] = Field(
+        default=None, description="Scope-dependent result/diagnostics payload."
+    )
+    abortedReason: Optional[str] = Field(
+        default=None, description="Why the job was cancelled/failed, if applicable."
+    )
+    createdAt: Optional[str] = Field(default=None, description="ISO-8601 creation time.")
+    updatedAt: Optional[str] = Field(default=None, description="ISO-8601 last-update time.")
+    finishedAt: Optional[str] = Field(default=None, description="ISO-8601 completion time.")
+
+
+class JobListResponseData(BaseModel):
+    """List payload — `items` per §10.10 list convention."""
+
+    items: list[JobView]
 
 
 class JobListResponse(BaseModel):
+    """Wrapped response for GET /api/admin/exam-generations."""
+
     status: int = 200
-    data: dict[str, list[JobView]]
+    data: JobListResponseData
 
 
 class AssembledExamData(BaseModel):
-    exam: ExamView  # camelCase, consistent with the rest of the exam API
-    warning: Optional[str] = None
+    """Save-result payload — the created draft exam plus any non-fatal warning."""
+
+    exam: ExamView = Field(
+        ..., description="Created draft exam (camelCase, like every other exam response)."
+    )
+    warning: Optional[str] = Field(
+        default=None, description="Non-fatal note surfaced during assembly, if any."
+    )
 
 
 class AssembledExamResponse(BaseModel):

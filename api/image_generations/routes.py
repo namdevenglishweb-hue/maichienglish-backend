@@ -19,6 +19,7 @@ from .schemas import (
     GenerateImageRequest,
     ImageJobAcceptedResponse,
     ImageJobListResponse,
+    ImageJobListResponseData,
     ImageJobView,
 )
 
@@ -75,4 +76,6 @@ async def list_jobs(
     offset: int = Query(default=0, ge=0),
 ):
     jobs = await image_job_service.list_jobs(status=status_, limit=limit, offset=offset)
-    return ImageJobListResponse(data={"items": [ImageJobView(**j) for j in jobs]})
+    return ImageJobListResponse(
+        data=ImageJobListResponseData(items=[ImageJobView(**j) for j in jobs])
+    )
