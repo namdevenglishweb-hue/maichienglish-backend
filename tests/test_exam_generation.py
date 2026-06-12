@@ -308,6 +308,22 @@ def test_spec_pure_functions():
     assert S.find_leaks('{"note": "distractors recycle"}', ["actor"]) == []
     assert S.find_leaks('{"text_genre": "a Zorblat brochure"}', block) == ["zorblat"]
 
+    # audit finding #1: schema vocabulary must never false-positive.
+    # (a) a passage using "position"/"reading" >=2 times must NOT put them in
+    # the blocklist (they're mandatory skill-map vocabulary, not domain);
+    leaky_src = {
+        "materials": [{"type": "text", "content":
+            "The team lost its position in the league. Reading the table, the "
+            "coach knew the position was bad. Reading helped him plan."}],
+        "questions": [],
+    }
+    assert not {"position", "reading"} & set(S.build_blocklist(leaky_src))
+    # (b) JSON KEYS are never scanned — only string values:
+    assert S.find_leaks('{"position": 1, "note": "fine"}', ["position"]) == []
+    # (c) a real domain word in a VALUE still leaks:
+    assert S.find_leaks('{"style_notes": "about the Zorblat brand"}',
+                        ["zorblat"]) == ["zorblat"]
+
     pct, common = S.trigram_overlap(_SRC_PASSAGE, _SRC_PASSAGE)
     assert pct == 100.0 and common >= 3
     assert S.similarity_violation(_SRC_PASSAGE, _SRC_PASSAGE) is not None

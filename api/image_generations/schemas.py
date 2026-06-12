@@ -31,8 +31,8 @@ class ImageJobView(BaseModel):
     """Polled image-generation job state."""
 
     jobId: str = Field(..., description="Job id.")
-    status: str = Field(..., description="pending | running | done | failed.")
-    mode: str = Field(..., description="'create' or 'edit' (edit when sourceImageUrl was given).")
+    status: str = Field(..., description="pending | running | succeeded | failed.")
+    mode: str = Field(..., description="'generate' or 'edit' (edit when sourceImageUrl was given).")
     description: str = Field(..., description="What the image was asked to depict.")
     sourceImageUrl: Optional[str] = Field(
         default=None, description="Original image URL for edit mode, if any."

@@ -42,7 +42,9 @@ def mc_core_eligibility(section: dict[str, Any]) -> Optional[str]:
         return f"section type {section.get('type')!r} is not plain multiple_choice"
     mats = section.get("materials") or []
     if len(mats) != 1 or not isinstance(mats[0], dict) or mats[0].get("type") != "text":
-        return f"needs exactly 1 text material (got {len(mats)})"
+        got = (f"{len(mats)} materials" if len(mats) != 1
+               else f"1 {mats[0].get('type') if isinstance(mats[0], dict) else '?'} material")
+        return f"needs exactly 1 text material (got {got})"
     if not (mats[0].get("content") or "").strip():
         return "text material is empty"
     qs = section.get("questions") or []
@@ -94,11 +96,19 @@ which while who why will with would you your
 writer writers question questions answer answers text paragraph option options
 say says main trying feel
 correct incorrect true false right wrong statement statements
+position reading listening detail details global single specific structure
+narrative article blog genre skill skills level candidate candidates factual
+information inference
 """.split())
-# Last line: exam-MECHANIC words added 2026-06-12 after a live run — in
+# Line 3: exam-MECHANIC words added 2026-06-12 after a live run — in
 # True/False MC sections the option texts "Correct"/"Incorrect" repeat for
 # every question, enter the top-15 frequency list, and a skill map literally
 # cannot describe that format without them → deterministic ANALYZE_DOMAIN_LEAK.
+# Lines 4-6: skill-map SCHEMA vocabulary (audit finding #1) — emit_skill_map
+# forces words like `position` (required key) and `reading`/`detail`/`global`
+# (mandatory skill/scope values) into EVERY skill map; if a source passage
+# happens to use them >=2 times they'd enter the blocklist and the leak check
+# could never pass. They describe HOW, not WHAT — never real domain leaks.
 
 _WORD_TOKEN = re.compile(r"[\w'\-]+", re.ASCII)  # English-ASCII heuristic (accepted)
 _PROPER = re.compile(r"^[A-Z][a-z]")
@@ -149,10 +159,32 @@ def build_blocklist(section: dict[str, Any]) -> list[str]:
     return sorted(block)
 
 
+def _json_string_values(obj: Any, out: list[str]) -> None:
+    """Collect every STRING VALUE in a JSON-like structure — keys excluded."""
+    if isinstance(obj, dict):
+        for v in obj.values():
+            _json_string_values(v, out)
+    elif isinstance(obj, list):
+        for v in obj:
+            _json_string_values(v, out)
+    elif isinstance(obj, str):
+        out.append(obj)
+
+
 def find_leaks(skill_map_json: str, blocklist: list[str]) -> list[str]:
-    """Word-boundary, case-insensitive match over the WHOLE skill-map JSON.
-    Returns leaked terms (empty = clean). Terms are regex-escaped."""
-    haystack = skill_map_json.lower()
+    """Word-boundary, case-insensitive match over the skill map's string
+    VALUES only (audit finding #1: scanning the raw JSON also matched
+    mandatory schema KEYS like `position`, making innocent sources fail
+    deterministically). Returns leaked terms (empty = clean); terms are
+    regex-escaped. Falls back to the whole string when the input isn't JSON.
+    """
+    import json as _json
+    try:
+        values: list[str] = []
+        _json_string_values(_json.loads(skill_map_json), values)
+        haystack = " \n ".join(values).lower()
+    except (ValueError, TypeError):
+        haystack = skill_map_json.lower()  # defensive — caller always dumps JSON
     leaks = []
     for term in blocklist:
         if re.search(rf"\b{re.escape(term)}\b", haystack, re.IGNORECASE):

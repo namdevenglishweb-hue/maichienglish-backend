@@ -392,8 +392,13 @@ def _media_todos(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
     # `position` key of their own).
     todos: list[dict[str, Any]] = []
     for si, s in enumerate(sections):
+        if not isinstance(s, dict):
+            continue
         for mi, m in enumerate(s.get("materials") or []):
-            if isinstance(m, dict) and (m.get("meta") or {}).get("pendingReplacement"):
+            # meta is FE-supplied on the assemble path — a non-dict truthy
+            # meta must not 500 before validation gets to reject it
+            meta = m.get("meta") if isinstance(m, dict) else None
+            if isinstance(meta, dict) and meta.get("pendingReplacement"):
                 todos.append({
                     "section_position": si + 1,
                     "material_index": mi,

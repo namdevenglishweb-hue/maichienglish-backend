@@ -11,17 +11,18 @@ class _ModelOverride(BaseModel):
     """Optional per-request AI model/provider override (else env defaults).
 
     Lets the FE/admin try different models without a redeploy. `aiProvider` ∈
-    {openrouter, groq, anthropic}; `aiModel` is the provider-specific id
-    (e.g. llama-3.3-70b-versatile, google/gemini-2.5-pro, claude-sonnet-4-6).
+    {openrouter, groq, gemini, anthropic}; `aiModel` is the provider-specific
+    id (e.g. llama-3.3-70b-versatile, anthropic/claude-sonnet-4.5).
     """
 
     aiModel: Optional[str] = Field(default=None, description="Override AI_MODEL for this run.")
     aiProvider: Optional[str] = Field(default=None, description="Override AI_PROVIDER for this run.")
     promptVersion: Optional[str] = Field(
         default=None,
-        description="Prompt-pipeline version for this run (e.g. 'v1', 'v2'). "
-        "Default v1 (production baseline). Unknown version → 400. "
-        "Combine with aiModel/aiProvider to A/B {version × model}.",
+        description="Prompt-pipeline version for this run: 'v1' (legacy), "
+        "'v2' (anti-clone, the DEFAULT), 'v3' (spec mode, K>=3 never sees "
+        "the source). Unknown version → 400. Combine with aiModel/aiProvider "
+        "to A/B {version × model}.",
     )
 
 
@@ -120,7 +121,7 @@ class JobView(BaseModel):
 
     jobId: str = Field(..., description="Job id.")
     scope: str = Field(..., description="Job scope: 'exam' | 'section' | 'exam_preview'.")
-    status: str = Field(..., description="pending | running | done | failed | cancelled.")
+    status: str = Field(..., description="pending | running | succeeded | failed | aborted.")
     sourceExamId: str = Field(..., description="Source exam the job was generated from.")
     targetSectionId: Optional[str] = Field(
         default=None, description="Source section id (section scope only)."
