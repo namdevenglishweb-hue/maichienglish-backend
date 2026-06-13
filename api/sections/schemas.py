@@ -144,6 +144,12 @@ class SectionCreate(BaseModel):
         ge=1,
         description="Order within the exam. If omitted, server appends to the end.",
     )
+    partCode: Optional[str] = Field(
+        default=None,
+        description="Cambridge Part preset id (e.g. 'KET_R_P3'). When set with "
+        "inline questions, the section structure must match the preset (else 400, "
+        "field-coded). Null = custom/free-form. See GET /api/presets.",
+    )
     questions: Optional[list[QuestionCreate]] = Field(
         default=None,
         max_length=MAX_BATCH_SIZE,
@@ -195,6 +201,11 @@ class SectionUpdate(BaseModel):
     materials: Optional[list[SectionMaterial]] = None
     maxAudioPlays: Optional[int] = Field(default=None, ge=0)
     position: Optional[int] = Field(default=None, ge=1)
+    partCode: Optional[str] = Field(
+        default=None,
+        description="Set/clear the Cambridge Part preset id (validated as a known "
+        "code). Structure isn't re-checked here (partial edit).",
+    )
 
 
 class SectionQuestionPreview(BaseModel):

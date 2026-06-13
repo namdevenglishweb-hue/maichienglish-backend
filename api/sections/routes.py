@@ -109,6 +109,7 @@ async def create_section(exam_id: str, request: SectionCreate):
                 max_audio_plays=request.maxAudioPlays,
                 position=request.position,
                 questions=nested_questions,
+                part_code=request.partCode,
             )
         else:
             section = await section_service.create_section(
@@ -119,6 +120,7 @@ async def create_section(exam_id: str, request: SectionCreate):
                 materials=materials,
                 max_audio_plays=request.maxAudioPlays,
                 position=request.position,
+                part_code=request.partCode,
             )
     except NotFoundError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
@@ -157,6 +159,7 @@ async def batch_update_sections(request: SectionBatchUpdateRequest):
         "materials": "materials",
         "maxAudioPlays": "max_audio_plays",
         "position": "position",
+        "partCode": "part_code",
     }
     updates: list[dict] = []
     for item in request.updates:
@@ -273,6 +276,7 @@ async def update_section(section_id: str, request: SectionUpdate):
         "materials": "materials",
         "maxAudioPlays": "max_audio_plays",
         "position": "position",
+        "partCode": "part_code",
     }
     updates: dict = {}
     for k, v in raw.items():

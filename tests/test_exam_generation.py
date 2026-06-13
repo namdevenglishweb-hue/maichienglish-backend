@@ -1032,6 +1032,68 @@ def test_build_scaffold_sections_whole_paper():
         P.build_scaffold_sections("IELTS", "reading")      # no presets
 
 
+# --- B5 builder-save preset enforcement -------------------------------------- #
+
+def test_assert_section_matches_preset():
+    from services import preset_validator as V
+    from services.presets import PART_PRESETS, scaffold_section_from_preset
+
+    # no part_code → no-op (custom section, hành vi cũ)
+    V.assert_section_matches_preset(None, "multiple_choice", [{"question_type": "x"}])
+    # unknown part_code → ValidationError
+    with pytest.raises(ValidationError):
+        V.assert_section_matches_preset("NOPE_R_P9", "multiple_choice", [])
+    # partial (no questions yet) + known code → ok (structure deferred)
+    V.assert_section_matches_preset("KET_R_P3", "multiple_choice", [])
+
+    sec = scaffold_section_from_preset(PART_PRESETS["KET_R_P3"])      # 5q/3opt
+    V.assert_section_matches_preset("KET_R_P3", sec["type"], sec["questions"])  # ok
+    with pytest.raises(ValidationError) as ei:                        # wrong count
+        V.assert_section_matches_preset("KET_R_P3", sec["type"], sec["questions"][:4])
+    assert "PRESET_NUM_QUESTIONS" in str(ei.value)
+
+    # fill_blank preset (options None) — option count NOT checked (no false-fail)
+    p6 = scaffold_section_from_preset(PART_PRESETS["PET_R_P6"])
+    V.assert_section_matches_preset("PET_R_P6", p6["type"], p6["questions"])
+
+
+# --- B6 eligibility_reason surfaced ------------------------------------------ #
+
+def test_assign_core_with_reason():
+    from services.ai import spec_mode as S
+    good = _spec_src_section()
+    core, reason = S.assign_core_with_reason(good, 5, "KET")
+    assert core == "multiple_choice" and "spec" in reason
+    core, reason = S.assign_core_with_reason(good, 2, "KET")
+    assert core is None and "k=2" in reason and "rewrite" in reason
+    core, reason = S.assign_core_with_reason(good, 5, "IELTS")
+    assert core is None and "level" in reason
+
+
+async def test_report_carries_eligibility_reason():
+    import random
+    _, rep = await G.generate_one_section(
+        _spec_src_section(), 5, exam_context=_SPEC_CTX, generator=FakeSpecGen(),
+        rounds=1, prompt_version="v3", rng=random.Random(1),
+        skill_map_cache_override=FakeSkillMapCache())
+    assert "spec" in rep["eligibility_reason"]                # spec path
+    _, rep2 = await G.generate_one_section(
+        _src_section(), 2, exam_context=_CTX, generator=FakeGen([_good_ai()]),
+        rounds=1, prompt_version="v3")
+    assert rep2["mode"] == "rewrite" and "rewrite" in rep2["eligibility_reason"]
+
+
+# --- B7 error-code catalog --------------------------------------------------- #
+
+def test_error_code_catalog():
+    from services.preset_validator import error_code_catalog
+    cat = {c["code"] for c in error_code_catalog()}
+    assert {"PRESET_NUM_QUESTIONS", "PRESET_OPTIONS", "PRESET_QUESTION_TYPE",
+            "PRESET_SECTION_TYPE"} <= cat
+    item = next(c for c in error_code_catalog() if c["code"] == "PRESET_NUM_QUESTIONS")
+    assert item["field"] and item["messageEn"] and item["messageVi"]
+
+
 def test_verbatim_overlap_metric_separates_copy_from_rewrite():
     """1.0 on a verbatim copy, low on a genuine rewrite; gap markers ignored."""
     src = {

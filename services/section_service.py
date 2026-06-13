@@ -183,6 +183,7 @@ class SectionService:
         materials: Optional[list[dict]] = None,
         max_audio_plays: Optional[int] = None,
         position: Optional[int] = None,
+        part_code: Optional[str] = None,
     ) -> dict[str, Any]:
         """Create a new section under an exam.
 
@@ -209,6 +210,11 @@ class SectionService:
             raise ValidationError(
                 f"Invalid section type {type!r}; allowed: {sorted(_ALLOWED_TYPES)}"
             )
+        # Bare section (no questions yet): only validate part_code is a KNOWN
+        # preset (structure deferred — granular CRUD, like gap markers).
+        if part_code:
+            from services import preset_validator
+            preset_validator.assert_section_matches_preset(part_code, type, None)
 
         async with self.db.acquire() as conn:
             async with conn.transaction():
@@ -235,8 +241,8 @@ class SectionService:
                     f"""
                     INSERT INTO public.sections
                         (exam_id, position, part_label, type, instructions,
-                         materials, max_audio_plays)
-                    VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+                         materials, max_audio_plays, part_code)
+                    VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
                     RETURNING {_SELECT_COLS}
                     """,
                     exam_id,
@@ -246,6 +252,7 @@ class SectionService:
                     instructions,
                     json.dumps(validated_materials),
                     max_audio_plays,
+                    part_code,
                 )
 
         logger.info(
@@ -305,6 +312,7 @@ class SectionService:
             "materials",
             "max_audio_plays",
             "position",
+            "part_code",
         }
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:
@@ -316,6 +324,12 @@ class SectionService:
             raise ValidationError(
                 f"Invalid section type {updates['type']!r}; allowed: {sorted(_ALLOWED_TYPES)}"
             )
+        # Setting/clearing a part_code: only validate it's a KNOWN preset
+        # (structure deferred — update may be partial, granular-CRUD policy).
+        if updates.get("part_code"):
+            from services import preset_validator
+            preset_validator.assert_section_matches_preset(
+                updates["part_code"], updates.get("type"), None)
 
         set_parts = []
         params: list[Any] = []
@@ -395,6 +409,7 @@ class SectionService:
         max_audio_plays: Optional[int] = None,
         position: Optional[int] = None,
         questions: Optional[list[dict[str, Any]]] = None,
+        part_code: Optional[str] = None,
     ) -> dict[str, Any]:
         """Create a section + inline child questions in one transaction.
 
@@ -443,6 +458,13 @@ class SectionService:
             validated_materials, question_positions, section_label="section"
         )
 
+        # Part-preset conformance (B5): section with part_code must match the
+        # Cambridge Part (hard-block, field-coded). Unknown code → 400.
+        if part_code:
+            from services import preset_validator
+            preset_validator.assert_section_matches_preset(
+                part_code, type, normalized_qs)
+
         async with self.db.acquire() as conn:
             async with conn.transaction():
                 exam = await conn.fetchrow(
@@ -468,8 +490,8 @@ class SectionService:
                     f"""
                     INSERT INTO public.sections
                         (exam_id, position, part_label, type, instructions,
-                         materials, max_audio_plays)
-                    VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+                         materials, max_audio_plays, part_code)
+                    VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
                     RETURNING {_SELECT_COLS}
                     """,
                     exam_id,
@@ -479,6 +501,7 @@ class SectionService:
                     instructions,
                     json.dumps(validated_materials),
                     max_audio_plays,
+                    part_code,
                 )
                 section_id = section_row["id"]
                 for q in normalized_qs:
@@ -526,7 +549,7 @@ class SectionService:
         normalized: list[tuple[str, dict[str, Any]]] = []
         allowed = {
             "part_label", "type", "instructions", "materials",
-            "max_audio_plays", "position",
+            "max_audio_plays", "position", "part_code",
         }
         for i, item in enumerate(updates):
             sid = item.get("id")
@@ -545,6 +568,10 @@ class SectionService:
                 raise ValidationError(
                     f"updates[{i}]: invalid section type {patch['type']!r}"
                 )
+            if patch.get("part_code"):     # known-code check (structure deferred)
+                from services import preset_validator
+                preset_validator.assert_section_matches_preset(
+                    patch["part_code"], patch.get("type"), None)
             normalized.append((sid, patch))
 
         out: list[dict[str, Any]] = []

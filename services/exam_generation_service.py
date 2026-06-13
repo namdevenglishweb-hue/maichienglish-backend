@@ -36,7 +36,8 @@ ProgressCb = Optional[Callable[[int, int], Awaitable[None]]]
 # v3 spec provenance keys copied from a section report into job report /
 # generation_meta (Mode 1) — docs/exam-gen-v3-spec-mode/ §11.
 _SPEC_REPORT_KEYS = ("mode", "core", "topic", "diversity_seed",
-                     "skill_map_hash", "trigram_overlap_pct", "part_code")
+                     "skill_map_hash", "trigram_overlap_pct", "part_code",
+                     "eligibility_reason")
 
 
 # ---------------------------------------------------------------------------
@@ -939,17 +940,20 @@ async def generate_one_section(
 
     adapter_version = version
     mode: Optional[str] = None
+    eligibility_reason: Optional[str] = None
     if pv.spec_mode:
         from services.ai import spec_mode
-        core = spec_mode.assign_core(
+        core, eligibility_reason = spec_mode.assign_core_with_reason(
             source_section, k, (exam_context or {}).get("level"))
         if core:
-            return await _generate_section_spec(
+            section, report = await _generate_section_spec(
                 source_section, k, core=core, exam_context=exam_context,
                 generator=generator, section_prompt=section_prompt,
                 rounds=rounds, version=version, rng=rng,
                 cache=skill_map_cache_override, preset=preset,
             )
+            report["eligibility_reason"] = eligibility_reason  # B6 (FE surface)
+            return section, report
         # Rewrite fallback: adapter-level config = v2 (docs §10.4); the
         # service still reports prompt_version=v3 + mode=rewrite.
         adapter_version = REWRITE_FALLBACK_VERSION
@@ -994,6 +998,8 @@ async def generate_one_section(
             }
             if mode:  # spec-capable version that fell back to rewrite
                 report["mode"] = mode
+            if eligibility_reason:  # B6 — why this section took the rewrite path
+                report["eligibility_reason"] = eligibility_reason
             return section, report
         except (StructureMismatch, ValidationError) as e:
             last_err = str(e)

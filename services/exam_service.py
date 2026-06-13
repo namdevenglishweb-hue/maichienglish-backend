@@ -344,6 +344,17 @@ class ExamService:
                 section_label=f"sections[{si}]",
             )
 
+            # Part-preset conformance (B5): a section declaring a part_code must
+            # match the Cambridge Part structure (hard-block, field-coded).
+            part_code = sec.get("part_code") or sec.get("partCode")
+            if part_code:
+                from services import preset_validator
+                try:
+                    preset_validator.assert_section_matches_preset(
+                        part_code, sec_type, normalized_qs)
+                except ValidationError as e:
+                    raise ValidationError(f"sections[{si}]: {e}")
+
             normalized_sections.append(
                 {
                     "position": si + 1,

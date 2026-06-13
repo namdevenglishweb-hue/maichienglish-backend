@@ -66,17 +66,28 @@ def mc_core_eligibility(section: dict[str, Any]) -> Optional[str]:
     return None
 
 
+def assign_core_with_reason(
+    section: dict[str, Any], k: int, level: Optional[str]
+) -> tuple[Optional[str], str]:
+    """Like assign_core but also returns a human-readable eligibility reason
+    (B6, surfaced in the gen report/preview so the FE can show "Part này chạy
+    rewrite vì: <reason>"). core None → rewrite fallback."""
+    gate = orchestration_gate(k, level)
+    if gate is not None:
+        return None, f"rewrite — {gate}"
+    elig = mc_core_eligibility(section)
+    if elig is not None:
+        return None, f"rewrite — {elig}"
+    return "multiple_choice", "spec — eligible (core: multiple_choice)"
+
+
 def assign_core(section: dict[str, Any], k: int, level: Optional[str]) -> Optional[str]:
     """Thin external assigner (hosted by generate_one_section, design §2).
 
     Returns the core name to run spec mode with, or None → rewrite fallback.
     The spec engine itself never routes — it RECEIVES the core.
     """
-    if orchestration_gate(k, level) is not None:
-        return None
-    if mc_core_eligibility(section) is not None:
-        return None
-    return "multiple_choice"
+    return assign_core_with_reason(section, k, level)[0]
 
 
 # ---------------------------------------------------------------------------

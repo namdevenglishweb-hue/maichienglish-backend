@@ -7,9 +7,11 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from dependencies import get_current_user, require_teacher_or_admin
 from services.exceptions import ValidationError
+from services.preset_validator import error_code_catalog
 from services.presets import list_presets, resolve_preset, scaffold_section_from_preset
 
 from .schemas import (
+    ErrorCodeListResponse,
     PresetListResponse,
     ScaffoldSectionRequest,
     ScaffoldSectionResponse,
@@ -25,6 +27,13 @@ async def get_presets(current_user: dict = Depends(get_current_user)):
     """All Cambridge Part presets (full KET/PET catalogue; aiGenSupported flags
     which can be AI-generated this round)."""
     return {"presets": list_presets()}
+
+
+@router.get("/error-codes", response_model=ErrorCodeListResponse)
+async def get_error_codes(current_user: dict = Depends(get_current_user)):
+    """B7 — validator error codes + default EN/VI messages, so the FE has one
+    source to map preset/structure errors to inline field messages."""
+    return {"errorCodes": error_code_catalog()}
 
 
 @router.post(

@@ -50,6 +50,19 @@ class ScaffoldSectionRequest(BaseModel):
     partCode: str = Field(..., description="Preset id to scaffold, e.g. 'KET_R_P3'.")
 
 
+class ErrorCodeItem(BaseModel):
+    code: str = Field(..., description="Validator error code, e.g. PRESET_NUM_QUESTIONS.")
+    field: str = Field(..., description="Field path hint the error attaches to.")
+    messageEn: str
+    messageVi: str
+
+
+class ErrorCodeListResponse(BaseModel):
+    """GET /api/presets/error-codes — one source for FE inline messages."""
+
+    errorCodes: list[ErrorCodeItem]
+
+
 class ScaffoldSectionResponse(BaseModel):
     """An empty-but-valid section template (NOT persisted). The FE adds it to an
     exam being built; on save, create_exam_nested persists it (incl. part_code).
