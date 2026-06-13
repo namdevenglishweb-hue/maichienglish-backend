@@ -956,6 +956,82 @@ async def test_preset_drives_structure_over_source():
     assert section["type"] == "multiple_choice"
 
 
+# --- B3/B4 scaffold (empty-but-valid section/exam from presets) ------------ #
+
+def _assert_scaffold_section_valid(sec):
+    """Mirror create_exam_nested's validation gates (pure, no DB)."""
+    from services.section_service import _validate_materials, validate_gap_markers
+    from services.question_service import _validate_question_data
+    mats = _validate_materials(sec["materials"])
+    positions = set()
+    for i, q in enumerate(sec["questions"]):
+        _validate_question_data(q["question_type"], q["question_data"])
+        positions.add(i + 1)               # create_exam_nested assigns 1..N
+    validate_gap_markers(mats, positions, section_label=sec.get("part_code", "x"))
+
+
+def test_scaffold_section_is_valid_for_every_preset():
+    """B3: every preset scaffolds to an empty-but-valid section (passes the real
+    materials/question/gap validators) and carries its part_code."""
+    from services import presets as P
+    for code, preset in P.PART_PRESETS.items():
+        sec = P.scaffold_section_from_preset(preset)
+        assert sec["part_code"] == code
+        assert sec["type"] == preset.section_type
+        assert len(sec["questions"]) == preset.num_questions
+        _assert_scaffold_section_valid(sec)                 # must not raise
+
+
+def test_scaffold_section_shapes():
+    """B3 spot-checks: MC options/index, gap markers for cloze, image
+    placeholder for image-dependent, form_completion labels, listening plays."""
+    from services import presets as P
+
+    mc = P.scaffold_section_from_preset(P.PART_PRESETS["KET_R_P3"])  # 5q/3opt
+    q0 = mc["questions"][0]["question_data"]
+    assert len(q0["options"]) == 3 and q0["correct_index"] == 0
+    assert all(o["text"] for o in q0["options"])           # non-empty (validator)
+
+    cloze = P.scaffold_section_from_preset(P.PART_PRESETS["PET_R_P6"])  # open cloze 6 gaps
+    content = cloze["materials"][0]["content"]
+    assert all(("{{gap:%d}}" % k) in content for k in range(1, 7))
+
+    img = P.scaffold_section_from_preset(P.PART_PRESETS["KET_W_P7"])    # 3-picture story
+    imgs = [m for m in img["materials"] if m["type"] == "image"]
+    assert len(imgs) == 3 and all(m["meta"]["pendingReplacement"] for m in imgs)
+    assert imgs[0]["url"]                                   # non-empty (validator)
+
+    form = P.scaffold_section_from_preset(P.PART_PRESETS["KET_L_P2"])   # notes completion
+    assert form["max_audio_plays"] == 2                    # listening = 2 plays
+    assert form["questions"][0]["question_data"]["label"] == "1."
+
+    pic = P.scaffold_section_from_preset(P.PART_PRESETS["KET_L_P1"])    # picture MC
+    opts = pic["questions"][0]["question_data"]["options"]
+    assert all("image_url" in o for o in opts)             # options are pictures
+    assert all(m["type"] == "audio" for m in pic["materials"])  # materials = audio only
+
+
+def test_build_scaffold_sections_whole_paper():
+    """B4: KET Reading scaffolds to all 5 Parts in order, each valid; bad skill
+    (writing — not a standalone exam) → ValidationError."""
+    from services import presets as P
+
+    secs = P.build_scaffold_sections("KET", "reading")
+    assert [s["part_code"] for s in secs] == [
+        "KET_R_P1", "KET_R_P2", "KET_R_P3", "KET_R_P4", "KET_R_P5"]
+    for s in secs:
+        _assert_scaffold_section_valid(s)
+
+    pet = P.build_scaffold_sections("PET", "listening")
+    assert [s["part_code"] for s in pet] == [
+        "PET_L_P1", "PET_L_P2", "PET_L_P3", "PET_L_P4"]
+
+    with pytest.raises(ValidationError):
+        P.build_scaffold_sections("KET", "writing")        # not an exam skill
+    with pytest.raises(ValidationError):
+        P.build_scaffold_sections("IELTS", "reading")      # no presets
+
+
 def test_verbatim_overlap_metric_separates_copy_from_rewrite():
     """1.0 on a verbatim copy, low on a genuine rewrite; gap markers ignored."""
     src = {

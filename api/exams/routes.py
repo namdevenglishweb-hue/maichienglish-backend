@@ -2,7 +2,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from dependencies import get_current_user, require_admin
+from dependencies import get_current_user, require_admin, require_teacher_or_admin
 from services.exam_service import exam_service
 from services.exceptions import NotFoundError, ValidationError
 from services.question_service import question_service
@@ -17,6 +17,7 @@ from .schemas import (
     ExamQuestionPreview,
     ExamResponse,
     ExamResponseData,
+    ExamScaffoldRequest,
     ExamSectionPreview,
     ExamUpdate,
     ExamView,
@@ -205,6 +206,37 @@ async def create_exam(
         created_by=created_by,
     )
     return ExamResponse(status=201, data=ExamResponseData(exam=_to_view(exam)))
+
+
+@router.post(
+    "/scaffold",
+    response_model=ExamResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def scaffold_exam(
+    request: ExamScaffoldRequest,
+    current_user: dict = Depends(require_teacher_or_admin),
+):
+    """B4 — create an UNPUBLISHED exam pre-filled with every Cambridge Part for
+    (level, skill), each section scaffolded empty-but-valid from its preset
+    (docs/exam-part-presets §4). Reuses create_exam_nested. `skill` must be
+    reading|listening (Writing/Speaking are single Parts, not exams) → else 400.
+    Call GET /api/exams/{id}?include=sections to fetch the section IDs.
+    """
+    profile = await user_service.get_by_email(current_user["sub"])
+    created_by = profile["id"] if profile else None
+    try:
+        exam = await exam_service.scaffold_exam(
+            request.level, request.skill,
+            format_standard=request.formatStandard or "cambridge_2020",
+            title=request.title, created_by=created_by,
+        )
+    except ValidationError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return ExamResponse(
+        status=201,
+        data=ExamResponseData(exam=_to_view(exam), createdCounts=exam.get("created_counts")),
+    )
 
 
 @router.put(

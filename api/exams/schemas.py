@@ -96,6 +96,20 @@ class ExamSectionPreview(BaseModel):
     questions: list[ExamQuestionPreview] = Field(default_factory=list)
 
 
+class ExamScaffoldRequest(BaseModel):
+    """B4 — POST /api/exams/scaffold: create an unpublished exam pre-filled with
+    every Cambridge Part for (level, skill)."""
+
+    level: str = Field(..., description="KET | PET.")
+    skill: str = Field(..., description="reading | listening (Writing/Speaking are "
+                       "single Parts, not standalone exams).")
+    formatStandard: Optional[str] = Field(
+        default="cambridge_2020",
+        description="Stored on the exam (exams.format_standard). Default "
+        "'cambridge_2020'.")
+    title: Optional[str] = Field(default=None, description="Optional exam title.")
+
+
 class ExamView(BaseModel):
     """Top-level exam metadata returned to clients.
 

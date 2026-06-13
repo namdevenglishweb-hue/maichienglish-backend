@@ -427,5 +427,28 @@ class ExamService:
         }
         return result
 
+    async def scaffold_exam(
+        self, level: str, skill: str, *,
+        format_standard: str = "cambridge_2020",
+        title: Optional[str] = None, created_by: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """B4 — create an UNPUBLISHED exam pre-filled with every Cambridge Part
+        for (level, skill), each section scaffolded empty-but-valid from its
+        preset (docs/exam-part-presets §4). Reuses create_exam_nested for the
+        single-transaction write; part_code + format_standard persist via
+        migration 0024. Raises ValidationError on an unsupported combo."""
+        from services.presets import build_scaffold_sections
+        sections = build_scaffold_sections(level, skill)   # ValidationError if bad combo
+        # Sensible default durations (internal convention; tunable).
+        duration = {("KET", "reading"): 40, ("PET", "reading"): 45,
+                    ("KET", "listening"): 30, ("PET", "listening"): 30}.get(
+            (level, skill), 45)
+        default_title = f"{level} {skill.capitalize()} — khung Cambridge 2020"
+        return await self.create_exam_nested(
+            title=title or default_title, level=level, skill=skill,
+            duration_minutes=duration, created_by=created_by,
+            sections=sections, format_standard=format_standard,
+        )
+
 
 exam_service = ExamService()

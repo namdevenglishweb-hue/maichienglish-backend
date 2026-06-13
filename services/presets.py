@@ -338,3 +338,115 @@ def _preset_dict(p: PartPreset) -> dict:
 def list_presets() -> list[dict]:
     """Serializable list for GET /api/presets (FE dropdown + builder scaffold)."""
     return [_preset_dict(p) for p in PART_PRESETS.values()]
+
+
+# ---------------------------------------------------------------------------
+# Scaffold — build an EMPTY but VALID section from a preset (B3/B4).
+# Placeholders are chosen so the result passes the real validators
+# (_validate_materials / _validate_question_data / validate_gap_markers) and is
+# a legal draft. Teacher fills in the real content afterwards. Pure (no DB):
+# the returned dict feeds exam_service.create_exam_nested, which persists
+# part_code (migration 0024) — no new DB write path.
+# ---------------------------------------------------------------------------
+
+_TEXT_PLACEHOLDER = "[Nội dung mẫu — thay bằng nội dung thật]"
+_MEDIA_PLACEHOLDER = "pending://replace"   # non-empty (url min_length=1) + pendingReplacement
+_LISTENING_MAX_PLAYS = 2                    # Cambridge: nghe 2 lần
+
+
+def _is_picture_mc(preset: PartPreset) -> bool:
+    """Picture multiple-choice (KET/PET Listening Part 1): the OPTIONS are
+    pictures (image_url), the section materials are the audio clips."""
+    types = {m.type for m in preset.materials_spec}
+    return preset.section_type == "multiple_choice" and "image" in types and "audio" in types
+
+
+def scaffold_section_from_preset(preset: PartPreset) -> dict:
+    """Return an empty-but-valid section dict shaped to the preset, ready to be
+    passed (with others) to exam_service.create_exam_nested. Carries part_code."""
+    n, L = preset.num_questions, (preset.options_per_question or 0)
+    st, qt = preset.section_type, preset.question_type
+    listening = preset.skill == "listening"
+    picture_mc = _is_picture_mc(preset)
+
+    questions: list[dict] = []
+    for i in range(n):
+        pos = i + 1
+        if qt in ("multiple_choice", "matching"):
+            if picture_mc:
+                opts = [{"image_url": _MEDIA_PLACEHOLDER} for _ in range(L)]
+            else:
+                opts = [{"text": chr(65 + j)} for j in range(L)]   # A, B, C…
+            qd: dict = {"stem": "", "options": opts, "correct_index": 0}
+        elif qt == "fill_blank":
+            qd = {"correct_answers": ["?"], "case_sensitive": False}
+            if st == "form_completion":
+                qd["label"] = f"{pos}."
+        elif qt in ("writing", "speaking"):
+            qd = {"prompt": preset.instructions_en or _TEXT_PLACEHOLDER}
+        else:
+            qd = {}
+        questions.append({
+            "question_type": qt, "question_data": qd,
+            "points": preset.points_per_question,
+        })
+
+    materials: list[dict] = []
+    for m in preset.materials_spec:
+        if m.type == "text":
+            for j in range(m.count):
+                content = _TEXT_PLACEHOLDER
+                if preset.gap_markers and m.count == 1:
+                    content += " " + " ".join("{{gap:%d}}" % k for k in range(1, n + 1))
+                mat: dict = {"type": "text", "content": content}
+                if st == "multiple_choice" and m.count == n and m.count > 1:
+                    mat["label"] = str(j + 1)                 # short_texts: 1 text ↔ 1 question
+                elif st in ("matching", "multiple_choice_shared") and m.count > 1:
+                    mat["label"] = chr(65 + j)                # lettered text pool (A, B, C…)
+                materials.append(mat)
+        elif m.type == "image":
+            if picture_mc:
+                continue                                       # images are the options, not materials
+            for _ in range(m.count):
+                materials.append({"type": "image", "url": _MEDIA_PLACEHOLDER,
+                                  "meta": {"pendingReplacement": True}})
+        elif m.type == "audio":
+            for _ in range(m.count):
+                materials.append({"type": "audio", "url": _MEDIA_PLACEHOLDER,
+                                  "meta": {"pendingReplacement": True}})
+
+    return {
+        "part_code": preset.part_code,
+        "type": st,
+        "part_label": preset.label,
+        "instructions": preset.instructions_en,
+        "max_audio_plays": _LISTENING_MAX_PLAYS if listening else None,
+        "materials": materials,
+        "questions": questions,
+    }
+
+
+SCAFFOLD_SKILLS = ("reading", "listening")  # exam.skill CHECK; W/S aren't exams
+
+
+def presets_for_exam(level: str, skill: str) -> list[PartPreset]:
+    """Presets for one exam paper (level+skill), ordered by default_position."""
+    return sorted(
+        (p for p in PART_PRESETS.values() if p.level == level and p.skill == skill),
+        key=lambda p: p.default_position,
+    )
+
+
+def build_scaffold_sections(level: str, skill: str) -> list[dict]:
+    """Empty-but-valid section dicts for every Part of (level, skill), in order.
+    Raises ValidationError if the combo has no presets / unsupported skill."""
+    from services.exceptions import ValidationError
+    if skill not in SCAFFOLD_SKILLS:
+        raise ValidationError(
+            f"skill {skill!r} không scaffold được thành đề (chỉ {SCAFFOLD_SKILLS}); "
+            "Writing/Speaking là Part lẻ, không phải 1 bài thi độc lập."
+        )
+    presets = presets_for_exam(level, skill)
+    if not presets:
+        raise ValidationError(f"Không có preset cho level={level!r} skill={skill!r}")
+    return [scaffold_section_from_preset(p) for p in presets]

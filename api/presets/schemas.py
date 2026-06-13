@@ -1,6 +1,6 @@
-"""Response schema for GET /api/presets (typed OpenAPI contract)."""
+"""Schemas for GET /api/presets + POST /api/presets/scaffold-section."""
 
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
@@ -44,3 +44,18 @@ class PresetItem(BaseModel):
 
 class PresetListResponse(BaseModel):
     presets: list[PresetItem]
+
+
+class ScaffoldSectionRequest(BaseModel):
+    partCode: str = Field(..., description="Preset id to scaffold, e.g. 'KET_R_P3'.")
+
+
+class ScaffoldSectionResponse(BaseModel):
+    """An empty-but-valid section template (NOT persisted). The FE adds it to an
+    exam being built; on save, create_exam_nested persists it (incl. part_code).
+    Question/material placeholders pass the server validators as a draft."""
+
+    section: dict[str, Any] = Field(
+        ..., description="Section template: type, part_label, instructions, "
+        "max_audio_plays, part_code, materials[], questions[] (with placeholder "
+        "content the teacher replaces).")
