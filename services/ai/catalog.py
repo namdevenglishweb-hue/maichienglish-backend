@@ -22,9 +22,15 @@ from typing import Any
 CURATED_MODELS: list[dict[str, str]] = [
     {
         "provider": "openrouter",
+        "model": "anthropic/claude-opus-4.8",
+        "label": "Claude Opus 4.8",
+        "note": "Mới nhất, chất lượng cao nhất (mặc định). Đắt hơn Sonnet.",
+    },
+    {
+        "provider": "openrouter",
         "model": "anthropic/claude-sonnet-4.5",
         "label": "Claude Sonnet 4.5",
-        "note": "Chất lượng cao nhất, đắt + chậm hơn.",
+        "note": "Rẻ/nhanh hơn Opus; baseline A/B cũ.",
     },
     {
         "provider": "openrouter",

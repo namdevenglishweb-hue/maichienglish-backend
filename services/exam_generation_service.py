@@ -36,7 +36,7 @@ ProgressCb = Optional[Callable[[int, int], Awaitable[None]]]
 # v3 spec provenance keys copied from a section report into job report /
 # generation_meta (Mode 1) — docs/exam-gen-v3-spec-mode/ §11.
 _SPEC_REPORT_KEYS = ("mode", "core", "topic", "diversity_seed",
-                     "skill_map_hash", "trigram_overlap_pct")
+                     "skill_map_hash", "trigram_overlap_pct", "part_code")
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +124,8 @@ def _assert_structure_preserved(
 
 
 def _merge_generated_section(
-    source: dict[str, Any], ai_out: dict[str, Any], *, strict_spec: bool = False
+    source: dict[str, Any], ai_out: dict[str, Any], *, strict_spec: bool = False,
+    preset: Any = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Merge AI content onto the source, re-imposing all hard invariants.
 
@@ -134,6 +135,12 @@ def _merge_generated_section(
     `strict_spec` (v3 spec mode, design §4.7/N13): missing material content /
     instructions / part_label ⇒ FAIL instead of falling back to the source —
     a fallback would splice source text/flavour into a "brand-new" section.
+
+    `preset` (part-presets, MC-only): when given, the QUESTION structure
+    (count / question_type / points) is forced from the PRESET, not the source
+    — "preset quyết cấu trúc, đề gốc bao nhiêu câu cũng kệ". The single text
+    material is still taken from the AI output (MC reading = 1 text). When None,
+    behaviour is exactly as before (source-driven) — fully backward compatible.
     """
     src_mats = source.get("materials") or []
     ai_mats = ai_out.get("materials") or []
@@ -179,30 +186,54 @@ def _merge_generated_section(
             raise StructureMismatch(f"unknown source material type {t!r}")
         out_mats.append(m)
 
-    src_qs = source.get("questions") or []
     ai_qs = ai_out.get("questions") or []
-    if len(ai_qs) != len(src_qs):
-        raise StructureMismatch(
-            f"expected {len(src_qs)} questions, got {len(ai_qs)}"
-        )
     out_qs: list[dict[str, Any]] = []
     justifications: list[dict[str, Any]] = []
-    for i, (sq, aq) in enumerate(zip(src_qs, ai_qs)):
-        aq = aq if isinstance(aq, dict) else {}
-        qd = aq.get("question_data")
-        if not isinstance(qd, dict):
-            raise StructureMismatch(f"questions[{i}] missing question_data")
-        pos = sq.get("position", i + 1)
-        out_qs.append({
-            "position": pos,
-            "question_type": sq.get("question_type"),  # FORCED
-            "points": sq.get("points", 1),             # FORCED
-            "question_data": qd,
-        })
-        if aq.get("answer_justification"):
-            justifications.append(
-                {"position": pos, "justification": aq["answer_justification"]}
+    if preset is not None:
+        # PRESET drives the question structure (count/type/points), not source.
+        if len(ai_qs) != preset.num_questions:
+            raise StructureMismatch(
+                f"expected {preset.num_questions} questions "
+                f"(preset {preset.part_code}), got {len(ai_qs)}"
             )
+        for i, aq in enumerate(ai_qs):
+            aq = aq if isinstance(aq, dict) else {}
+            qd = aq.get("question_data")
+            if not isinstance(qd, dict):
+                raise StructureMismatch(f"questions[{i}] missing question_data")
+            pos = i + 1
+            out_qs.append({
+                "position": pos,
+                "question_type": preset.question_type,        # FORCED from preset
+                "points": preset.points_per_question,         # FORCED from preset
+                "question_data": qd,
+            })
+            if aq.get("answer_justification"):
+                justifications.append(
+                    {"position": pos, "justification": aq["answer_justification"]}
+                )
+    else:
+        src_qs = source.get("questions") or []
+        if len(ai_qs) != len(src_qs):
+            raise StructureMismatch(
+                f"expected {len(src_qs)} questions, got {len(ai_qs)}"
+            )
+        for i, (sq, aq) in enumerate(zip(src_qs, ai_qs)):
+            aq = aq if isinstance(aq, dict) else {}
+            qd = aq.get("question_data")
+            if not isinstance(qd, dict):
+                raise StructureMismatch(f"questions[{i}] missing question_data")
+            pos = sq.get("position", i + 1)
+            out_qs.append({
+                "position": pos,
+                "question_type": sq.get("question_type"),  # FORCED
+                "points": sq.get("points", 1),             # FORCED
+                "question_data": qd,
+            })
+            if aq.get("answer_justification"):
+                justifications.append(
+                    {"position": pos, "justification": aq["answer_justification"]}
+                )
 
     if strict_spec and not (
         (ai_out.get("part_label") or "").strip()
@@ -212,10 +243,10 @@ def _merge_generated_section(
             "part_label/instructions missing (no source fallback in spec mode)"
         )
     merged = {
-        "type": source.get("type"),
+        "type": preset.section_type if preset is not None else source.get("type"),
         "part_label": ai_out.get("part_label") or source.get("part_label"),
         "instructions": ai_out.get("instructions") or source.get("instructions"),
-        "max_audio_plays": source.get("max_audio_plays"),
+        "max_audio_plays": None if preset is not None else source.get("max_audio_plays"),
         "materials": out_mats,
         "questions": out_qs,
     }
@@ -720,6 +751,7 @@ async def _spec_verify(
     spec: dict[str, Any],
     src_material: str,
     rng: Optional[_random.Random],
+    preset: Any = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Spec-mode BLIND-SOLVE verify + FIX loop (AMENDMENT v1.2 §9.4/§9.5).
 
@@ -754,7 +786,8 @@ async def _spec_verify(
             "fix_problems": [i.get("problem", "") for i in criticals],
         }
         fixed = await generator.fix_section(section, fix_payload, k=k)
-        section, _ = _merge_generated_section(source_section, fixed, strict_spec=True)
+        section, _ = _merge_generated_section(
+            source_section, fixed, strict_spec=True, preset=preset)
         _spec_code_checks(section, spec, src_material, rng)  # raises on fail
     raise StructureMismatch(
         "blind-solve verify left critical issues after "
@@ -776,13 +809,22 @@ async def _generate_section_spec(
     version: str = "v3",
     rng: Optional[_random.Random] = None,
     cache: Optional[SkillMapCache] = None,
+    preset: Any = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """The spec engine. RECEIVES `core` — never routes (design §2). Only
-    core="multiple_choice" exists this round; future cores plug in here."""
+    core="multiple_choice" exists this round; future cores plug in here.
+
+    `preset` (part-presets): when given, STRUCTURE comes from the PRESET (counts/
+    options/word-count/CEFR) instead of the source, and per_question is reshaped
+    to the preset count IN CODE (no prompt change). ANALYZE/leak/similarity/
+    blind-solve are unchanged — source is still analyzed for the skill map +
+    leak baseline + similarity guard."""
     if core != "multiple_choice":
         raise SectionGenerationError(f"unknown spec core {core!r}")
     from services.ai import spec_mode
     from services.ai.topic_pool import pick_topic_and_seed
+    from services import presets as presets_mod
+    from services import preset_validator
 
     rng = rng or _random
     cache = cache or skill_map_cache
@@ -793,8 +835,17 @@ async def _generate_section_spec(
 
     skill_map, sm_hash = await _get_or_analyze_skill_map(
         source_section, scrub_ctx, generator, version, cache)
-    facts = spec_mode.derive_structure_facts(source_section, level)
-    spec = spec_mode.merge_structure(skill_map, facts)
+    if preset is not None:
+        # PRESET is authoritative for structure; reshape ANALYZE's per_question
+        # to the preset count in code (prompt template untouched).
+        facts = presets_mod.structure_facts(preset)
+        spec = spec_mode.merge_structure(skill_map, facts)
+        spec = spec_mode.reshape_per_question(spec, preset.num_questions)
+        structure_ref = presets_mod.preset_skeleton(preset)   # Tầng-B reference
+    else:
+        facts = spec_mode.derive_structure_facts(source_section, level)
+        spec = spec_mode.merge_structure(skill_map, facts)
+        structure_ref = source_section
     src_material = (source_section.get("materials") or [{}])[0].get("content") or ""
 
     last_err: Optional[str] = None
@@ -813,12 +864,17 @@ async def _generate_section_spec(
         try:
             ai_out = await generator.generate_section(payload, k=k)
             section, justifications = _merge_generated_section(
-                source_section, ai_out, strict_spec=True)
+                source_section, ai_out, strict_spec=True, preset=preset)
+            if preset is not None:
+                # Explicit, field-coded preset conformance (clear retry message).
+                errs = preset_validator.validate_output_against_preset(section, preset)
+                if errs:
+                    raise StructureMismatch("; ".join(e.message for e in errs))
             _spec_code_checks(section, spec, src_material, rng)
             section, review = await _spec_verify(
                 source_section, section, payload, k, generator, rounds,
-                spec, src_material, rng)
-            _validate_section_structure(source_section, section)
+                spec, src_material, rng, preset=preset)
+            _validate_section_structure(structure_ref, section)
             try:
                 overlap = compute_verbatim_overlap(source_section, section)
             except Exception:  # noqa: BLE001 — shadow metric never fails a job
@@ -828,7 +884,7 @@ async def _generate_section_spec(
             pct, _common = spec_mode.trigram_overlap(
                 (section.get("materials") or [{}])[0].get("content") or "",
                 src_material)
-            return section, {
+            report: dict[str, Any] = {
                 "self_review": review,
                 "justifications": justifications,
                 "prompt_version": version,
@@ -840,6 +896,9 @@ async def _generate_section_spec(
                 "skill_map_hash": sm_hash,
                 "trigram_overlap_pct": round(pct, 1),
             }
+            if preset is not None:
+                report["part_code"] = preset.part_code
+            return section, report
         except (StructureMismatch, ValidationError) as e:
             last_err = str(e)
     raise SectionGenerationError(last_err or "unknown", review=review)
@@ -862,6 +921,7 @@ async def generate_one_section(
     prompt_version: Optional[str] = None,
     rng: Optional[_random.Random] = None,
     skill_map_cache_override: Optional[SkillMapCache] = None,
+    preset: Any = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Produce one validated section, or raise SectionGenerationError.
 
@@ -888,7 +948,7 @@ async def generate_one_section(
                 source_section, k, core=core, exam_context=exam_context,
                 generator=generator, section_prompt=section_prompt,
                 rounds=rounds, version=version, rng=rng,
-                cache=skill_map_cache_override,
+                cache=skill_map_cache_override, preset=preset,
             )
         # Rewrite fallback: adapter-level config = v2 (docs §10.4); the
         # service still reports prompt_version=v3 + mode=rewrite.
@@ -1232,10 +1292,17 @@ class ExamGenerationService:
         rounds: Optional[int] = None,
         model: Optional[str] = None, provider: Optional[str] = None,
         prompt_version: Optional[str] = None,
+        part_code: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Mode 2 single part — returns the generated section payload (no save)."""
+        """Mode 2 single part — returns the generated section payload (no save).
+
+        `part_code` (optional): bind this part to a Cambridge preset so the
+        generated structure follows the PRESET (counts/options/word-count/CEFR),
+        not the source. Unknown code → ValidationError (→ 400)."""
         _validate_k(k)
         prompt_version = _validate_prompt_version(prompt_version)
+        from services.presets import resolve_preset
+        preset = resolve_preset(part_code)
         section, exam_context = await self.load_section_for_gen(source_section_id)
         _assert_source_media_meta([section])
         gen, rounds = await _resolve_generation(generator, provider, model, rounds)
@@ -1244,7 +1311,7 @@ class ExamGenerationService:
             section, k, exam_context=exam_context, generator=gen,
             type_prompt=type_prompts.get(section["type"]),
             section_prompt=section_prompt, rounds=rounds,
-            prompt_version=prompt_version,
+            prompt_version=prompt_version, preset=preset,
         )
         entry = {
             "source_section_id": section["id"], "position": section["position"],

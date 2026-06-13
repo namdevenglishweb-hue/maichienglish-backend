@@ -114,6 +114,8 @@ class _StubSettings:
     ai_provider = "openrouter"
     ai_model = "env-model"
     ai_max_tokens = 1000
+    ai_request_timeout = 180.0
+    ai_max_retries = 2
     openrouter_api_key = "fake-key"
     openrouter_base_url = "http://example.invalid/v1"
     groq_api_key = "fake-key"
@@ -761,6 +763,135 @@ def test_model_catalog_entries_are_valid():
         key = (entry["provider"], entry["model"])
         assert key not in seen, f"duplicate catalog entry {key}"
         seen.add(key)
+
+
+# --- Part presets (preset-authoritative structure, MC-only) ---------------- #
+
+def test_preset_resolve_and_helpers():
+    from services import presets as P
+
+    assert P.resolve_preset(None) is None
+    assert P.resolve_preset("KET_R_P3").num_questions == 5
+    with pytest.raises(Exception):
+        P.resolve_preset("NOPE_R_P9")
+
+    facts = P.structure_facts(P.PART_PRESETS["KET_R_P3"])
+    assert facts["num_questions"] == 5 and facts["options_per_question"] == 3
+    assert facts["word_count_range"] == [150, 230] and facts["cefr_level"] == "A2"
+
+    sk = P.preset_skeleton(P.PART_PRESETS["PET_R_P3"])
+    assert sk["type"] == "multiple_choice" and len(sk["questions"]) == 5
+    assert all(len(q["question_data"]["options"]) == 4 for q in sk["questions"])
+    assert {p["partCode"] for p in P.list_presets()} == {"KET_R_P3", "PET_R_P3"}
+
+
+def test_reshape_per_question_aligns_to_count_without_prompt():
+    from services.ai import spec_mode as S
+    base = {"per_question": [{"position": i + 1, "skill_tested": f"s{i}"}
+                            for i in range(3)]}
+    # shrink 3 -> 2 (even sample), grow 3 -> 5 (cycle); positions renumbered
+    two = S.reshape_per_question(base, 2)["per_question"]
+    assert [e["position"] for e in two] == [1, 2] and len(two) == 2
+    five = S.reshape_per_question(base, 5)["per_question"]
+    assert [e["position"] for e in five] == [1, 2, 3, 4, 5]
+    assert five[3]["skill_tested"] == "s0"          # cycled back
+    assert S.reshape_per_question({"per_question": []}, 5) == {"per_question": []}
+
+
+def test_preset_validator_flags_violations():
+    from services import preset_validator as V
+    from services.presets import PART_PRESETS
+    preset = PART_PRESETS["KET_R_P3"]               # 5 q, 3 opt
+
+    good = {"type": "multiple_choice",
+            "materials": [{"type": "text", "content": "x"}],
+            "questions": [{"question_type": "multiple_choice",
+                           "question_data": {"options": [{"text": "a"}] * 3}}
+                          for _ in range(5)]}
+    assert V.validate_output_against_preset(good, preset) == []
+
+    bad = {"type": "multiple_choice",
+           "materials": [{"type": "text", "content": "x"}],
+           "questions": [{"question_type": "multiple_choice",
+                          "question_data": {"options": [{"text": "a"}] * 4}}
+                         for _ in range(4)]}              # 4 q (≠5), 4 opt (≠3)
+    codes = {e.code for e in V.validate_output_against_preset(bad, preset)}
+    assert "PRESET_NUM_QUESTIONS" in codes and "PRESET_OPTIONS" in codes
+
+
+def _ai_section_nq(n_questions, n_options, passage):
+    return {
+        "part_label": "Part 3", "instructions": "Read and choose.",
+        "materials": [{"type": "text", "content": passage}],
+        "questions": [{
+            "question_type": "multiple_choice",
+            "question_data": {"stem": f"Q{i}?",
+                              "options": [{"text": f"o{i}{j}"} for j in range(n_options)],
+                              "correct_index": 0},
+            "answer_justification": "evidence",
+        } for i in range(n_questions)],
+    }
+
+
+class FakeSpecGenPreset:
+    """Emits exactly n_questions x n_options (per preset) + a passage long enough
+    for the word-count range; blind-solve echoes the section's keys (agrees)."""
+
+    def __init__(self, n_questions, n_options, passage):
+        self.usage = {"input": 1, "output": 2}
+        self.model = "fake"
+        self._nq, self._no, self._passage = n_questions, n_options, passage
+        self.analyze_calls = self.generate_calls = self.verify_calls = 0
+        self.fix_calls = 0
+
+    async def analyze_section(self, payload):
+        self.analyze_calls += 1
+        return _CLEAN_SKILL_MAP                       # per_question length 3
+
+    async def generate_section(self, payload, *, k):
+        self.generate_calls += 1
+        return _ai_section_nq(self._nq, self._no, self._passage)
+
+    async def verify_section(self, section, payload, *, k):
+        self.verify_calls += 1
+        pq = [{"position": q.get("position"),
+               "examiner_answer_index": (q.get("question_data") or {}).get("correct_index"),
+               "evidence_quote": "the text states this"}
+              for q in section.get("questions") or []]
+        return {"per_question": pq, "issues": []}
+
+    async def fix_section(self, section, payload, *, k):
+        self.fix_calls += 1
+        return _ai_section_nq(self._nq, self._no, self._passage)
+
+
+async def test_preset_drives_structure_over_source():
+    """RISK #1: preset (5 q / 3 opt) overrides a source with a DIFFERENT count
+    (3 q / 4 opt). Output follows the PRESET; per_question reshaped to 5 in code;
+    validated against the preset skeleton — no prompt change, no crash."""
+    import random
+    from services.presets import PART_PRESETS
+
+    preset = PART_PRESETS["KET_R_P3"]                 # 5 q, 3 opt, wc 150-230
+    lo, hi = preset.word_count_range
+    passage = " ".join(["word"] * ((lo + hi) // 2))   # in range
+    src = _spec_src_section()                          # 3 questions, 4 options
+    assert len(src["questions"]) == 3
+    assert len(src["questions"][0]["question_data"]["options"]) == 4
+
+    gen = FakeSpecGenPreset(preset.num_questions, preset.options_per_question, passage)
+    section, report = await G.generate_one_section(
+        src, 3, exam_context=_SPEC_CTX, generator=gen, rounds=1,
+        prompt_version="v3", rng=random.Random(1),
+        skill_map_cache_override=FakeSkillMapCache(), preset=preset)
+
+    assert report["mode"] == "spec" and report["part_code"] == "KET_R_P3"
+    qs = section["questions"]
+    assert len(qs) == 5                               # PRESET count (not source 3)
+    assert all(len(q["question_data"]["options"]) == 3 for q in qs)  # PRESET opts (not 4)
+    assert all(q["points"] == 1 and q["question_type"] == "multiple_choice" for q in qs)
+    assert [q["position"] for q in qs] == [1, 2, 3, 4, 5]
+    assert section["type"] == "multiple_choice"
 
 
 def test_verbatim_overlap_metric_separates_copy_from_rewrite():

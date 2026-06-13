@@ -271,6 +271,32 @@ def merge_structure(skill_map: dict[str, Any], facts: dict[str, Any]) -> dict[st
     return out
 
 
+def reshape_per_question(spec: dict[str, Any], n: int) -> dict[str, Any]:
+    """Align spec['per_question'] length to `n` (= preset.num_questions) WITHOUT
+    touching any prompt: the GENERATE template just dumps this list, so feeding
+    it a list of length n keeps STRUCTURE SPEC (n questions) and PER-QUESTION
+    SPEC consistent. ANALYZE still AUTHORS the content; this only reconciles the
+    COUNT when the preset's question count differs from the source's.
+
+    Shrink (n<m): sample evenly to keep skill variety. Grow (n>m): cycle the
+    pattern. Positions are renumbered 1..n. No-op (besides renumber) when n==m
+    or when there is no per_question."""
+    pq = spec.get("per_question") or []
+    if not pq or n <= 0:
+        return spec
+    m = len(pq)
+    if m == n:
+        idx = list(range(m))
+    elif n < m:
+        idx = [round(i * (m - 1) / (n - 1)) for i in range(n)] if n > 1 else [0]
+    else:
+        idx = [i % m for i in range(n)]
+    new = [{**dict(pq[j]), "position": k + 1} for k, j in enumerate(idx)]
+    out = dict(spec)
+    out["per_question"] = new
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Word-count check (design §4.8/M9): code-enforced, ±15% slack like the
 # client's validator.ts (the range is ANALYZE-estimated, not gospel).

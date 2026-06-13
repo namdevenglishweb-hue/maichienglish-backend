@@ -24,7 +24,12 @@ class AnthropicGenerator(AIContentGenerator):
             )
         from anthropic import AsyncAnthropic
 
-        self._client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+        # Per-request timeout + bounded retries (hardening) — see settings.
+        self._client = AsyncAnthropic(
+            api_key=settings.anthropic_api_key,
+            timeout=settings.ai_request_timeout,
+            max_retries=settings.ai_max_retries,
+        )
         self._model = model or settings.ai_model
         self._max_tokens = max_tokens or settings.ai_max_tokens
         self.model = self._model        # effective model — for provenance

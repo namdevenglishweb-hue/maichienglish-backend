@@ -119,6 +119,8 @@ async def generate_section(
     _check_provider(request.aiProvider)
     _check_prompt_version(request.promptVersion)
     try:
+        from services.presets import resolve_preset
+        resolve_preset(request.partCode)  # 400 early on unknown part_code
         await exam_generation_service.precheck_section_source(request.sourceSectionId)
     except NotFoundError as e:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(e))
@@ -138,7 +140,7 @@ async def generate_section(
         section_prompts={request.sourceSectionId: request.sectionPrompt}
         if request.sectionPrompt else None,
         model=request.aiModel, provider=request.aiProvider,
-        prompt_version=request.promptVersion,
+        prompt_version=request.promptVersion, part_code=request.partCode,
     )
     return JobAcceptedResponse(jobId=job["jobId"], status=job["status"])
 

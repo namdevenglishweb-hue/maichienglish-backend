@@ -182,6 +182,7 @@ async def run_generation_job(
     section_prompts: Optional[dict[str, str]] = None,
     model: Optional[str] = None, provider: Optional[str] = None,
     prompt_version: Optional[str] = None,
+    part_code: Optional[str] = None,
 ) -> None:
     """Drive one job to a terminal state. Swallows all errors into job status."""
     svc = generation_job_service
@@ -216,6 +217,7 @@ async def run_generation_job(
                 target_section_id, k,
                 section_prompt=(section_prompts or {}).get(str(target_section_id)),
                 model=model, provider=provider, prompt_version=prompt_version,
+                part_code=part_code,
             )
             await svc.finish(job_id, "succeeded", report=report)
         else:

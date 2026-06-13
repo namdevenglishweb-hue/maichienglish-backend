@@ -42,6 +42,7 @@ _PUBLIC_SLUGS = [
     "exam-ai-generation-design", "exam-ai-generation-frontend",
     "exam-image-generation-design", "exam-image-generation-frontend",
     "exam-gen-v3-spec-mode-design", "exam-gen-v3-spec-mode-frontend",
+    "exam-part-presets-design", "exam-part-presets-frontend",
     # remaining per-feature design+frontend (round 2, 2026-06-12)
     "attempt-highlights-design", "attempt-highlights-frontend",
     "attempt-lifecycle-design", "attempt-lifecycle-frontend",

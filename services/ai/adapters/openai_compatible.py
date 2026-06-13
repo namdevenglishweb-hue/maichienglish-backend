@@ -35,6 +35,7 @@ class OpenAICompatibleGenerator(AIContentGenerator):
     def __init__(
         self, *, api_key: str, base_url: str, model: str, max_tokens: int,
         key_env: str, provider: str, extra_create: dict | None = None,
+        request_timeout: float | None = None, max_retries: int | None = None,
     ) -> None:
         if not api_key:
             raise RuntimeError(
@@ -42,7 +43,17 @@ class OpenAICompatibleGenerator(AIContentGenerator):
             )
         from openai import AsyncOpenAI
 
-        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        # Per-request timeout + bounded retries (hardening): the SDK default is
+        # 600s/request, which stalled the A/B run. None ⇒ fall back to settings.
+        if request_timeout is None or max_retries is None:
+            from config.settings import get_settings
+            s = get_settings()
+            request_timeout = s.ai_request_timeout if request_timeout is None else request_timeout
+            max_retries = s.ai_max_retries if max_retries is None else max_retries
+        self._client = AsyncOpenAI(
+            api_key=api_key, base_url=base_url,
+            timeout=request_timeout, max_retries=max_retries,
+        )
         self._model = model
         self._max_tokens = max_tokens
         # Provider-specific extra kwargs for chat.completions.create (e.g. Gemini

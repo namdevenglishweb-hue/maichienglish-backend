@@ -79,9 +79,17 @@ class Settings(BaseSettings):
     # Text generation (docs/exam-ai-generation/)
     ai_provider: str = Field(default="openrouter", alias="AI_PROVIDER")  # openrouter | groq | anthropic
     anthropic_api_key: Optional[str] = Field(default=None, alias="ANTHROPIC_API_KEY")
-    ai_model: str = Field(default="anthropic/claude-sonnet-4.5", alias="AI_MODEL")
+    # Pinned to Opus 4.8 (client request, newest model). NOTE: the DB
+    # ai_generation_settings row overrides this (per-request > DB > env) — change
+    # that row too if it pins an older slug. A/B numbers were on sonnet-4.5 →
+    # re-baseline after this change.
+    ai_model: str = Field(default="anthropic/claude-opus-4.8", alias="AI_MODEL")
     ai_max_tokens: int = Field(default=8000, alias="AI_MAX_TOKENS")
     ai_self_review_rounds: int = Field(default=2, alias="AI_SELF_REVIEW_ROUNDS")
+    # Per-request hardening (avoid the multi-minute stall seen in A/B: the SDK
+    # default is 600s/request). Applied to every AI call via the adapters.
+    ai_request_timeout: float = Field(default=180.0, alias="AI_REQUEST_TIMEOUT")
+    ai_max_retries: int = Field(default=2, alias="AI_MAX_RETRIES")
 
     # Image generation (docs/exam-image-generation/) — off by default
     image_generation_enabled: bool = Field(

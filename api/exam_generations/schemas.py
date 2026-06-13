@@ -46,6 +46,13 @@ class GenerateSectionRequest(_ModelOverride):
     sourceSectionId: str
     k: int = Field(..., ge=1, le=5)
     sectionPrompt: Optional[str] = None
+    partCode: Optional[str] = Field(
+        default=None,
+        description="Bind this part to a Cambridge preset (e.g. 'KET_R_P3', "
+        "'PET_R_P3'). When set, the generated structure follows the PRESET "
+        "(num questions / options / word-count / CEFR), not the source. "
+        "Unknown code → 400. Read GET /api/presets for the list.",
+    )
 
 
 class PreviewRequest(_ModelOverride):
