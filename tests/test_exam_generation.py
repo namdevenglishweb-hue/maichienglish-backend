@@ -238,15 +238,25 @@ _CLEAN_SKILL_MAP = {
 
 
 class FakeSpecGen:
-    """Spec-capable fake: analyze + generate + verify, with call counters."""
+    """Spec-capable fake: analyze + generate + blind-solve verify + fix, with
+    call counters. The default examiner ECHOES the section's real key back as
+    its own answer (so CODE grading sees agreement → accept). `disagree_always`
+    makes the examiner always answer one option off the key (simulates a wrong
+    key the examiner catches); `disagree_until_fix` flips to agreement once
+    `fix_section` has run (simulates a FIX that repairs the section)."""
 
-    def __init__(self, skill_maps=None, passage=_NEW_PASSAGE, verdicts=None):
+    def __init__(self, skill_maps=None, passage=_NEW_PASSAGE, verdicts=None,
+                 disagree_always=False, disagree_until_fix=False):
         self.usage = {"input": 1, "output": 2}
         self.model = "fake-model"
         self._skill_maps = skill_maps or [_CLEAN_SKILL_MAP]
         self._passage = passage
         self._v = verdicts or []
+        self._disagree_always = disagree_always
+        self._disagree_until_fix = disagree_until_fix
+        self._fixed = False
         self.analyze_calls = self.generate_calls = self.verify_calls = 0
+        self.fix_calls = 0
 
     async def analyze_section(self, payload):
         r = self._skill_maps[min(self.analyze_calls, len(self._skill_maps) - 1)]
@@ -257,11 +267,33 @@ class FakeSpecGen:
         self.generate_calls += 1
         return _spec_ai_section(self._passage)
 
+    @staticmethod
+    def _blind_per_question(section, disagree):
+        out = []
+        for q in section.get("questions") or []:
+            qd = q.get("question_data") or {}
+            key, n = qd.get("correct_index"), len(qd.get("options") or [])
+            ans = key
+            if disagree and isinstance(key, int) and n > 1:
+                ans = (key + 1) % n        # an independent answer != the key
+            out.append({"position": q.get("position"),
+                        "examiner_answer_index": ans,
+                        "evidence_quote": "the material states this"})
+        return out
+
     async def verify_section(self, section, payload, *, k):
         self.verify_calls += 1
         if self._v:
             return self._v[min(self.verify_calls - 1, len(self._v) - 1)]
-        return {"is_acceptable": True, "issues": []}
+        disagree = self._disagree_always or (
+            self._disagree_until_fix and not self._fixed)
+        return {"per_question": self._blind_per_question(section, disagree),
+                "issues": []}
+
+    async def fix_section(self, section, payload, *, k):
+        self.fix_calls += 1
+        self._fixed = True
+        return _spec_ai_section(self._passage)
 
 
 class FakeSkillMapCache:
@@ -435,6 +467,177 @@ async def test_spec_ineligible_falls_back_to_rewrite():
         rounds=1, prompt_version="v3")
     assert report["mode"] == "rewrite"
     assert report["prompt_version"] == "v3"
+
+
+# --- AMENDMENT v1.2 §9: blind-solve verify + key-aware FIX + cool temp ----- #
+
+def test_spec_verify_payload_strips_key_but_fix_keeps_it():
+    """INVARIANT (§9.4): the BLIND-SOLVE verify prompt must NOT contain the
+    answer key (correct_index / answer_justification) — only the FIX prompt,
+    which is key-aware, may. Options must survive so the examiner can answer."""
+    from services.ai import prompts
+
+    pv = prompts.get_prompt_version("v3")
+    payload = {"prompt_version": "v3", "spec": _CLEAN_SKILL_MAP}
+    section = {
+        "materials": [{"type": "text", "content": _NEW_PASSAGE}],
+        "questions": [{
+            "position": 1, "question_type": "multiple_choice",
+            "question_data": {"stem": "Why?", "correct_index": 2,
+                              "options": [{"text": f"choice{j}"} for j in range(4)]},
+            "answer_justification": "because paragraph two says so",
+        }],
+    }
+    verify_msg = pv.render_verify(section, payload, 5)
+    assert "correct_index" not in verify_msg
+    assert "answer_justification" not in verify_msg
+    assert "because paragraph two says so" not in verify_msg
+    assert "choice0" in verify_msg                     # options still present
+
+    fix_msg = pv.render_fix(section, {**payload, "fix_problems": ["Q1 key wrong"]}, 5)
+    assert "correct_index" in fix_msg                  # FIX is key-aware
+    assert "Q1 key wrong" in fix_msg
+
+
+def test_grade_blind_solve_flags_only_mismatches():
+    """CODE — not the model — decides correctness by comparing the examiner's
+    independent answer to the real key, per position."""
+    section = {"questions": [
+        {"position": 1, "question_data": {"correct_index": 0, "options": [1, 2]}},
+        {"position": 2, "question_data": {"correct_index": 1, "options": [1, 2]}},
+    ]}
+    per_q = [{"position": 1, "examiner_answer_index": 0, "evidence_quote": "x"},
+             {"position": 2, "examiner_answer_index": 0, "evidence_quote": "y"}]
+    problems = G._grade_blind_solve(section, per_q)
+    assert len(problems) == 1
+    assert problems[0]["question_position"] == 2 and problems[0]["severity"] == "critical"
+
+
+async def test_spec_blind_solve_flags_wrong_key_and_never_silently_accepts():
+    """A persistently wrong key (examiner always disagrees) is flagged critical
+    every round and never accepted — with rounds=1 there is no FIX budget, so
+    the section is regenerated to exhaustion then fails."""
+    import random
+    cache = FakeSkillMapCache()
+    gen = FakeSpecGen(disagree_always=True)
+    with pytest.raises(G.SectionGenerationError):
+        await G.generate_one_section(
+            _spec_src_section(), 5, exam_context=_SPEC_CTX, generator=gen,
+            rounds=1, prompt_version="v3", rng=random.Random(1),
+            skill_map_cache_override=cache)
+    assert gen.generate_calls == 3 and gen.verify_calls == 3  # 1 verify / attempt
+    assert gen.fix_calls == 0                                  # no budget at rounds=1
+
+
+async def test_spec_blind_solve_fix_round_repairs_section():
+    """Round 1 fails the blind solve → key-aware FIX runs → round 2 agrees →
+    accept, within ONE generate attempt (§9.5)."""
+    import random
+    cache = FakeSkillMapCache()
+    gen = FakeSpecGen(disagree_until_fix=True)
+    section, report = await G.generate_one_section(
+        _spec_src_section(), 5, exam_context=_SPEC_CTX, generator=gen,
+        rounds=2, prompt_version="v3", rng=random.Random(1),
+        skill_map_cache_override=cache)
+    assert report["mode"] == "spec"
+    assert gen.generate_calls == 1                  # no regenerate needed
+    assert gen.fix_calls == 1 and gen.verify_calls == 2
+    assert report["self_review"]["rounds"] == 2
+
+
+async def test_spec_blind_solve_rejects_incomplete_per_question():
+    """A verdict missing per_question entries / with an empty evidence quote
+    cannot be graded → treated as a failed round (counts as a retry)."""
+    import random
+    bad = {"per_question": [{"position": 1, "examiner_answer_index": 0,
+                             "evidence_quote": ""}], "issues": []}
+    gen = FakeSpecGen(verdicts=[bad])
+    with pytest.raises(G.SectionGenerationError):
+        await G.generate_one_section(
+            _spec_src_section(), 5, exam_context=_SPEC_CTX, generator=gen,
+            rounds=1, prompt_version="v3", rng=random.Random(1),
+            skill_map_cache_override=FakeSkillMapCache())
+    assert gen.generate_calls == 3                  # retried to exhaustion
+
+
+async def test_spec_solve_payload_has_no_key_on_every_round_including_post_fix():
+    """INVARIANT (§9.4), the strong form: the BLIND-SOLVE prompt is key-free on
+    EVERY round — round 1 AND the re-verify AFTER a FIX (the merged fixed
+    section carries a real correct_index again; the strip must re-run). Captures
+    the ACTUAL rendered prompt the adapter would send each round."""
+    import random
+    from services.ai import prompts
+
+    rendered: list[str] = []
+
+    class RenderRecordingGen(FakeSpecGen):
+        async def verify_section(self, section, payload, *, k):
+            # render exactly what the real adapter sends to the examiner
+            rendered.append(
+                prompts.get_prompt_version("v3").render_verify(section, payload, k))
+            return await super().verify_section(section, payload, k=k)
+
+    gen = RenderRecordingGen(disagree_until_fix=True)
+    await G.generate_one_section(
+        _spec_src_section(), 5, exam_context=_SPEC_CTX, generator=gen,
+        rounds=2, prompt_version="v3", rng=random.Random(1),
+        skill_map_cache_override=FakeSkillMapCache())
+
+    assert gen.fix_calls == 1 and len(rendered) == 2     # round 1 + post-FIX round 2
+    for msg in rendered:
+        assert "correct_index" not in msg
+        assert "answer_justification" not in msg
+
+
+async def test_spec_blind_solve_rejects_duplicate_or_unknown_positions():
+    """A verdict with the right COUNT but a duplicate/unknown position can't be
+    graded reliably → failed round (counts as a retry), never a silent
+    mis-grade."""
+    import random
+    dup = {"per_question": [  # both point at position 1; position 2/3 missing
+        {"position": 1, "examiner_answer_index": 0, "evidence_quote": "a"},
+        {"position": 1, "examiner_answer_index": 0, "evidence_quote": "b"},
+        {"position": 1, "examiner_answer_index": 0, "evidence_quote": "c"}],
+        "issues": []}
+    gen = FakeSpecGen(verdicts=[dup])
+    with pytest.raises(G.SectionGenerationError):
+        await G.generate_one_section(
+            _spec_src_section(), 5, exam_context=_SPEC_CTX, generator=gen,
+            rounds=1, prompt_version="v3", rng=random.Random(1),
+            skill_map_cache_override=FakeSkillMapCache())
+    assert gen.generate_calls == 3                  # retried to exhaustion, no mis-grade
+
+
+async def test_spec_verify_runs_cool_but_generate_and_v2_do_not():
+    """Mục 1: spec VERIFY + FIX go out at VERIFY_TEMPERATURE; GENERATE never
+    sets a temperature (stays creative); the v2 rewrite verify is untouched."""
+    from services.ai import prompts
+    from services.ai.adapters.openai_compatible import OpenAICompatibleGenerator
+
+    # skip __init__ (no API client / no openai import needed for this wiring test)
+    g = OpenAICompatibleGenerator.__new__(OpenAICompatibleGenerator)
+    seen: list = []
+
+    async def fake_call_tool(*, system_prompt, user_message, tool, temperature=None):
+        seen.append(temperature)
+        return {"per_question": [], "issues": [], "materials": [], "questions": []}
+
+    g._call_tool = fake_call_tool
+
+    spec_payload = {
+        "prompt_version": "v3", "spec": _CLEAN_SKILL_MAP,
+        "topic": "a chess club", "genre": "narrative",
+        "diversity_seed": {"narrator": "a teenager"}, "fix_problems": ["Q1"],
+    }
+    section = _spec_ai_section(_NEW_PASSAGE)
+    await g.verify_section(section, spec_payload, k=5)      # spec verify → 0.3
+    await g.fix_section(section, spec_payload, k=5)         # spec fix → 0.3
+    await g.generate_section(spec_payload, k=5)             # generate → None
+    v2_payload = prompts.build_section_payload(_src_section(), _CTX, prompt_version="v2")
+    await g.verify_section({"materials": [], "questions": []}, v2_payload, k=2)
+
+    assert seen == [prompts.VERIFY_TEMPERATURE, prompts.VERIFY_TEMPERATURE, None, None]
+    assert prompts.VERIFY_TEMPERATURE == 0.3
 
 
 # --- balanced answer-key shuffle (post-process by code, client §6 port) ---- #

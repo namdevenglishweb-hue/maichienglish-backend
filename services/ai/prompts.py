@@ -333,6 +333,12 @@ def render_verify_user_message_v2(
 # ---------------------------------------------------------------------------
 
 ANALYZE_TEMPERATURE = 0.2  # client-validated; analyze is where leak bugs lived
+# AMENDMENT v1.2 §9 — spec-mode VERIFY (blind solve) + FIX run cool so the
+# examiner solves deterministically (a hot judge invents agreement). Applied
+# ONLY on spec_mode versions (the adapter gates on pv.spec_mode); the v2
+# rewrite verify keeps its default (~1.0) sampling so its A/B stays valid.
+# GENERATE is never given a temperature (stays creative at the provider default).
+VERIFY_TEMPERATURE = 0.3
 
 SYSTEM_PROMPT_ANALYZE = """\
 You are an exam-design analyst for Cambridge English qualifications (KET/PET).
@@ -352,6 +358,19 @@ This includes synonyms, paraphrases, and category words for the source's
 subject matter. Describe HOW the questions test the candidate, never WHAT
 the text is about. A reader of your skill map must NOT be able to guess
 what the source text was about.
+- The `text_genre` field is the single most common place domain detail leaks,
+so it has a STRICT contract. It may describe ONLY: (a) the text form
+(narrative / email / article / review / advertisement / notice / blog post /
+report ...); (b) the narrative voice and register (first-person /
+third-person; formal / informal / neutral); and (c) the tone (reflective /
+persuasive / factual / light-hearted ...). It MUST NOT mention any events, any
+locations or venues, any activities, any relationships between the people in
+the text, or the reason the text was written. Describe the FORM of the text,
+never its story.
+BAD (leaks the situation — forbidden): "first-person narrative by a young
+person describing a family experience at a specialized instructional venue"
+GOOD (form/voice/tone only): "first-person narrative account written by a
+young person, informal register, reflective tone"
 - For each question, identify: the reading sub-skill it tests, where in the
 material the answer is located (global / paragraph N / single detail), and
 the pattern its wrong options follow (how distractors are constructed).
@@ -538,41 +557,160 @@ EMIT_SECTION_SPEC_TOOL: dict[str, Any] = {
     },
 }
 
+# AMENDMENT v1.2 §9.4 — spec VERIFY is now a BLIND SOLVE. The examiner never
+# sees the answer key (stripped in render) and never sees the source; it solves
+# every question from scratch and reports its own answer + a verbatim evidence
+# quote per question. CODE (not the model) compares those answers to the real
+# key and decides acceptance — the model has no `is_acceptable` field and no
+# `fixed_section` (fixing is a separate, key-aware call, §9.5).
 SYSTEM_PROMPT_VERIFY_SPEC = """\
-You are an independent Cambridge English examiner. Review the generated exam
-section below against the specification. You did NOT write it; be strict.
+You are an independent Cambridge English examiner sitting this exam section as a
+candidate. You are NOT shown the answer key — solve every question yourself,
+from scratch, using ONLY the material provided. Do not try to guess which option
+the author intended; report the option the material actually supports.
 
-Checklist:
-1. ANSWER CORRECTNESS: for each question, is options[correct_index] truly the
-only correct answer according to the material? Quote the evidence.
-2. COHERENCE: can every question be answered using ONLY the material? Flag
-any "orphan" question.
-3. DISTRACTORS: is any wrong option also defensibly correct, or absurdly
-implausible?
-4. LEVEL: does any vocabulary or grammar clearly exceed the CEFR level in the
-spec (proper nouns excluded)? List offending words.
-5. STRUCTURE: question count, option count, and approximate word count match
-the spec?
+For EVERY question, in order, return one entry in `per_question` with:
+- position: the question's position.
+- examiner_answer_index: the 0-based option index YOU conclude is correct,
+reached independently by reading the material.
+- evidence_quote: the EXACT words from the material that justify your answer
+(copy them verbatim — do not paraphrase, do not leave this empty). If you
+cannot find any wording in the material that supports any option, still give
+your best examiner_answer_index, leave the quote as your closest attempt, and
+ALSO add a 'critical' issue saying the question is unanswerable from the
+material — never silently guess.
 
-Report by calling the `report_review` tool. Mark severity 'critical' for
-wrong answers or unanswerable questions, 'minor' for wording. If anything is
-'critical', also return a corrected `fixed_section` (same shape as the
-generated input) that fixes every issue while preserving the structure.\
+Then, in `issues`, report any remaining problems with severity 'critical'
+(an unanswerable question, two defensibly-correct options, a distractor that is
+also correct) or 'minor' (wording, register). Also check, as issues:
+distractor quality, coherence, whether any vocabulary or grammar exceeds the
+CEFR level in the spec (proper nouns excluded), and structure (question count,
+option count, approximate word count vs the spec).
+
+Report by calling the `report_review` tool. Do NOT return a corrected section —
+correctness is judged by comparing your independent answers to the key.\
 """
+
+
+def _strip_answer_keys(section: dict[str, Any]) -> dict[str, Any]:
+    """Blind-solve view of a section: remove `correct_index` from every
+    question_data and drop any `answer_justification`. Deep-copies the parts it
+    mutates so the caller's section (which keeps the real key for grading + the
+    FIX call) is never altered. INVARIANT: the rendered VERIFY payload must not
+    contain the key (AMENDMENT v1.2 §9.4)."""
+    out = dict(section)
+    qs: list[dict[str, Any]] = []
+    for q in section.get("questions") or []:
+        if not isinstance(q, dict):
+            qs.append(q)
+            continue
+        q = {kk: vv for kk, vv in q.items() if kk != "answer_justification"}
+        qd = q.get("question_data")
+        if isinstance(qd, dict):
+            q["question_data"] = {kk: vv for kk, vv in qd.items()
+                                  if kk != "correct_index"}
+        qs.append(q)
+    out["questions"] = qs
+    return out
 
 
 def render_verify_spec_user_message(
     section: dict[str, Any], payload: dict[str, Any], *, k: int
 ) -> str:
-    """Spec-mode verify: STRUCTURE spec + generated section — NO source, NO
-    per_question even at K=3 (client parity, design decision #14)."""
+    """Spec-mode BLIND-SOLVE verify: STRUCTURE spec + the section with its
+    answer key STRIPPED — NO source, NO key, NO per_question hints (§9.4)."""
     structure = (payload.get("spec") or {}).get("structure") or {}
+    blind = _strip_answer_keys(section)
     return (
         "SPECIFICATION:\n"
         + json.dumps(structure, ensure_ascii=False, indent=2)
-        + "\n\nGENERATED SECTION (JSON):\n"
+        + "\n\nEXAM SECTION TO SOLVE (the answer key has been REMOVED — work out "
+        "each answer yourself from the material):\n"
+        + json.dumps(blind, ensure_ascii=False, indent=2)
+    )
+
+
+# AMENDMENT v1.2 §9.5 — the FIX call is the ONLY spec call that sees the real
+# answer key. It runs only after a blind-solve round fails; it receives the
+# section (WITH key), the problems CODE found, and the structure spec, and
+# returns a corrected section via emit_section. Still blind to the source.
+SYSTEM_PROMPT_FIX_SPEC = """\
+You are the professional item writer correcting a section you wrote. Unlike the
+examiner, you ARE shown the intended answer key together with the specific
+problems an independent examiner found. Produce a corrected section that
+resolves EVERY listed problem.
+
+Keep the structure exactly: the same number of questions, the same number of
+options per question, the same word-count range and the same CEFR vocabulary
+level. You MAY rewrite the material, the stems, the options, or move which
+option is correct — whatever it takes so that each question has exactly ONE
+correct option that is clearly supported by the material, and every question is
+answerable from the material alone. Return the corrected section via the
+`emit_section` tool (1 text material + N multiple-choice questions, each with a
+short answer_justification quoting the supporting evidence).\
+"""
+
+
+def render_fix_spec_user_message(
+    section: dict[str, Any], payload: dict[str, Any], *, k: int
+) -> str:
+    """Spec-mode FIX user turn — sees the spec, the problems, and the section
+    WITH its real answer key (the only spec call that does). NO source."""
+    structure = (payload.get("spec") or {}).get("structure") or {}
+    problems = payload.get("fix_problems") or []
+    problems_block = ("\n".join(f"- {p}" for p in problems)
+                      if problems else "- (none specified)")
+    return (
+        "STRUCTURE SPEC (preserve exactly):\n"
+        + json.dumps(structure, ensure_ascii=False, indent=2)
+        + "\n\nPROBLEMS TO FIX:\n" + problems_block
+        + "\n\nSECTION TO FIX (includes the intended answer key):\n"
         + json.dumps(section, ensure_ascii=False, indent=2)
     )
+
+
+VERIFY_SECTION_SPEC_TOOL: dict[str, Any] = {
+    "name": "report_review",
+    "description": "Report your independent blind solve (one entry per "
+                   "question) plus any remaining issues. Do NOT return a "
+                   "corrected section.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "per_question": {
+                "type": "array",
+                "description": "REQUIRED — exactly one entry per question, in "
+                               "order. Your own answer reached independently, "
+                               "with a verbatim evidence quote from the material.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "position": {"type": "integer"},
+                        "examiner_answer_index": {"type": "integer"},
+                        "evidence_quote": {"type": "string"},
+                    },
+                    "required": ["position", "examiner_answer_index",
+                                 "evidence_quote"],
+                },
+            },
+            "issues": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "severity": {"type": "string",
+                                     "enum": ["critical", "minor"]},
+                        "question_position": {"type": ["integer", "null"]},
+                        "problem": {"type": "string"},
+                        "fix": {"type": ["string", "null"]},
+                    },
+                    "required": ["severity", "problem"],
+                },
+            },
+        },
+        "required": ["per_question", "issues"],
+    },
+}
 
 
 # ---------------------------------------------------------------------------
@@ -600,6 +738,13 @@ class PromptVersion:
     render_analyze: Optional[Callable[[dict[str, Any]], str]] = None
     # spec-shaped emit_section tool variant (no source-relative wording)
     emit_section_tool: Optional[dict[str, Any]] = None
+    # verify tool variant (spec = blind-solve report; None → VERIFY_SECTION_TOOL)
+    verify_section_tool: Optional[dict[str, Any]] = None
+    # --- spec FIX step (AMENDMENT v1.2 §9.5) — the only key-aware spec call ---
+    system_fix: Optional[str] = None
+    # (section_with_key, payload, k) -> user message
+    render_fix: Optional[Callable[[dict[str, Any], dict[str, Any], int], str]] = None
+    fix_section_tool: Optional[dict[str, Any]] = None
 
 
 PROMPT_VERSIONS: dict[str, PromptVersion] = {
@@ -640,6 +785,10 @@ PROMPT_VERSIONS: dict[str, PromptVersion] = {
         system_analyze=SYSTEM_PROMPT_ANALYZE,
         render_analyze=render_analyze_user_message,
         emit_section_tool=EMIT_SECTION_SPEC_TOOL,
+        verify_section_tool=VERIFY_SECTION_SPEC_TOOL,
+        system_fix=SYSTEM_PROMPT_FIX_SPEC,
+        render_fix=lambda section, payload, k: render_fix_spec_user_message(section, payload, k=k),
+        fix_section_tool=EMIT_SECTION_SPEC_TOOL,
     ),
 }
 

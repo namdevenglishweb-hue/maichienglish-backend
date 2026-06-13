@@ -68,7 +68,10 @@ class OpenAICompatibleGenerator(AIContentGenerator):
         return await self._call_tool(
             system_prompt=pv.system_verify,
             user_message=pv.render_verify(section, payload, k),
-            tool=prompts.VERIFY_SECTION_TOOL,
+            tool=pv.verify_section_tool or prompts.VERIFY_SECTION_TOOL,
+            # Spec mode verify is a blind solve — run it cool (§9.4). The v2
+            # rewrite verify (spec_mode=False) keeps the default sampling.
+            temperature=prompts.VERIFY_TEMPERATURE if pv.spec_mode else None,
         )
 
     async def analyze_section(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -82,12 +85,25 @@ class OpenAICompatibleGenerator(AIContentGenerator):
             temperature=prompts.ANALYZE_TEMPERATURE,
         )
 
+    async def fix_section(
+        self, section: dict[str, Any], payload: dict[str, Any], *, k: int
+    ) -> dict[str, Any]:
+        pv = prompts.get_prompt_version(payload.get("prompt_version"))
+        if not pv.system_fix or not pv.render_fix:
+            raise RuntimeError(f"prompt version {pv.name!r} has no fix step")
+        return await self._call_tool(
+            system_prompt=pv.system_fix,
+            user_message=pv.render_fix(section, payload, k),
+            tool=pv.fix_section_tool or prompts.EMIT_SECTION_SPEC_TOOL,
+            temperature=prompts.VERIFY_TEMPERATURE,
+        )
+
     async def _call_tool(
         self, *, system_prompt: str, user_message: str, tool: dict[str, Any],
         temperature: float | None = None,
     ) -> dict[str, Any]:
         extra: dict[str, Any] = dict(self._extra_create)
-        if temperature is not None:  # only the NEW analyze path sets this
+        if temperature is not None:  # analyze (0.2) + spec verify/fix (0.3) set this; generate + v2 verify leave it unset
             extra["temperature"] = temperature
         response = await self._client.chat.completions.create(
             model=self._model,

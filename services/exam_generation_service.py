@@ -652,6 +652,64 @@ def _spec_code_checks(
         raise StructureMismatch(err)
 
 
+def _grade_blind_solve(
+    section: dict[str, Any], per_question: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """AMENDMENT v1.2 §9.4 — CODE (not the model) decides answer correctness:
+    compare each examiner_answer_index to the REAL correct_index, by position.
+    Returns one 'critical' issue per mismatch (empty = examiner agrees with the
+    key on every question)."""
+    real: dict[Any, Any] = {}
+    for q in section.get("questions") or []:
+        if isinstance(q, dict):
+            real[q.get("position")] = (q.get("question_data") or {}).get("correct_index")
+    problems: list[dict[str, Any]] = []
+    for item in per_question:
+        pos = item.get("position")
+        examiner = item.get("examiner_answer_index")
+        key = real.get(pos)
+        if examiner != key:
+            problems.append({
+                "severity": "critical",
+                "question_position": pos,
+                "problem": (f"blind examiner answered Q{pos} as option {examiner} "
+                            f"but the key is option {key}"),
+            })
+    return problems
+
+
+def _validate_per_question(
+    section: dict[str, Any], per_question: Any
+) -> None:
+    """The blind-solve verdict MUST carry exactly one well-formed entry per
+    question (§9.4): one entry per question POSITION (no missing/extra/dup —
+    else _grade_blind_solve would silently leave a question ungraded or invent
+    a false critical against a non-existent key), integer examiner_answer_index,
+    NON-EMPTY evidence_quote. A malformed verdict can't be graded →
+    StructureMismatch (numbers/labels only, M3), counted as a generate retry."""
+    want = {q.get("position") for q in section.get("questions") or []}
+    if not isinstance(per_question, list) or len(per_question) != len(want):
+        got = len(per_question) if isinstance(per_question, list) else "none"
+        raise StructureMismatch(
+            f"blind-solve per_question count {got} != {len(want)} questions")
+    seen: set[Any] = set()
+    for item in per_question:
+        if not isinstance(item, dict):
+            raise StructureMismatch("blind-solve per_question entry not an object")
+        pos = item.get("position")
+        if pos not in want or pos in seen:
+            raise StructureMismatch(
+                f"blind-solve per_question position {pos!r} unknown or duplicated")
+        seen.add(pos)
+        idx = item.get("examiner_answer_index")
+        if not isinstance(idx, int) or isinstance(idx, bool):
+            raise StructureMismatch(
+                f"blind-solve Q{pos} has no integer answer index")
+        if not (item.get("evidence_quote") or "").strip():
+            raise StructureMismatch(
+                f"blind-solve Q{pos} has an empty evidence quote")
+
+
 async def _spec_verify(
     source_section: dict[str, Any],
     section: dict[str, Any],
@@ -663,32 +721,47 @@ async def _spec_verify(
     src_material: str,
     rng: Optional[_random.Random],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Spec-mode verify flow (design §4 step 11 / F2 — NEW flow, not
-    _self_review): judge sees STRUCTURE spec + generated only. On critical +
-    fixed_section: merge strict → re-run code checks (8-10) → PASS = accept
-    WITHOUT re-verify (client parity); FAIL/no fix = hard error → next
-    GENERATE round."""
+    """Spec-mode BLIND-SOLVE verify + FIX loop (AMENDMENT v1.2 §9.4/§9.5).
+
+    Each round: the examiner solves the key-stripped section unaided → CODE
+    grades its answers against the real key + collects model-reported issues →
+    if clean, ACCEPT. Otherwise, if rounds remain, the FIX call (the only call
+    shown the real key) returns a corrected section that is re-merged, re-run
+    through the code checks (shuffle + trigram), and verified again next round.
+    Rounds exhausted with criticals still standing → StructureMismatch → the
+    caller starts a fresh GENERATE round."""
     if rounds <= 0:
         return section, {"rounds": 0, "final_issues": []}
     issues: list[dict[str, Any]] = []
     done = 0
-    for _ in range(rounds):
+    for round_i in range(rounds):
         verdict = await generator.verify_section(section, payload, k=k)
         done += 1
-        issues = verdict.get("issues") or []
-        criticals = [i for i in issues if i.get("severity") == "critical"]
+        per_question = verdict.get("per_question")
+        _validate_per_question(section, per_question)  # raises → counts as retry
+        model_issues = verdict.get("issues") or []
+        key_problems = _grade_blind_solve(section, per_question)
+        issues = model_issues + key_problems
+        criticals = key_problems + [
+            i for i in model_issues if i.get("severity") == "critical"]
         if not criticals:
             return section, {"rounds": done, "final_issues": issues}
-        fixed = verdict.get("fixed_section")
-        if not isinstance(fixed, dict):
-            raise StructureMismatch(
-                "self-review left critical issues: "
-                + "; ".join(i.get("problem", "") for i in criticals)
-            )
+        if round_i == rounds - 1:
+            break  # no budget left for a FIX — fall through to raise
+        # FIX round: hand the fixer the real key + the problems CODE found.
+        fix_payload = {
+            **payload,
+            "fix_problems": [i.get("problem", "") for i in criticals],
+        }
+        fixed = await generator.fix_section(section, fix_payload, k=k)
         section, _ = _merge_generated_section(source_section, fixed, strict_spec=True)
         _spec_code_checks(section, spec, src_material, rng)  # raises on fail
-        return section, {"rounds": done, "final_issues": issues}  # accept, no re-verify
-    return section, {"rounds": done, "final_issues": issues}
+    raise StructureMismatch(
+        "blind-solve verify left critical issues after "
+        f"{done} round(s): "
+        + "; ".join(i.get("problem", "") for i in issues
+                    if i.get("severity") == "critical")
+    )
 
 
 async def _generate_section_spec(

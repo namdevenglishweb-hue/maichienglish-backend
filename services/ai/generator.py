@@ -55,6 +55,17 @@ class AIContentGenerator(ABC):
         analyze configuration (rewrite-only versions)."""
         ...
 
+    @abstractmethod
+    async def fix_section(
+        self, section: dict[str, Any], payload: dict[str, Any], *, k: int
+    ) -> dict[str, Any]:
+        """Spec-mode FIX (AMENDMENT v1.2 §9.5): correct a section that failed a
+        blind-solve round. This is the ONLY spec call shown the real answer key
+        (in `section`) + the problems (in `payload['fix_problems']`). Runs at
+        VERIFY_TEMPERATURE. Returns the `emit_section` tool input (a corrected
+        section). Raises RuntimeError when the prompt version has no fix step."""
+        ...
+
 
 KNOWN_PROVIDERS = ("openrouter", "groq", "gemini", "anthropic")
 
