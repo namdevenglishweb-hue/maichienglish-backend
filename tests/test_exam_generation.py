@@ -777,12 +777,74 @@ def test_preset_resolve_and_helpers():
 
     facts = P.structure_facts(P.PART_PRESETS["KET_R_P3"])
     assert facts["num_questions"] == 5 and facts["options_per_question"] == 3
-    assert facts["word_count_range"] == [150, 230] and facts["cefr_level"] == "A2"
+    assert facts["word_count_range"] == [200, 280] and facts["cefr_level"] == "A2"
 
     sk = P.preset_skeleton(P.PART_PRESETS["PET_R_P3"])
     assert sk["type"] == "multiple_choice" and len(sk["questions"]) == 5
     assert all(len(q["question_data"]["options"]) == 4 for q in sk["questions"])
-    assert {p["partCode"] for p in P.list_presets()} == {"KET_R_P3", "PET_R_P3"}
+
+
+def test_preset_catalog_covers_all_parts_and_is_consistent():
+    """B1: đủ Part KET/PET (4 kỹ năng); chỉ MC reading P3 hỗ trợ AI-gen đợt này."""
+    from services import presets as P
+
+    codes = set(P.PART_PRESETS)
+    # đủ 4 kỹ năng × 2 level (mẫu đại diện)
+    for c in ("PET_R_P1", "PET_R_P6", "KET_R_P2", "KET_W_P6", "PET_W_P2",
+              "PET_L_P2", "KET_L_P5", "KET_S_P1", "PET_S_P4"):
+        assert c in codes, c
+    assert len(codes) >= 28          # toàn bộ Reading/Listening/Writing/Speaking
+
+    for code, p in P.PART_PRESETS.items():
+        assert p.part_code == code
+        assert p.level in ("KET", "PET") and p.skill in (
+            "reading", "listening", "writing", "speaking")
+        # AI-gen chỉ bật cho core đã implement (multiple_choice)
+        assert P.supports_ai_gen(p) == (p.ai_core == "multiple_choice")
+
+    # đúng 2 part AI-gen được (PET_R_P3, KET_R_P3)
+    gen_ok = {c for c, p in P.PART_PRESETS.items() if P.supports_ai_gen(p)}
+    assert gen_ok == {"PET_R_P3", "KET_R_P3"}
+
+    # list_presets phơi field cho builder
+    item = next(d for d in P.list_presets() if d["partCode"] == "PET_R_P4")
+    for key in ("gapMarkers", "sharedOptions", "materialsSpec", "instructionsEn",
+                "aiCore", "aiGenSupported", "defaultPosition", "wordCountRange"):
+        assert key in item
+    assert item["sharedOptions"] is True and item["gapMarkers"] is True
+
+
+async def test_gen_rejects_part_code_without_ai_core(monkeypatch):
+    """B1 guard: part_code của core CHƯA implement (vd PET_R_P2) → ValidationError,
+    không cố gen bừa."""
+    import services.exam_generation_service as G
+
+    with pytest.raises(ValidationError):
+        await G.exam_generation_service.generate_one_part(
+            "sec-x", 3, generator=FakeSpecGen(), prompt_version="v3",
+            part_code="PET_R_P2")          # constraint_matrix — chưa hỗ trợ
+
+
+def test_part_code_and_format_standard_serialize_round_trip():
+    """B2 read-path: loaders/serializers map part_code + format_standard;
+    backward-compat khi giá trị NULL (section/exam cũ)."""
+    from services.section_service import _row_to_section
+    from api.exams.routes import _to_view
+
+    row = {"id": "s1", "exam_id": "e1", "position": 1, "part_label": "Part 3",
+           "type": "multiple_choice", "instructions": "x", "materials": [],
+           "max_audio_plays": None, "part_code": "KET_R_P3",
+           "created_at": None, "updated_at": None, "deleted_at": None}
+    assert _row_to_section(row)["part_code"] == "KET_R_P3"
+    row_old = {**row, "part_code": None}                 # section cũ
+    assert _row_to_section(row_old)["part_code"] is None
+
+    exam = {"id": "e1", "title": "t", "level": "KET", "skill": "reading",
+            "duration_minutes": 40, "description": None, "is_published": False,
+            "created_by": None, "created_at": None, "updated_at": None,
+            "deleted_at": None, "format_standard": "cambridge_2020"}
+    assert _to_view(exam).formatStandard == "cambridge_2020"
+    assert _to_view({**exam, "format_standard": None}).formatStandard is None
 
 
 def test_reshape_per_question_aligns_to_count_without_prompt():

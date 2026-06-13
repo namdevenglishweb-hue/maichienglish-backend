@@ -1301,8 +1301,13 @@ class ExamGenerationService:
         not the source. Unknown code → ValidationError (→ 400)."""
         _validate_k(k)
         prompt_version = _validate_prompt_version(prompt_version)
-        from services.presets import resolve_preset
+        from services.presets import resolve_preset, supports_ai_gen
         preset = resolve_preset(part_code)
+        if preset is not None and not supports_ai_gen(preset):
+            raise ValidationError(
+                f"part_code {preset.part_code!r} (core {preset.ai_core!r}) chưa hỗ "
+                "trợ AI-gen đợt này (chỉ multiple_choice). Builder/scaffold vẫn dùng được."
+            )
         section, exam_context = await self.load_section_for_gen(source_section_id)
         _assert_source_media_meta([section])
         gen, rounds = await _resolve_generation(generator, provider, model, rounds)

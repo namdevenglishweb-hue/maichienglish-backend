@@ -31,6 +31,7 @@ def _row_to_exam(row) -> dict[str, Any]:
             if row["generated_from_exam_id"] else None
         ),
         "generation_meta": _coerce_jsonb(row["generation_meta"]),
+        "format_standard": row["format_standard"],   # part presets (mig 0024)
     }
 
 
@@ -43,7 +44,7 @@ def _coerce_jsonb(raw):
 _SELECT_COLS = """
     id, title, level, skill, duration_minutes, description,
     is_published, created_by, created_at, updated_at, deleted_at,
-    generated_from_exam_id, generation_meta
+    generated_from_exam_id, generation_meta, format_standard
 """
 
 
@@ -272,6 +273,7 @@ class ExamService:
         sections: Optional[list[dict[str, Any]]] = None,
         generated_from_exam_id: Optional[str] = None,
         generation_meta: Optional[dict[str, Any]] = None,
+        format_standard: Optional[str] = None,
     ) -> dict[str, Any]:
         """Create exam + optional sections + optional questions in 1 transaction.
 
@@ -354,6 +356,9 @@ class ExamService:
                         if sec.get("max_audio_plays") is not None
                         else sec.get("maxAudioPlays")
                     ),
+                    # Part preset id (mig 0024) — persisted when the builder/
+                    # scaffold supplies it; NULL for free-form sections.
+                    "part_code": sec.get("part_code") or sec.get("partCode"),
                     "questions": normalized_qs,
                 }
             )
@@ -364,13 +369,14 @@ class ExamService:
                     f"""
                     INSERT INTO public.exams
                         (title, level, skill, duration_minutes, description, created_by,
-                         generated_from_exam_id, generation_meta)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+                         generated_from_exam_id, generation_meta, format_standard)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)
                     RETURNING {_SELECT_COLS}
                     """,
                     title, level, skill, duration_minutes, description, created_by,
                     generated_from_exam_id,
                     json.dumps(generation_meta) if generation_meta is not None else None,
+                    format_standard,
                 )
                 exam_id = exam_row["id"]
                 created_sections = 0
@@ -380,8 +386,8 @@ class ExamService:
                         """
                         INSERT INTO public.sections
                             (exam_id, position, part_label, type, instructions,
-                             materials, max_audio_plays)
-                        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+                             materials, max_audio_plays, part_code)
+                        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
                         RETURNING id
                         """,
                         exam_id,
@@ -391,6 +397,7 @@ class ExamService:
                         sec["instructions"],
                         json.dumps(sec["materials"]),
                         sec["max_audio_plays"],
+                        sec["part_code"],
                     )
                     created_sections += 1
                     section_id = section_row["id"]

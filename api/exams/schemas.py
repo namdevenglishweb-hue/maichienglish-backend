@@ -88,6 +88,11 @@ class ExamSectionPreview(BaseModel):
         description="Typed blocks (text/image/audio). Audio entries carry `url`.",
     )
     maxAudioPlays: Optional[int] = None
+    partCode: Optional[str] = Field(
+        default=None,
+        description="Cambridge Part preset id (e.g. 'KET_R_P3') when this section "
+        "follows a preset; null = custom/free-form section (migration 0024).",
+    )
     questions: list[ExamQuestionPreview] = Field(default_factory=list)
 
 
@@ -120,6 +125,11 @@ class ExamView(BaseModel):
             "AI-generation audit (k/model/media_todos/self_review/token_usage). "
             "Admin/teacher only — null for students."
         ),
+    )
+    formatStandard: Optional[str] = Field(
+        default=None,
+        description="'cambridge_2020' when the exam was scaffolded to the "
+        "Cambridge standard; null = free-form (migration 0024).",
     )
     sections: Optional[list[ExamSectionPreview]] = Field(
         default=None,

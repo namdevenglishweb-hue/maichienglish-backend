@@ -81,7 +81,10 @@ CREATE TABLE public.exams (
   deleted_at        timestamptz,
   -- AI exam generation provenance (migration 0018, docs/exam-ai-generation §11).
   generated_from_exam_id uuid REFERENCES public.exams(id) ON DELETE SET NULL,
-  generation_meta        jsonb
+  generation_meta        jsonb,
+  -- Part presets (migration 0024, docs/exam-part-presets). 'cambridge_2020' =
+  -- exam scaffolded to the Cambridge standard; NULL = free-form.
+  format_standard        text
 );
 
 
@@ -107,10 +110,17 @@ CREATE TABLE public.sections (
   instructions      text,
   materials         jsonb NOT NULL DEFAULT '[]'::jsonb,
   max_audio_plays   int,                                          -- cap value; null = unlimited
+  -- Part presets (migration 0024). NULL = custom section; else a Cambridge Part
+  -- preset id (e.g. 'KET_R_P3'); allowed set lives in services/presets.py.
+  part_code         text,
   created_at        timestamptz NOT NULL DEFAULT now(),
   updated_at        timestamptz NOT NULL DEFAULT now(),
   deleted_at        timestamptz
 );
+
+CREATE INDEX IF NOT EXISTS idx_sections_part_code
+  ON public.sections (part_code)
+  WHERE deleted_at IS NULL AND part_code IS NOT NULL;
 
 -- Partial unique: only ACTIVE sections must have distinct positions per
 -- exam. Soft-deleted rows keep their old position without blocking reuse.

@@ -143,6 +143,7 @@ def _row_to_section(row) -> dict[str, Any]:
         "instructions": row["instructions"],
         "materials": _coerce_jsonb(row["materials"]) or [],
         "max_audio_plays": row["max_audio_plays"],
+        "part_code": row["part_code"],   # Part preset id; NULL = custom (mig 0024)
         "created_at": row["created_at"].isoformat() if row["created_at"] else None,
         "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
         "deleted_at": row["deleted_at"].isoformat() if row["deleted_at"] else None,
@@ -151,7 +152,7 @@ def _row_to_section(row) -> dict[str, Any]:
 
 _SELECT_COLS = """
     id, exam_id, position, part_label, type, instructions, materials,
-    max_audio_plays, created_at, updated_at, deleted_at
+    max_audio_plays, part_code, created_at, updated_at, deleted_at
 """
 
 _ALLOWED_TYPES = {

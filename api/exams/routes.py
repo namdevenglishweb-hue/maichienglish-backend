@@ -43,6 +43,7 @@ def _to_view(exam: dict, *, include_meta: bool = True) -> ExamView:
         deletedAt=exam["deleted_at"],
         generatedFromExamId=exam.get("generated_from_exam_id"),
         generationMeta=exam.get("generation_meta") if include_meta else None,
+        formatStandard=exam.get("format_standard"),
     )
 
 
@@ -75,6 +76,7 @@ async def _build_sections_payload(
                 if is_priv
                 else strip_material_meta(s["materials"]),
                 maxAudioPlays=s["max_audio_plays"],
+                partCode=s.get("part_code"),
                 questions=[
                     ExamQuestionPreview(
                         id=q["id"],
