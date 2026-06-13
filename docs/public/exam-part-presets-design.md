@@ -5,128 +5,108 @@ status: draft
 last-updated: 2026-06-13
 author: backend
 depends-on: [exam-ai-generation, exam-gen-v3-spec-mode]
-changelog: DRAFT 2026-06-13 — MC preset-authoritative structure (preset đè đề
-  gốc về số câu/option/word-count/CEFR); reshape per_question bằng code; prompt
-  FROZEN; giữ nguyên ANALYZE/leak/blind-solve/similarity; request-timeout 180s;
-  default model Opus 4.8
+changelog: DRAFT 2026-06-13 (rev2) — phủ ĐẦY ĐỦ amendment Part-Presets (builder
+  scaffold, validator save-gate, eligibility surface) ngoài lát cắt AI-gen đã
+  ship; đánh STATUS từng phần + bảng BACKEND WORK-ITEMS để chốt thứ tự build.
+  MC-only cho AI-gen core; builder/scaffold áp cho MỌI preset về cấu trúc.
 ---
 
-# Part Presets (MC-only) — Design / Core feature
+# Part Presets — Design / Core feature (bản đầy đủ)
 
-> **Một dòng:** thêm tầng PRESET = định nghĩa cứng của một "Part" Cambridge
-> (số câu, số option, word-count, CEFR…). Khi gen có `part_code`, **preset là
-> nguồn cấu trúc duy nhất — đè đề gốc** (đề gốc bao nhiêu câu cũng kệ). Bù vào
-> đó, số liệu kỹ năng per-question do ANALYZE sinh được **reshape bằng code**
-> về đúng số câu của preset. **Không sửa một ký tự prompt nào.**
+> **Một dòng:** PRESET = định nghĩa cứng của một Part Cambridge (số câu/option/
+> word-count/CEFR…), một nguồn sự thật dùng chung cho **builder**, **validator**,
+> và **AI generate**. AI-gen: preset đè đề gốc về cấu trúc (✅ MC). Builder:
+> scaffold section/đề đúng khuôn + khóa cấu trúc (🔨). Multi-core/listening (⏳).
 >
-> **Phạm vi đợt này:** chỉ core `multiple_choice` (PET_R_P3, KET_R_P3). Các
-> dạng khác (cloze/matching/listening…) là multi-core, để amendment sau.
+> **Nguồn tầm nhìn:** amendment `AMENDMENT_part-presets_multi-core.md` của client
+> (§2 preset, §3 builder flow, §4.2 eligibility, §6 listening). Kiến trúc lõi
+> v1.1/v1.2/v3 (ANALYZE→leak→generate→shuffle→similarity→blind-solve→FIX→
+> all-or-nothing) **GIỮ NGUYÊN — prompt FROZEN.**
+
+## Bảng trạng thái
+✅ ĐÃ SHIP (`d7f3877`) · 🔨 BACKEND SẮP LÀM (chờ chốt thứ tự) · ⏳ ĐỂ SAU.
 
 ---
 
 ## 1. Vấn đề
+(a) Builder tự do ⇒ không có gì chặn "Part 1 KET" sai khung. (b) AI-gen lấy cấu
+trúc theo đề mẫu nên không ra được Part chuẩn nếu đề mẫu lệch. Gốc chung: **chưa
+có định nghĩa máy-đọc-được của từng Part.** → tầng PRESET.
 
-Spec mode v3 lấy cấu trúc (số câu/option) **từ đề gốc** rồi ép nội dung sinh ra
-khớp đề gốc đó. Hệ quả: đề mới luôn copy *số câu* của đề mẫu — không thể "muốn
-ra Part chuẩn 5 câu" nếu đề mẫu có 6 câu. Client chốt hướng: **cấu trúc phải
-theo CHUẨN CAMBRIDGE (preset), không theo đề mẫu.**
+## 2. Preset — một nguồn sự thật (code constant)
+`services/presets.py`, `PartPreset` frozen dataclass, KHÔNG DB (format Cambridge,
+đổi cùng core/prompt/harness ⇒ thuộc git). ✅ đã có với 2 khuôn MC
+(`PET_R_P3` 5q/4opt/B1/220–320; `KET_R_P3` 5q/3opt/A2/150–230).
 
-## 2. Kiến trúc — preset là LỚP THÊM, không phải pipeline mới
+- 🔨 **B1 — mở rộng đủ 22 Part** (Reading/Listening/Writing/Speaking) cho builder,
+  + field builder: `materials_spec`, `gap_markers`, `shared_options`,
+  `instructions_en`, `default_position`, `ai_core` (None cho non-MC đợt này).
+  Builder/scaffold/validator áp cho **mọi** preset; AI-gen chỉ chạy preset có
+  `ai_core="multiple_choice"`.
 
-```
-part_code ─► PartPreset (code constant) ─┐
-                                         ├─► structure_facts  → STRUCTURE SPEC slot (data)
-                                         ├─► reshape_per_question(N) → PER-QUESTION slot (data)
-                                         ├─► _merge_generated_section(preset=) → ép count/option/points
-                                         ├─► preset_skeleton → Tầng B so cấu trúc (thay source)
-                                         └─► validate_output_against_preset → mã lỗi rõ
-GIỮ NGUYÊN 100%: ANALYZE(source) → leak-check(source) → topic+seed → GENERATE
-   → shuffle → trigram-guard(vs source) → blind-solve VERIFY → FIX → all-or-nothing
-```
+## 3. AI generate — preset-authoritative (✅ đã ship, MC-only)
+Khi gen có `part_code` (optional trong request `/section`):
+1. structure = `presets.structure_facts(preset)` (đè counts/options/word-count/
+   CEFR) → khe `STRUCTURE SPEC` sẵn có.
+2. `reshape_per_question(spec, N)` — căn skill-map của ANALYZE (dài = số câu
+   source M) về đúng N **bằng code** (N<M lấy mẫu đều, N>M lặp vòng).
+3. `_merge_generated_section(preset=)` ép số câu/type/points theo preset (đè
+   source).
+4. `_validate_section_structure(preset_skeleton(preset), …)` (Tầng B vs khuôn) +
+   `validate_output_against_preset` (mã lỗi field).
+5. Giữ nguyên ANALYZE/leak/similarity/blind-solve/FIX. **Prompt diff = rỗng.**
 
-Không có `part_code` ⇒ **hành vi y hệt v3 cũ** (source-driven), backward-compatible.
+`report.sections[].part_code` ✅ provenance. Phạm vi: **Mode-2 một part**; Mode-1
+cả-đề/preview chưa nhận part_code (🔨 B8, cần map theo section).
 
-## 3. Data model — code constant (KHÔNG DB)
+## 4. Builder & scaffold (🔨 — phần khiến doc trước thiếu)
+Tầm nhìn client (§3): tạo section/đề theo khuôn, server scaffold, FE khóa cấu
+trúc. Backend cần (chi tiết ở §7):
+- 🔨 B2 `part_code` persist trên `sections` (+ `format_standard` trên `exams`) —
+  **migration 0024**.
+- 🔨 B3 `POST /api/sections` nhận `part_code` ⇒ scaffold section rỗng đúng khuôn.
+- 🔨 B4 `POST /api/exams/scaffold` ⇒ tạo đề + đủ section preset, unpublished.
+- 🔨 B5 gắn `preset_validator` vào builder-save (POST/PUT section) → field errors.
 
-`services/presets.py`: `PartPreset` (frozen dataclass). Lưu ở git (review/diff,
-deploy cùng code + prompt + harness), KHÔNG ở DB (admin không sửa runtime —
-khác `section_type_prompts`).
+## 5. Eligibility surface (🔨 B6)
+Amendment §4.2: API generate trả `{mode, core, eligibility_reason}` per section ở
+preview, cấm fallback im lặng. Hiện `mode` có; `core`/`eligibility_reason` chưa
+surface → `spec_mode.assign_core` cần trả lý do + service thread vào report.
 
-```
-PartPreset: part_code, level, skill, section_type, question_type,
-            num_questions, options_per_question, word_count_range (min,max),
-            cefr_level, points_per_question, label, label_vi,
-            per_question: tuple[QuestionProfile, ...]   # rỗng đợt này
-```
+## 6. Hardening + model (✅ đã ship)
+- `AI_REQUEST_TIMEOUT=180s` + `AI_MAX_RETRIES=2` → mọi call (2 adapter).
+- Default model `anthropic/claude-opus-4.8` (catalog + env). Resolve: request >
+  DB `ai_generation_settings` > env (⚠️ đổi `.env`/DB nếu pin slug cũ). A/B
+  re-baseline trên Opus 4.8 (sau).
 
-Đợt này: `PET_R_P3` (5 câu / 4 opt / 220–320 từ / B1), `KET_R_P3`
-(5 câu / 3 opt / 150–230 từ / A2). `per_question` (skill profile từng câu) là
-field **cross-check/audit tương lai — KHÔNG nạp vào prompt** đợt này.
+## 7. BACKEND WORK-ITEMS để unblock FE ⭐
+> Để mang ra chốt **thứ tự build**. "MC-only" chỉ áp cho AI-gen core; builder/
+> scaffold/validator áp cho **mọi** preset.
 
-## 4. Tích hợp pipeline (1 điểm cắm)
-
-Trong `_generate_section_spec`, khi có preset:
-1. **structure** = `presets.structure_facts(preset)` (counts/options/word-count/
-   CEFR/type từ preset) — `merge_structure` overlay lên phần định tính ANALYZE
-   (text_genre/style giữ nguyên).
-2. **per_question** = `spec_mode.reshape_per_question(spec, preset.num_questions)`
-   — căn số liệu kỹ năng ANALYZE (dài = số câu source M) về đúng N.
-3. **merge** = `_merge_generated_section(..., preset=preset)` ép số câu = N,
-   `question_type`/`points` từ preset, position 1..N (không tham chiếu source).
-4. **guardrail** = `validate_output_against_preset` (mã lỗi field) → fail =
-   StructureMismatch vào retry loop.
-5. **Tầng B** = `_validate_section_structure(preset_skeleton(preset), section)`
-   — so invariant với khung preset thay vì source (logic checker KHÔNG đổi).
-6. FIX (vòng 2 blind-solve) cũng re-merge qua nhánh `preset=`.
-
-## 5. Reshape per_question (giải "rủi ro #1" bằng code)
-
-ANALYZE sinh `per_question` khớp số câu **source M**; preset cần **N**. Thay vì
-sửa prompt, code căn lại:
-- `N == M`: giữ nguyên (đánh số 1..N).
-- `N < M`: lấy mẫu đều `round(i*(m-1)/(n-1))` (giữ đa dạng kỹ năng).
-- `N > M`: lặp vòng `i % m`.
-- per_question rỗng / `N<=0`: trả nguyên (prompt tự bỏ qua slot).
-Luôn ra đúng N phần tử, position 1..N. Prompt chỉ `json.dumps` slot này ⇒
-structure (N) và per_question (N) khớp nhau, **template bất biến**.
-
-## 6. Bằng chứng PROMPT FROZEN
-
-`git diff services/ai/prompts.py` = **rỗng**. Prompt generate/verify/fix nhận
-`spec["structure"]`/`spec["per_question"]` dạng opaque JSON ⇒ đổi NGUỒN dữ liệu
-(preset thay derive-from-source) **không** đụng wording. Đề gốc vẫn chỉ vào
-ANALYZE; blind-solve vẫn strip key; mọi rule chống-leak/text_genre của client
-giữ nguyên.
-
-## 7. Hardening + model
-
-- **Request timeout:** `AI_REQUEST_TIMEOUT=180s` + `AI_MAX_RETRIES=2` (settings)
-  → áp vào `AsyncOpenAI`/`AsyncAnthropic` mọi call (analyze/gen/verify/fix). Lý
-  do: SDK mặc định 600s/call từng gây stall ~nhiều phút khi A/B.
-- **Model default:** `anthropic/claude-opus-4.8` (catalog + env default). Resolve
-  order: per-request > DB `ai_generation_settings` > env. (⚠️ đổi `.env`/DB nếu
-  đang pin slug cũ.) Số A/B cũ đo trên sonnet-4.5 → cần re-baseline.
+| ID | Việc | Đụng | Migration | Đợt | Unblock FE |
+|---|---|---|---|---|---|
+| ✅ | GET /api/presets; `partCode` trên /section; report.part_code; preset-authoritative MC; timeout; Opus 4.8 | (đã merge `d7f3877`) | Không | — | dropdown nguồn, AI-gen theo khuôn |
+| **B1** | Mở rộng `PART_PRESETS` đủ 22 Part + field builder (`materials_spec`, `gap_markers`, `shared_options`, `instructions_en`, `default_position`, `ai_core`); mở rộng GET /api/presets trả thêm field | `services/presets.py`, `api/presets/schemas.py` | **Không** | 1 (nền) | dropdown phủ đủ Part; builder biết khung |
+| **B2** | `sections.part_code` (nullable) + index + `exams.format_standard` | migration **0024** + `schema.sql` + section/exam loaders/serializers | **Có (0024)** | 1 | badge bền vững, validator-on-save, scaffold lưu khuôn |
+| **B3** | `POST /api/sections` nhận `part_code` → scaffold section rỗng đúng khuôn (part_label/instructions/type/N câu rỗng/option/material placeholder) | `services/section_service`, `api/sections/*` | (dùng 0024) | 2 | "Thêm phần thi" theo khuôn |
+| **B4** | `POST /api/exams/scaffold {level,skill,format_standard}` → tạo đề + đủ section preset, unpublished | `services/exam_service`, `api/exams/*` | (dùng 0024) | 2 | checkbox "Tạo sẵn khung Cambridge" |
+| **B5** | Gắn `preset_validator.validate_output_against_preset` vào builder-save (POST/PUT section) → field errors có code | `services/section_service` | Không | 2 | lỗi validator inline |
+| **B6** | `assign_core` trả `eligibility_reason`; thread `{mode, core, eligibility_reason}` per section vào preview/section report | `services/ai/spec_mode.py`, `exam_generation_service.py` | Không | 1–2 | hiển thị core + "vì sao rewrite" |
+| **B7** | (tùy chọn) endpoint/catalog liệt kê validator code→message mặc định | `api/presets` hoặc doc | Không | 2 | nguồn mã lỗi tập trung |
+| **B8** | (sau) `part_code` map cho AI-gen Mode-1 cả-đề/preview | `exam_generation_service.py`, routes, job | Không | sau | AI-gen cả đề theo khuôn |
+| ⏳ | Multi-core (cloze/matching/gapped/listening) + render_hint + listening audio-pending | nhiều | có thể | sau | dạng đề ngoài MC |
 
 ## 8. Design decisions / trade-offs
-
 | Quyết định | Chọn | Bỏ | Vì sao |
 |---|---|---|---|
-| Nguồn cấu trúc | **Preset (đè source)** | Source-authoritative; preset chỉ validate | Client: đề ra phải chuẩn Cambridge, không phụ thuộc đề mẫu |
-| Ánh xạ per_question khi N≠M | **Reshape code (no prompt)** | Sửa ANALYZE để emit đúng N; bỏ per_question | Giữ prompt FROZEN + giữ tính năng skill K=3; reshape deterministic, test được |
-| Lưu preset | **Code constant** | Bảng DB | Format Cambridge, đổi cùng core/prompt/harness ⇒ thuộc git |
-| Cần đề gốc? | **Vẫn bắt buộc** | Bỏ source (preset+topic) | Giữ ANALYZE/leak/similarity nguyên vẹn; "preset+topic không source" là mode riêng tương lai |
-| part_code | **Optional trong request, không persist** | Cột `sections.part_code` + migration | Đợt này chỉ gen Mode-2; builder/persist là amendment sau |
-| Guardrail | **2 lớp** (Tầng-B skeleton enforce + validator messages) | 1 lớp | Skeleton chặn cứng; validator cho thông điệp field rõ + tái dùng audit |
+| Nguồn cấu trúc AI-gen | **Preset đè source** | source-authoritative | Đề ra chuẩn Cambridge, không phụ thuộc đề mẫu |
+| Ánh xạ per_question N≠M | **reshape code, prompt FROZEN** | sửa ANALYZE prompt | Không đụng prompt client; deterministic, test được |
+| Lưu preset | **code constant** | DB table | Format Cambridge ⇒ git |
+| Phạm vi AI-gen core | **MC-only** | đủ core ngay | Tránh 2 mặt trận; multi-core là amendment riêng |
+| Builder vs source | **builder/scaffold cho MỌI preset** | chỉ MC | Khung là cấu trúc thuần, không cần AI-core |
+| part_code (AI-gen) | **optional request, chưa persist** | persist ngay | Persist là B2 (phục vụ builder), tách rõ |
 
-## 9. Ngoài phạm vi (đợt sau)
-Multi-core (cloze/matching/gapped/listening) · builder UI + scaffold + cột
-`part_code` persist (migration) · Mode-1 cả-đề/preview theo preset (cần map
-part_code từng section) · per_question preset đẩy vào prompt · A/B re-baseline
-trên Opus 4.8.
-
-## 10. Kiểm thử
-Unit: `presets` (resolve/facts/skeleton/list), `reshape_per_question` (mọi
-edge), `preset_validator`. Integration (mock): source 3q/4opt + preset KET_R_P3
-⇒ output **5q/3opt** theo preset, qua Tầng-B-skeleton + blind-solve. Smoke thật
-Opus 4.8: 1 part KET_R_P3 ⇒ 5 câu/3 option, trigram 0.0, word-count trong range.
-Full suite xanh; prompt diff rỗng.
+## 9. Kiểm thử (đã có cho phần ✅)
+Unit: presets/reshape/validator; integration mock: source 3q/4opt + KET_R_P3 ⇒
+5q/3opt; smoke Opus 4.8 1 part ⇒ 5q/3opt, trigram 0.0, word-count in range. Full
+suite xanh; prompt diff rỗng. (B1–B8 sẽ kèm test khi build.)
