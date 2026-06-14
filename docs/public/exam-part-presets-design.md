@@ -8,16 +8,17 @@ depends-on: [exam-ai-generation, exam-gen-v3-spec-mode]
 changelog: 2026-06-13 (rev3) — B3–B7 SHIPPED. Full preset catalogue (B1),
   part_code/format_standard persist + migration 0024 (B2), scaffold-section (B3),
   scaffold-exam (B4), validate-on-save (B5), eligibility_reason (B6),
-  error-codes endpoint (B7). B8 + multi-core remain ⏳.
+  error-codes endpoint (B7). mc_cloze core SHIPPED (PET_R_P5/KET_R_P4, commit
+  f331fc0). B8 + remaining multi-core (matching/gapped/listening) remain ⏳.
 ---
 
 # Part Presets — Design / Core feature
 
 > **Một dòng:** PRESET = định nghĩa cứng của một Part Cambridge (số câu/option/
 > word-count/CEFR…), một nguồn sự thật dùng chung cho **builder**, **validator**,
-> và **AI generate**. AI-gen: preset đè đề gốc về cấu trúc (✅ Part MC). Builder:
-> scaffold section/đề đúng khuôn + validate-on-save (✅, mọi Part). AI-gen đa-core
-> / cả-đề (⏳).
+> và **AI generate**. AI-gen: preset đè đề gốc về cấu trúc (✅ **multiple_choice +
+> mc_cloze**). Builder: scaffold section/đề đúng khuôn + validate-on-save (✅, mọi
+> Part). Core còn lại (matching/gapped_text/listening) + AI-gen cả-đề (⏳).
 >
 > **Nguồn tầm nhìn:** amendment `AMENDMENT_part-presets_multi-core.md` của client
 > (§2 preset, §3 builder flow, §4.2 eligibility, §6 listening). Kiến trúc lõi
@@ -25,8 +26,8 @@ changelog: 2026-06-13 (rev3) — B3–B7 SHIPPED. Full preset catalogue (B1),
 > all-or-nothing) **GIỮ NGUYÊN — prompt FROZEN.**
 
 ## Bảng trạng thái
-✅ ĐÃ SHIP (B1–B7, commits `b5be508`/`fdab6e8`/`978ad90`) · ⏳ ĐỂ SAU (B8 +
-multi-core).
+✅ ĐÃ SHIP (B1–B7 + mc_cloze core, commits `b5be508`/`fdab6e8`/`978ad90`/`f331fc0`)
+· ⏳ ĐỂ SAU (B8 + cores matching/gapped/listening).
 
 ---
 
@@ -40,24 +41,40 @@ có định nghĩa máy-đọc-được của từng Part.** → tầng PRESET.
 đổi cùng core/prompt/harness ⇒ thuộc git). ✅ **đủ Part KET/PET** (Reading/
 Listening/Writing/Speaking) với field builder: `materials_spec`, `gap_markers`,
 `shared_options`, `instructions_en`, `default_position`, `ai_core`, `per_question`.
-- AI-gen chỉ chạy preset có `ai_core ∈ AI_GEN_CORES` (= `{"multiple_choice"}` đợt
-  này ⇒ `PET_R_P3` 5q/4opt/B1; `KET_R_P3` 5q/3opt/A2). `supports_ai_gen()` +
+- AI-gen chỉ chạy preset có `ai_core ∈ AI_GEN_CORES` (= `{"multiple_choice",
+  "mc_cloze"}` ⇒ `PET_R_P3` 5q/4opt/B1, `KET_R_P3` 5q/3opt/A2 (MC reading);
+  `PET_R_P5` 6q/4opt, `KET_R_P4` 6q/3opt (mc_cloze)). `supports_ai_gen()` +
   `aiGenSupported` flag. Builder/scaffold/validator áp cho **mọi** Part.
 - `GET /api/presets` ✅ trả full catalogue (mọi field trên + `aiGenSupported`,
   `imageDependent`). Word-count (verify Cambridge 2025/2026 = format 2020 vẫn
   current): `PET_R_P3 (300,400)`, `KET_R_P3 (200,280)` (đã nới sát mẫu thật).
 
-## 3. AI generate — preset-authoritative (✅ đã ship, MC-only)
-Khi gen có `part_code` (optional trong request `/section`):
+## 3. AI generate — preset-authoritative + CoreSpec registry (✅ đã ship)
+Engine spec **core-agnostic**: `CORE_PROMPTS` (prompts.py) + `CORE_ENGINE`
+(service) keyed theo `core`. `multiple_choice` trỏ **đúng object v3** (byte-
+identical, test `is`); `mc_cloze` cắm cạnh. Routing: có preset ⇒ `core =
+preset.ai_core` (validate source theo core đó).
+
+Khi gen có `part_code`:
 1. structure = `presets.structure_facts(preset)` (đè counts/options/word-count/
-   CEFR) → khe `STRUCTURE SPEC` sẵn có.
-2. `reshape_per_question(spec, N)` — căn skill-map của ANALYZE (dài = số câu
-   source M) về đúng N **bằng code** (N<M lấy mẫu đều, N>M lặp vòng).
-3. `_merge_generated_section(preset=)` ép số câu/type/points theo preset (đè
-   source).
-4. `_validate_section_structure(preset_skeleton(preset), …)` (Tầng B vs khuôn) +
-   `validate_output_against_preset` (mã lỗi field).
-5. Giữ nguyên ANALYZE/leak/similarity/blind-solve/FIX. **Prompt diff = rỗng.**
+   CEFR) → khe `STRUCTURE SPEC`.
+2. `reshape_per_question(spec, N)` — căn gap/skill-profile của ANALYZE về N (code).
+3. assemble theo core: MC `_merge_generated_section(preset=)`; **cloze
+   `_assemble_cloze_section`** (carve single-marker `[[i]]`→`{{gap:i}}`, build
+   options từ target+distractors, force N/type/points theo preset).
+4. `_validate_section_structure(preset_skeleton(preset), …)` (Tầng B; cloze:
+   skeleton encode N `{{gap}}`) + `validate_output_against_preset`.
+5. Giữ nguyên ANALYZE/leak/similarity/blind-solve. **Prompt MC diff = rỗng**;
+   mc_cloze thêm prompt RIÊNG (analyze/generate/verify/fix cloze) — không sửa
+   prompt MC/blind-solve chung.
+
+**mc_cloze (PET_R_P5 / KET_R_P4):** ANALYZE → gap-profile trừu tượng (taxonomy:
+preposition/collocation/verb_form/comparison/fixed_expression… — không leak
+source); GENERATE viết passage + **single-marker `[[N]]`** (không ghi đáp án vào
+passage) + per_gap{target,distractors,reason}; VERIFY **2-pass blind** (strip key,
+không source) — CODE so key, bất kỳ lượt lệch/critical ⇒ FIX; **minor-ambiguity =
+accept** (chỉ critical→FIX), chờ client feedback. Gen thật Opus 4.8: ổn định 4/4
+(0 retry), verify khớp key mọi gap, trigram 0–0.9%.
 
 Guard: `part_code` của Part **không** `aiGenSupported` → 400 ("chưa hỗ trợ
 AI-gen"). `report.sections[].{part_code, mode, core, eligibility_reason}` ✅
@@ -106,8 +123,9 @@ text đề). `assign_core` giữ nguyên (gọi lại hàm mới).
 | B5 | validate-on-save (hard-block 400, field-coded) | ✅ `978ad90` | `exam_service`/`section_service` |
 | B6 | `eligibility_reason` per section trong report | ✅ `978ad90` | `spec_mode`, `exam_generation_service` |
 | B7 | endpoint mã lỗi validator → message EN/VI | ✅ `978ad90` | `GET /api/presets/error-codes` |
+| mc_cloze | Core thứ 2 (PET_R_P5/KET_R_P4): CoreSpec registry, single-marker carve, 2-pass blind verify | ✅ `f331fc0` | `prompts.py`, `spec_mode.py`, `exam_generation_service.py`, adapters |
 | **B8** | AI-gen Mode-1 cả-đề/preview theo `part_code` (map từng section) | ⏳ ĐỂ SAU | `exam_generation_service`, routes, job |
-| **⏳** | Multi-core AI (cloze/matching/gapped/listening) + render_hint + listening audio-pending | ⏳ ĐỂ SAU | nhiều (có thể migration) |
+| **⏳** | Core còn lại (matching/gapped_text/listening) + render_hint + listening audio-pending | ⏳ ĐỂ SAU | nhiều (có thể migration) |
 
 Cũng đã ship: request-timeout 180s + `AI_MAX_RETRIES=2` (2 adapter); default model
 `anthropic/claude-opus-4.8` (catalog + env) — xem §6.
@@ -118,7 +136,9 @@ Cũng đã ship: request-timeout 180s + `AI_MAX_RETRIES=2` (2 adapter); default 
 | Nguồn cấu trúc AI-gen | **Preset đè source** | source-authoritative | Đề ra chuẩn Cambridge, không phụ thuộc đề mẫu |
 | Ánh xạ per_question N≠M | **reshape code, prompt FROZEN** | sửa ANALYZE prompt | Không đụng prompt client; deterministic, test được |
 | Lưu preset | **code constant** | DB table | Format Cambridge ⇒ git |
-| Phạm vi AI-gen core | **MC-only** | đủ core ngay | Tránh 2 mặt trận; multi-core là amendment riêng |
+| Phạm vi AI-gen core | **MC + mc_cloze** (CoreSpec registry) | đủ core ngay | Làm từng core, MC byte-identical khi thêm core 2 |
+| Cloze carve | **single-marker `[[N]]`** (đáp án ở per_gap) | paired `[[i]]…[[i]]` | Model bọc-đôi flaky ~50%; single-marker ổn định 4/4 |
+| Cloze verify | **2-pass blind, code-graded; minor-ambiguity accept** | 1-pass / FIX cả minor | Cloze dễ 2-đáp-án → 2-pass chặt; minor để client feedback |
 | Builder vs source | **builder/scaffold cho MỌI preset** | chỉ MC | Khung là cấu trúc thuần, không cần AI-core |
 | part_code persist | **cột `sections.part_code` (mig 0024)** | nhét vào jsonb | Query/filter được; builder lưu khuôn từng section |
 | B3 scaffold | **trả template, không persist** | tạo section rời | Section cần exam; persist khi lưu qua create_exam_nested |
