@@ -32,6 +32,8 @@ def _to_view(s: dict, *, strip_meta: bool = False) -> SectionView:
     # strip_meta=True for student-facing reads: removes admin-only
     # material.meta (transcript/description). Admin CRUD keeps it. See §5.4.
     materials = strip_material_meta(s["materials"]) if strip_meta else s["materials"]
+    from services.presets import is_image_dependent
+    part_code = s.get("part_code")
     return SectionView(
         id=s["id"],
         examId=s["exam_id"],
@@ -41,6 +43,8 @@ def _to_view(s: dict, *, strip_meta: bool = False) -> SectionView:
         instructions=s["instructions"],
         materials=materials,
         maxAudioPlays=s["max_audio_plays"],
+        partCode=part_code,
+        imageDependent=is_image_dependent(part_code),
         createdAt=s["created_at"],
         updatedAt=s["updated_at"],
         deletedAt=s["deleted_at"],

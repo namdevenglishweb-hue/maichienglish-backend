@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from dependencies import get_current_user, require_admin, require_teacher_or_admin
 from services.exam_service import exam_service
 from services.exceptions import NotFoundError, ValidationError
+from services.presets import is_image_dependent
 from services.question_service import question_service
 from services.section_service import section_service
 from services.user_service import user_service
@@ -78,6 +79,7 @@ async def _build_sections_payload(
                 else strip_material_meta(s["materials"]),
                 maxAudioPlays=s["max_audio_plays"],
                 partCode=s.get("part_code"),
+                imageDependent=is_image_dependent(s.get("part_code")),
                 questions=[
                     ExamQuestionPreview(
                         id=q["id"],

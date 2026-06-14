@@ -1094,6 +1094,30 @@ def test_error_code_catalog():
     assert item["field"] and item["messageEn"] and item["messageVi"]
 
 
+def test_image_dependent_on_section_view():
+    """imageDependent derived from the section's preset at serialize time:
+    image-dependent preset → True; plain MC → False; custom (no part_code) →
+    False; unknown code → False (no crash)."""
+    from services.presets import is_image_dependent
+    assert is_image_dependent("KET_S_P2") is True      # picture discussion
+    assert is_image_dependent("PET_L_P1") is True       # picture MC
+    assert is_image_dependent("PET_R_P3") is False      # plain MC reading
+    assert is_image_dependent(None) is False
+    assert is_image_dependent("NOPE_R_P9") is False      # unknown → safe
+
+    from api.sections.routes import _to_view
+    base = {"id": "s1", "exam_id": "e1", "position": 1, "part_label": "P",
+            "type": "multiple_choice", "instructions": "i", "materials": [],
+            "max_audio_plays": None, "created_at": None, "updated_at": None,
+            "deleted_at": None}
+    v_img = _to_view({**base, "part_code": "KET_S_P2"})
+    assert v_img.imageDependent is True and v_img.partCode == "KET_S_P2"
+    v_mc = _to_view({**base, "part_code": "PET_R_P3"})
+    assert v_mc.imageDependent is False and v_mc.partCode == "PET_R_P3"
+    v_custom = _to_view({**base, "part_code": None})       # backward-compat
+    assert v_custom.imageDependent is False and v_custom.partCode is None
+
+
 def test_verbatim_overlap_metric_separates_copy_from_rewrite():
     """1.0 on a verbatim copy, low on a genuine rewrite; gap markers ignored."""
     src = {

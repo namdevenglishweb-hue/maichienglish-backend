@@ -241,6 +241,17 @@ class SectionView(BaseModel):
     instructions: Optional[str] = None
     materials: list[dict[str, Any]] = Field(default_factory=list)
     maxAudioPlays: Optional[int] = None
+    partCode: Optional[str] = Field(
+        default=None,
+        description="Cambridge Part preset id (e.g. 'KET_R_P3') if this section "
+        "follows a preset; null = custom/free-form (migration 0024).",
+    )
+    imageDependent: bool = Field(
+        default=False,
+        description="Derived from the section's preset: true when the Part needs "
+        "images (picture-MC / story / photo / visual prompt). Custom sections "
+        "(no part_code) → false. Use it to show an 'cần ảnh' badge / gate publish.",
+    )
     createdAt: Optional[str] = None
     updatedAt: Optional[str] = None
     deletedAt: Optional[str] = None

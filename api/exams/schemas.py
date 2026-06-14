@@ -93,6 +93,12 @@ class ExamSectionPreview(BaseModel):
         description="Cambridge Part preset id (e.g. 'KET_R_P3') when this section "
         "follows a preset; null = custom/free-form section (migration 0024).",
     )
+    imageDependent: bool = Field(
+        default=False,
+        description="Derived from the section's preset: true when the Part needs "
+        "images (picture-MC / story / photo / visual prompt); custom sections → "
+        "false. For an 'cần ảnh' badge / publish gating.",
+    )
     questions: list[ExamQuestionPreview] = Field(default_factory=list)
 
 

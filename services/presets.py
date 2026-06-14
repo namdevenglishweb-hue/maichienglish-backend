@@ -282,6 +282,16 @@ def supports_ai_gen(preset: PartPreset) -> bool:
     return preset.ai_core in AI_GEN_CORES
 
 
+def is_image_dependent(part_code) -> bool:
+    """Safe (no-raise) image-dependent flag for serializers: a section's preset
+    needs images (picture-MC / story / photo / visual prompt). None / unknown /
+    custom section → False — never raises, so it's safe in any response view."""
+    if not part_code:
+        return False
+    preset = PART_PRESETS.get(part_code)
+    return bool(preset and any(m.type == "image" for m in preset.materials_spec))
+
+
 def structure_facts(preset: PartPreset) -> dict:
     """Authoritative structure facts from a preset — same shape as
     spec_mode.derive_structure_facts, sourced entirely from the PRESET. Only
