@@ -799,12 +799,12 @@ def test_preset_catalog_covers_all_parts_and_is_consistent():
         assert p.part_code == code
         assert p.level in ("KET", "PET") and p.skill in (
             "reading", "listening", "writing", "speaking")
-        # AI-gen chỉ bật cho core đã implement (multiple_choice)
-        assert P.supports_ai_gen(p) == (p.ai_core == "multiple_choice")
+        # AI-gen chỉ bật cho core đã implement (AI_GEN_CORES)
+        assert P.supports_ai_gen(p) == (p.ai_core in P.AI_GEN_CORES)
 
-    # đúng 2 part AI-gen được (PET_R_P3, KET_R_P3)
+    # AI-gen được: MC reading (P3) + mc_cloze (PET_R_P5 / KET_R_P4)
     gen_ok = {c for c, p in P.PART_PRESETS.items() if P.supports_ai_gen(p)}
-    assert gen_ok == {"PET_R_P3", "KET_R_P3"}
+    assert gen_ok == {"PET_R_P3", "KET_R_P3", "PET_R_P5", "KET_R_P4"}
 
     # list_presets phơi field cho builder
     item = next(d for d in P.list_presets() if d["partCode"] == "PET_R_P4")
@@ -1116,6 +1116,182 @@ def test_image_dependent_on_section_view():
     assert v_mc.imageDependent is False and v_mc.partCode == "PET_R_P3"
     v_custom = _to_view({**base, "part_code": None})       # backward-compat
     assert v_custom.imageDependent is False and v_custom.partCode is None
+
+
+# --- mc_cloze core (CoreSpec registry; PET_R_P5 / KET_R_P4) ----------------- #
+
+def _cloze_src_section():
+    """A cloze-shaped source: 1 text with {{gap:1..6}} + 6 MC questions / 4 opts.
+    Looks like plain MC but the gaps make it mc_cloze-eligible."""
+    return {
+        "id": "clz-1", "position": 1, "type": "multiple_choice", "part_label": "Part 5",
+        "instructions": "Choose the correct word for each gap.", "max_audio_plays": None,
+        "materials": [{"type": "text", "content":
+            "The reading club met often {{gap:1}} the hall {{gap:2}} autumn, and "
+            "members {{gap:3}} chosen books {{gap:4}} they enjoyed {{gap:5}} the "
+            "term {{gap:6}} end."}],
+        "questions": [{
+            "id": f"q{i}", "position": i, "question_type": "multiple_choice", "points": 1,
+            "question_data": {"stem": "", "options": [{"text": f"o{i}{j}"} for j in range(4)],
+                              "correct_index": 0},
+        } for i in range(1, 7)],
+    }
+
+
+def test_core_prompts_registry_mc_byte_identical():
+    """CoreSpec registry: multiple_choice resolves to the EXACT v3 prompt objects
+    (byte-identical), and mc_cloze has distinct prompts + emit_cloze tool."""
+    from services.ai import prompts as P
+    v3 = P.PROMPT_VERSIONS["v3"]
+    mc = P.CORE_PROMPTS["multiple_choice"]
+    assert mc.system_generate is v3.system_generate
+    assert mc.render_generate is v3.render_generate
+    assert mc.emit_section_tool is v3.emit_section_tool
+    assert mc.system_verify is v3.system_verify
+    assert mc.system_fix is v3.system_fix
+    assert mc.system_analyze is v3.system_analyze
+
+    cz = P.CORE_PROMPTS["mc_cloze"]
+    assert cz.system_generate is P.SYSTEM_PROMPT_GENERATE_CLOZE
+    assert cz.emit_section_tool is P.EMIT_CLOZE_TOOL
+    assert cz.system_analyze is P.SYSTEM_PROMPT_ANALYZE_CLOZE
+    assert cz.render_generate is v3.render_generate          # renders reused
+
+    # resolve: v3+core → core prompts; v3 no core → MC; v2 (non-spec) → None
+    assert P.resolve_core_prompts({"prompt_version": "v3", "core": "mc_cloze"}) is cz
+    assert P.resolve_core_prompts({"prompt_version": "v3"}) is mc
+    assert P.resolve_core_prompts({"prompt_version": "v2"}) is None
+
+
+def test_mc_cloze_eligibility_and_routing():
+    from services.ai import spec_mode as S
+    cloze = _cloze_src_section()
+    plain = _spec_src_section()                              # plain MC, no gaps
+    assert S.mc_cloze_eligibility(cloze) is None
+    assert S.mc_cloze_eligibility(plain) is not None        # no gaps
+
+    # preset-driven routing: preferred mc_cloze on a cloze source → mc_cloze
+    core, reason = S.assign_core_with_reason(cloze, 5, "PET", preferred_core="mc_cloze")
+    assert core == "mc_cloze" and "mc_cloze" in reason
+    # preferred mc_cloze on a plain-MC source (no gaps) → rewrite
+    core, reason = S.assign_core_with_reason(plain, 5, "KET", preferred_core="mc_cloze")
+    assert core is None and "rewrite" in reason
+    # no preferred: plain MC scans to multiple_choice (cloze tried first, fails)
+    assert S.assign_core_with_reason(plain, 3, "KET")[0] == "multiple_choice"
+    assert S.assign_core_with_reason(cloze, 3, "PET")[0] == "mc_cloze"
+
+
+def _cloze_ai_out(n=6, L=4):
+    filler = " ".join(f"w{i}" for i in range(130))
+    markers = " ".join(f"[[{i}]]" for i in range(1, n + 1))  # SINGLE blank tokens
+    return {
+        "part_label": "Part 5", "instructions": "Choose the correct word for each gap.",
+        "text": filler + " " + markers,                      # no target in passage
+        "per_gap": [{"position": i, "target": f"t{i}",
+                     "distractors": [f"d{i}{j}" for j in range(L - 1)],
+                     "reason": "grammar point"} for i in range(1, n + 1)],
+    }
+
+
+def test_assemble_cloze_section_carves_and_builds():
+    import services.exam_generation_service as G
+    from services.presets import PART_PRESETS
+    preset = PART_PRESETS["PET_R_P5"]                       # 6 gaps / 4 options
+    section, justifs = G._assemble_cloze_section(None, _cloze_ai_out(), preset)
+    content = section["materials"][0]["content"]
+    assert all(("{{gap:%d}}" % i) in content for i in range(1, 7))
+    assert "[[" not in content                              # sentinels carved away
+    assert len(section["questions"]) == 6
+    for i, q in enumerate(section["questions"], 1):
+        opts = q["question_data"]["options"]
+        assert len(opts) == 4 and opts[q["question_data"]["correct_index"]]["text"] == f"t{i}"
+    assert len(justifs) == 6
+
+    # malformed → StructureMismatch (counted as retry)
+    bad = _cloze_ai_out(); bad["per_gap"] = bad["per_gap"][:5]      # only 5 gaps
+    with pytest.raises(G.StructureMismatch):
+        G._assemble_cloze_section(None, bad, preset)
+    bad2 = _cloze_ai_out(); bad2["text"] = bad2["text"].replace("[[3]]", "")
+    with pytest.raises(G.StructureMismatch):                # missing blank token 3
+        G._assemble_cloze_section(None, bad2, preset)
+    bad_dup = _cloze_ai_out(); bad_dup["text"] += " [[2]]"          # token 2 twice
+    with pytest.raises(G.StructureMismatch):
+        G._assemble_cloze_section(None, bad_dup, preset)
+    bad3 = _cloze_ai_out(); bad3["per_gap"][0]["distractors"] = ["only-one"]
+    with pytest.raises(G.StructureMismatch):                # wrong distractor count
+        G._assemble_cloze_section(None, bad3, preset)
+
+
+def test_preset_skeleton_encodes_gaps_for_cloze():
+    from services.presets import PART_PRESETS, preset_skeleton
+    from services.exam_generation_service import _count_gaps
+    sk = preset_skeleton(PART_PRESETS["PET_R_P5"])          # gap_markers=True
+    assert _count_gaps(sk["materials"]) == 6
+    sk_mc = preset_skeleton(PART_PRESETS["PET_R_P3"])       # gap_markers=False
+    assert _count_gaps(sk_mc["materials"]) == 0             # MC unchanged
+
+
+_CLOZE_SKILL_MAP = {
+    "structure": {"exam_level": "PET", "cefr_level": "B1",
+                  "text_genre": "informational article, neutral register, factual tone",
+                  "word_count_range": [120, 160]},
+    "per_question": [{"position": i, "skill_tested": "preposition",
+                      "answer_scope": "single word",
+                      "distractor_pattern": "same word class, wrong collocation"}
+                     for i in range(1, 7)],
+    "style_notes": "present simple narration",
+}
+
+
+class FakeClozeGen:
+    """analyze → cloze skill map; generate → emit_cloze; verify echoes the (post-
+    shuffle) key on both passes → agree."""
+
+    def __init__(self):
+        self.usage = {"input": 1, "output": 2}
+        self.model = "fake"
+        self.analyze_calls = self.generate_calls = self.verify_calls = self.fix_calls = 0
+
+    async def analyze_section(self, payload):
+        self.analyze_calls += 1
+        return _CLOZE_SKILL_MAP
+
+    async def generate_section(self, payload, *, k):
+        self.generate_calls += 1
+        return _cloze_ai_out()
+
+    async def verify_section(self, section, payload, *, k):
+        self.verify_calls += 1
+        pq = [{"position": q["position"],
+               "examiner_answer_index": q["question_data"]["correct_index"],
+               "evidence_quote": "the grammar requires it"}
+              for q in section["questions"]]
+        return {"per_question": pq, "issues": []}
+
+    async def fix_section(self, section, payload, *, k):
+        self.fix_calls += 1
+        return _cloze_ai_out()
+
+
+async def test_mc_cloze_full_pipeline():
+    """End-to-end (mock): cloze source + PET_R_P5 → core mc_cloze → 6 gaps/4 opt
+    section, 2-pass verify agrees, passes Tầng-B; report carries core/part_code."""
+    import random
+    from services.presets import PART_PRESETS
+    gen = FakeClozeGen()
+    section, report = await G.generate_one_section(
+        _cloze_src_section(), 5, exam_context={"level": "PET", "skill": "reading"},
+        generator=gen, rounds=1, prompt_version="v3", rng=random.Random(1),
+        skill_map_cache_override=FakeSkillMapCache(), preset=PART_PRESETS["PET_R_P5"])
+
+    assert report["mode"] == "spec" and report["core"] == "mc_cloze"
+    assert report["part_code"] == "PET_R_P5" and "mc_cloze" in report["eligibility_reason"]
+    qs = section["questions"]
+    assert len(qs) == 6 and all(len(q["question_data"]["options"]) == 4 for q in qs)
+    content = section["materials"][0]["content"]
+    assert all(("{{gap:%d}}" % i) in content for i in range(1, 7))
+    assert gen.analyze_calls == 1 and gen.generate_calls == 1
+    assert gen.verify_calls == 2 and gen.fix_calls == 0     # 2-pass, no fix needed
 
 
 def test_verbatim_overlap_metric_separates_copy_from_rewrite():

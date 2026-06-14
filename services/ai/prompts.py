@@ -807,3 +807,195 @@ def get_prompt_version(name: Optional[str] = None) -> PromptVersion:
         raise ValueError(
             f"Unknown promptVersion {key!r}; allowed: {', '.join(sorted(PROMPT_VERSIONS))}"
         )
+
+
+# ===========================================================================
+# CORE registry (spec mode) — prompts differ per CORE, not per version. The
+# orchestration (ANALYZE→leak→generate→shuffle→trigram→verify→FIX→Tầng B) is
+# shared; each core supplies its own prompt set + output tool. The adapters
+# resolve CORE_PROMPTS[payload["core"]] when pv.spec_mode (else use the v1/v2
+# PromptVersion path unchanged). multiple_choice reuses the v3 objects verbatim
+# (byte-identical — asserted in tests). See docs/exam-part-presets §mc_cloze.
+# ===========================================================================
+
+# ---- mc_cloze prompts (gap-fill: passage with N numbered gaps, each a
+# word/phrase MC). DIFF vs MC core: GENERATE/VERIFY/FIX/ANALYZE wording + the
+# emit_cloze output tool. SHARED (reused verbatim): render functions
+# (render_analyze/generate/verify/fix), EMIT_SKILL_MAP_TOOL,
+# VERIFY_SECTION_SPEC_TOOL, blind-solve mechanic, leak check, invariant. ----
+
+SYSTEM_PROMPT_ANALYZE_CLOZE = """\
+You are an exam-design analyst for Cambridge English (KET/PET) GAP-FILL (cloze)
+tasks. Analyze the source cloze section below and produce an ABSTRACT GAP PROFILE
+— what each numbered gap tests — WITHOUT copying any source content.
+
+Rules:
+- Do NOT include any sentence, phrase, proper noun, topic, domain or storyline
+from the source in your output. The profile must be fully abstract; a reader
+must NOT be able to guess what the source was about.
+- The `text_genre` field describes ONLY the text form (article/email/notice/
+narrative...), narrative voice + register, and tone — NEVER events, locations,
+activities, relationships, or why the text was written.
+- For EACH gap, classify the TEST POINT using this taxonomy (pick the closest):
+preposition / collocation / phrasal_verb / linker_connector / word_form /
+verb_form_tense / modal / article_determiner / quantifier / relative_pronoun /
+comparison / fixed_expression / vocabulary_in_context.
+- For EACH gap also give: the answer's WORD CLASS (noun / verb / adjective /
+adverb / preposition / conjunction / determiner / pronoun) and the DISTRACTOR
+PATTERN (how the wrong options are built — e.g. "same word class, wrong
+collocation", "near-synonym wrong in context", "grammatically impossible here").
+- Estimate the CEFR level of the vocabulary and the word count of the passage.
+
+Return your result by calling the `emit_skill_map` tool: put the test point in
+`skill_tested`, the word class in `answer_scope`, and the distractor pattern in
+`distractor_pattern`, one `per_question` entry per gap.\
+"""
+
+SYSTEM_PROMPT_GENERATE_CLOZE = """\
+You are a professional item writer for Cambridge English (KET/PET) gap-fill
+(cloze). Write ONE complete, brand-new cloze task following the specification in
+the user message. You are NOT shown any existing exam — invent all content.
+
+HARD CONSTRAINTS (violating any makes the output unusable):
+1. The passage MUST be about the given topic and text genre, and incorporate the
+given story elements naturally.
+2. Word count within the stated range (count before finalising); vocabulary must
+not exceed the stated CEFR level except proper nouns.
+3. EXACTLY N gaps (N from the spec). Gap i MUST test the test point listed for
+its position in the PER-GAP SPEC; the answer's word class must match.
+4. For each gap provide the correct TARGET (one word or a short fixed phrase) and
+(L-1) DISTRACTORS (L from the spec): same word class, plausible, but clearly
+WRONG in THIS context (wrong collocation / grammar / meaning). Exactly ONE option
+fits; distractors must NOT also fit. Vary how distractors are built.
+5. In `text`, mark each gap with a SINGLE numbered blank token [[1]], [[2]], …,
+[[N]] — one token per gap, each used EXACTLY ONCE, in any order. Do NOT write the
+target word in the passage (the gap is a BLANK; the answer lives only in
+per_gap.target). Do NOT use underscores or {{...}}.
+   CORRECT:   "I went [[1]] a trip [[2]] my family."   (blanks only)
+   WRONG:     "I went [[1]]on a trip [[2]]with my family."   (target written in)
+   WRONG:     "I went [[1]]on[[1]] a trip..."                (paired/duplicated)
+
+OUTPUT SHAPE (return via the `emit_cloze` tool):
+- `text`: the full passage with the N single numbered blank tokens [[1]]..[[N]],
+no target words written in.
+- `per_gap`: one entry per gap {position, target, distractors:[L-1], reason} in
+order 1..N (reason = why the target is right / distractors wrong).
+- a fitting `part_label` and student-facing `instructions` (do NOT leave empty).\
+"""
+
+EMIT_CLOZE_TOOL: dict[str, Any] = {
+    "name": "emit_cloze",
+    "description": "Return the brand-new cloze task: a passage with single "
+                   "numbered blank tokens [[1]]..[[N]] (no target words written "
+                   "in), plus per-gap target + distractors. The system replaces "
+                   "the tokens with blanks and builds the options.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "part_label": {"type": "string"},
+            "instructions": {"type": "string"},
+            "text": {"type": "string",
+                     "description": "Passage with each gap as a SINGLE numbered "
+                                    "blank token [[1]]..[[N]] (each used once); do "
+                                    "NOT write the target word into the passage."},
+            "per_gap": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "position": {"type": "integer"},
+                        "target": {"type": "string"},
+                        "distractors": {"type": "array",
+                                        "items": {"type": "string"}},
+                        "reason": {"type": ["string", "null"]},
+                    },
+                    "required": ["position", "target", "distractors"],
+                },
+            },
+        },
+        "required": ["part_label", "instructions", "text", "per_gap"],
+    },
+}
+
+SYSTEM_PROMPT_VERIFY_CLOZE = """\
+You are an independent Cambridge examiner taking this gap-fill task as a
+candidate. You are NOT shown the answer key — for EACH gap, choose the option
+that best fits, using only the passage and the options.
+
+For EVERY gap, in order, return one entry in `per_question` with:
+- position
+- examiner_answer_index: the 0-based option index YOU conclude fits the gap
+- evidence_quote: the exact words around the gap that justify your choice (copy
+them verbatim; never leave empty).
+
+Then, in `issues`, mark severity 'critical' for any gap where: it is unanswerable;
+OR MORE THAN ONE option is also acceptable in the gap (an ambiguous gap); OR a
+distractor is in fact correct. Use 'minor' for wording/register/level. Do NOT try
+to guess the author's intended word — report the option that actually fits. Call
+`report_review`. Do NOT return a corrected task.\
+"""
+
+SYSTEM_PROMPT_FIX_CLOZE = """\
+You are the item writer correcting a cloze task you wrote. You ARE shown the
+intended answer key and the problems an independent examiner found. Produce a
+corrected task that resolves EVERY problem: for an ambiguous gap, change the
+passage or the offending distractor so the target is the ONLY option that fits;
+for a wrong key, fix it. Keep the structure: same number of gaps, same number of
+options per gap, same word-count range and CEFR level. Return the corrected task
+via the `emit_cloze` tool (text with [[i]]…[[i]] sentinels + per_gap).\
+"""
+
+
+@dataclass(frozen=True)
+class CorePrompts:
+    """Per-core spec prompt set (resolved by the adapters in spec mode)."""
+    system_analyze: str
+    render_analyze: Callable[[dict[str, Any]], str]
+    emit_skill_map_tool: dict[str, Any]
+    system_generate: str
+    render_generate: Callable[[dict[str, Any], int], str]
+    emit_section_tool: dict[str, Any]
+    system_verify: str
+    render_verify: Callable[[dict[str, Any], dict[str, Any], int], str]
+    verify_section_tool: dict[str, Any]
+    system_fix: str
+    render_fix: Callable[[dict[str, Any], dict[str, Any], int], str]
+    fix_section_tool: dict[str, Any]
+
+
+_V3 = PROMPT_VERSIONS["v3"]  # multiple_choice reuses these objects verbatim
+
+CORE_PROMPTS: dict[str, CorePrompts] = {
+    # byte-identical to current v3: same string/function/tool OBJECTS.
+    "multiple_choice": CorePrompts(
+        system_analyze=_V3.system_analyze, render_analyze=_V3.render_analyze,
+        emit_skill_map_tool=EMIT_SKILL_MAP_TOOL,
+        system_generate=_V3.system_generate, render_generate=_V3.render_generate,
+        emit_section_tool=_V3.emit_section_tool,
+        system_verify=_V3.system_verify, render_verify=_V3.render_verify,
+        verify_section_tool=_V3.verify_section_tool,
+        system_fix=_V3.system_fix, render_fix=_V3.render_fix,
+        fix_section_tool=_V3.emit_section_tool,
+    ),
+    # mc_cloze: new system prompts + emit_cloze tool; renders reused verbatim.
+    "mc_cloze": CorePrompts(
+        system_analyze=SYSTEM_PROMPT_ANALYZE_CLOZE, render_analyze=_V3.render_analyze,
+        emit_skill_map_tool=EMIT_SKILL_MAP_TOOL,
+        system_generate=SYSTEM_PROMPT_GENERATE_CLOZE, render_generate=_V3.render_generate,
+        emit_section_tool=EMIT_CLOZE_TOOL,
+        system_verify=SYSTEM_PROMPT_VERIFY_CLOZE, render_verify=_V3.render_verify,
+        verify_section_tool=VERIFY_SECTION_SPEC_TOOL,
+        system_fix=SYSTEM_PROMPT_FIX_CLOZE, render_fix=_V3.render_fix,
+        fix_section_tool=EMIT_CLOZE_TOOL,
+    ),
+}
+
+
+def resolve_core_prompts(payload: dict[str, Any]) -> Optional[CorePrompts]:
+    """Spec-mode prompt set for this payload's core, or None for non-spec
+    versions (v1/v2 keep their PromptVersion path). Defaults to multiple_choice
+    when `core` is absent (back-compat with payloads built before the registry)."""
+    pv = get_prompt_version(payload.get("prompt_version"))
+    if not pv.spec_mode:
+        return None
+    return CORE_PROMPTS.get(payload.get("core") or "multiple_choice")

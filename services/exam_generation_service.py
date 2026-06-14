@@ -622,19 +622,23 @@ async def _get_or_analyze_skill_map(
     generator,
     version: str,
     cache: SkillMapCache,
+    core: str = "multiple_choice",
 ) -> tuple[dict[str, Any], str]:
     """Cache lookup → ANALYZE → leak check (budget 1+2, separate from the
     generate budget) → upsert. Raises SectionGenerationError on
-    ANALYZE_DOMAIN_LEAK (a dirty skill map must never be used OR cached)."""
+    ANALYZE_DOMAIN_LEAK (a dirty skill map must never be used OR cached).
+    `core` selects the ANALYZE prompt (mc vs cloze) and is part of the cache key
+    so a section analyzed under different cores can't collide."""
     import json as _json
     from services.ai import spec_mode
 
     view = _analyze_view(source_section)
     analyze_payload: dict[str, Any] = {
-        "prompt_version": version, "exam_context": scrub_ctx, "section": view,
+        "prompt_version": version, "core": core,
+        "exam_context": scrub_ctx, "section": view,
     }
     source_hash = spec_mode.section_source_hash(
-        {"exam_context": scrub_ctx, "section": view})
+        {"exam_context": scrub_ctx, "section": view, "core": core})
 
     blocklist = spec_mode.build_blocklist(source_section)
     section_id = source_section.get("id")
@@ -798,6 +802,170 @@ async def _spec_verify(
     )
 
 
+# ---------------------------------------------------------------------------
+# mc_cloze core (PET_R_P5 / KET_R_P4). The AI emits a passage with each gap's
+# target wrapped in [[i]]…[[i]] sentinels + per_gap{target,distractors}; CODE
+# carves the sentinels into {{gap:N}}, builds the MC options, and validates.
+# Orchestration (ANALYZE→leak→seed→generate→verify→Tầng B) is shared.
+# ---------------------------------------------------------------------------
+
+_CLOZE_MARKER = re.compile(r"\[\[(\d+)\]\]")
+
+
+def _assemble_cloze_section(
+    source: dict[str, Any], ai_out: dict[str, Any], preset: Any
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Build a cloze section from emit_cloze output, forcing structure from the
+    preset. Carves SINGLE numbered blank tokens [[i]] → {{gap:i}} (each used once,
+    1..N); builds options = target + distractors (correct_index 0, shuffled later
+    by code-checks). Raises StructureMismatch (numbers/labels only) on any
+    malformed gap → counts as a generate retry."""
+    n = preset.num_questions
+    L = preset.options_per_question or 0
+    per_gap = ai_out.get("per_gap")
+    if not isinstance(per_gap, list) or len(per_gap) != n:
+        got = len(per_gap) if isinstance(per_gap, list) else "none"
+        raise StructureMismatch(f"expected {n} gaps, got {got}")
+    by_pos: dict[int, dict[str, Any]] = {}
+    for g in per_gap:
+        if isinstance(g, dict):
+            by_pos[g.get("position")] = g
+    if sorted(by_pos) != list(range(1, n + 1)):
+        raise StructureMismatch(f"gap positions must be 1..{n} (got {sorted(by_pos)})")
+
+    text = ai_out.get("text") or ""
+    if not text.strip():
+        raise StructureMismatch("cloze text missing (no source fallback in spec mode)")
+    # Validate the single blank tokens [[1]]..[[N]] — each EXACTLY ONCE.
+    found = sorted(int(m) for m in _CLOZE_MARKER.findall(text))
+    if found != list(range(1, n + 1)):
+        raise StructureMismatch(
+            f"text must contain blank tokens [[1]]..[[{n}]] each exactly once "
+            f"(found {found or 'none'})")
+    # Carve [[i]] → {{gap:i}}.
+    out_text = _CLOZE_MARKER.sub(lambda m: "{{gap:%s}}" % m.group(1), text)
+
+    out_qs: list[dict[str, Any]] = []
+    justifications: list[dict[str, Any]] = []
+    for i in range(1, n + 1):
+        g = by_pos[i]
+        target = (g.get("target") or "").strip()
+        distractors = [d for d in (g.get("distractors") or []) if (d or "").strip()]
+        if not target:
+            raise StructureMismatch(f"gap {i} missing target")
+        if len(distractors) != L - 1:
+            raise StructureMismatch(
+                f"gap {i} needs {L - 1} distractors, got {len(distractors)}")
+        options = [{"text": target}] + [{"text": d} for d in distractors]
+        out_qs.append({
+            "position": i,
+            "question_type": preset.question_type,          # FORCED from preset
+            "points": preset.points_per_question,           # FORCED from preset
+            "question_data": {"stem": "", "options": options, "correct_index": 0},
+        })
+        if g.get("reason"):
+            justifications.append({"position": i, "justification": g["reason"]})
+
+    if not ((ai_out.get("part_label") or "").strip()
+            and (ai_out.get("instructions") or "").strip()):
+        raise StructureMismatch("part_label/instructions missing (no source fallback)")
+    section = {
+        "type": preset.section_type,
+        "part_label": ai_out["part_label"],
+        "instructions": ai_out["instructions"],
+        "max_audio_plays": None,
+        "materials": [{"type": "text", "content": out_text}],
+        "questions": out_qs,
+    }
+    return section, justifications
+
+
+def _spec_code_checks_cloze(
+    section: dict[str, Any], spec: dict[str, Any], src_material: str,
+    rng: Optional[_random.Random], preset: Any = None,
+) -> None:
+    """Cloze code checks: word-count → gap integrity (count==N, 1..N) → balanced
+    shuffle → trigram guard. Pure code, runs BEFORE verify."""
+    from services.ai import spec_mode
+
+    material_text = (section.get("materials") or [{}])[0].get("content") or ""
+    err = spec_mode.word_count_violation(
+        material_text, (spec.get("structure") or {}).get("word_count_range"))
+    if err:
+        raise StructureMismatch(err)
+    n = len(section.get("questions") or [])
+    gaps = sorted(int(m) for m in _GAP_MARKER.findall(material_text))
+    if gaps != list(range(1, n + 1)):
+        raise StructureMismatch(
+            f"cloze gap markers {gaps or 'none'} != 1..{n} questions")
+    shuffle_answer_keys(section, rng=rng)
+    err = spec_mode.similarity_violation(material_text, src_material)
+    if err:
+        raise StructureMismatch(err)
+
+
+async def _spec_verify_cloze(
+    source_section: dict[str, Any], section: dict[str, Any], payload: dict[str, Any],
+    k: int, generator, rounds: int, spec: dict[str, Any], src_material: str,
+    rng: Optional[_random.Random], preset: Any = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Cloze verify (strict, 2-pass): each round runs the blind solve TWICE
+    (independent). ANY pass with a key mismatch OR a model 'critical' (incl. an
+    ambiguous "more than one option fits" gap) → FIX (key-aware, re-assembled via
+    the cloze carver) → re-check → next round. Clean on both passes → accept.
+    Rounds exhausted with criticals → StructureMismatch (→ fresh GENERATE)."""
+    if rounds <= 0:
+        return section, {"rounds": 0, "final_issues": []}
+    issues: list[dict[str, Any]] = []
+    done = 0
+    for round_i in range(rounds):
+        criticals: list[dict[str, Any]] = []
+        issues = []
+        for _pass in range(2):                       # 2 independent blind solves
+            verdict = await generator.verify_section(section, payload, k=k)
+            per_question = verdict.get("per_question")
+            _validate_per_question(section, per_question)
+            model_issues = verdict.get("issues") or []
+            key_problems = _grade_blind_solve(section, per_question)
+            issues += model_issues + key_problems
+            criticals += key_problems + [
+                i for i in model_issues if i.get("severity") == "critical"]
+        done += 1
+        if not criticals:
+            return section, {"rounds": done, "final_issues": issues}
+        if round_i == rounds - 1:
+            break
+        fix_payload = {**payload,
+                       "fix_problems": [i.get("problem", "") for i in criticals]}
+        fixed = await generator.fix_section(section, fix_payload, k=k)
+        section, _ = _assemble_cloze_section(source_section, fixed, preset)
+        _spec_code_checks_cloze(section, spec, src_material, rng, preset)
+    raise StructureMismatch(
+        "cloze blind-solve left critical issues after "
+        f"{done} round(s): "
+        + "; ".join(i.get("problem", "") for i in issues
+                    if i.get("severity") == "critical")
+    )
+
+
+def _mc_assemble(source, ai_out, preset):
+    return _merge_generated_section(source, ai_out, strict_spec=True, preset=preset)
+
+
+def _mc_code_checks(section, spec, src_material, rng, preset=None):
+    _spec_code_checks(section, spec, src_material, rng)
+
+
+# Per-core ENGINE hooks. multiple_choice = existing functions (byte-identical).
+CORE_ENGINE: dict[str, dict[str, Any]] = {
+    "multiple_choice": {"assemble": _mc_assemble, "code_checks": _mc_code_checks,
+                        "verify": _spec_verify},
+    "mc_cloze": {"assemble": _assemble_cloze_section,
+                 "code_checks": _spec_code_checks_cloze,
+                 "verify": _spec_verify_cloze},
+}
+
+
 async def _generate_section_spec(
     source_section: dict[str, Any],
     k: int,
@@ -812,15 +980,17 @@ async def _generate_section_spec(
     cache: Optional[SkillMapCache] = None,
     preset: Any = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """The spec engine. RECEIVES `core` — never routes (design §2). Only
-    core="multiple_choice" exists this round; future cores plug in here.
+    """The spec engine — core-agnostic. RECEIVES `core` (design §2) and pulls the
+    per-core hooks from CORE_ENGINE (assemble / code_checks / verify); the
+    orchestration (ANALYZE→leak→seed→generate→Tầng B) is shared. `core` is
+    threaded into the payload so the adapters resolve the core's prompt set.
 
     `preset` (part-presets): when given, STRUCTURE comes from the PRESET (counts/
     options/word-count/CEFR) instead of the source, and per_question is reshaped
-    to the preset count IN CODE (no prompt change). ANALYZE/leak/similarity/
-    blind-solve are unchanged — source is still analyzed for the skill map +
-    leak baseline + similarity guard."""
-    if core != "multiple_choice":
+    to the preset count IN CODE. ANALYZE/leak/similarity/blind-solve unchanged —
+    source is still analyzed for the skill map + leak baseline + similarity guard."""
+    ce = CORE_ENGINE.get(core)
+    if ce is None:
         raise SectionGenerationError(f"unknown spec core {core!r}")
     from services.ai import spec_mode
     from services.ai.topic_pool import pick_topic_and_seed
@@ -835,7 +1005,7 @@ async def _generate_section_spec(
     scrub_ctx = {"level": level, "skill": exam_context.get("skill")}
 
     skill_map, sm_hash = await _get_or_analyze_skill_map(
-        source_section, scrub_ctx, generator, version, cache)
+        source_section, scrub_ctx, generator, version, cache, core=core)
     if preset is not None:
         # PRESET is authoritative for structure; reshape ANALYZE's per_question
         # to the preset count in code (prompt template untouched).
@@ -856,7 +1026,8 @@ async def _generate_section_spec(
         # the seed that gets logged is the successful round's.
         ts = pick_topic_and_seed(level, rng, admin_topic=section_prompt)
         payload: dict[str, Any] = {
-            "prompt_version": version, "exam_context": scrub_ctx, "spec": spec,
+            "prompt_version": version, "core": core,
+            "exam_context": scrub_ctx, "spec": spec,
             "topic": ts["topic"], "genre": ts["genre"],
             "diversity_seed": ts["diversity_seed"],
         }
@@ -864,17 +1035,16 @@ async def _generate_section_spec(
             payload["retry_error"] = last_err  # numbers/labels only (M3)
         try:
             ai_out = await generator.generate_section(payload, k=k)
-            section, justifications = _merge_generated_section(
-                source_section, ai_out, strict_spec=True, preset=preset)
+            section, justifications = ce["assemble"](source_section, ai_out, preset)
             if preset is not None:
                 # Explicit, field-coded preset conformance (clear retry message).
                 errs = preset_validator.validate_output_against_preset(section, preset)
                 if errs:
                     raise StructureMismatch("; ".join(e.message for e in errs))
-            _spec_code_checks(section, spec, src_material, rng)
-            section, review = await _spec_verify(
+            ce["code_checks"](section, spec, src_material, rng, preset)
+            section, review = await ce["verify"](
                 source_section, section, payload, k, generator, rounds,
-                spec, src_material, rng, preset=preset)
+                spec, src_material, rng, preset)
             _validate_section_structure(structure_ref, section)
             try:
                 overlap = compute_verbatim_overlap(source_section, section)
@@ -943,8 +1113,14 @@ async def generate_one_section(
     eligibility_reason: Optional[str] = None
     if pv.spec_mode:
         from services.ai import spec_mode
+        from services.presets import supports_ai_gen
+        # With a preset, the core is the preset's ai_core (validate source against
+        # THAT core), not guessed from the source (design §4.1).
+        preferred_core = (preset.ai_core
+                          if (preset is not None and supports_ai_gen(preset)) else None)
         core, eligibility_reason = spec_mode.assign_core_with_reason(
-            source_section, k, (exam_context or {}).get("level"))
+            source_section, k, (exam_context or {}).get("level"),
+            preferred_core=preferred_core)
         if core:
             section, report = await _generate_section_spec(
                 source_section, k, core=core, exam_context=exam_context,

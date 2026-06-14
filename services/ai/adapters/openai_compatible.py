@@ -65,6 +65,13 @@ class OpenAICompatibleGenerator(AIContentGenerator):
         self.usage: dict[str, int] = {"input": 0, "output": 0}
 
     async def generate_section(self, payload: dict[str, Any], *, k: int) -> dict[str, Any]:
+        cp = prompts.resolve_core_prompts(payload)  # spec mode → per-core prompts
+        if cp is not None:
+            return await self._call_tool(
+                system_prompt=cp.system_generate,
+                user_message=cp.render_generate(payload, k),
+                tool=cp.emit_section_tool,
+            )
         pv = prompts.get_prompt_version(payload.get("prompt_version"))
         return await self._call_tool(
             system_prompt=pv.system_generate,
@@ -75,17 +82,32 @@ class OpenAICompatibleGenerator(AIContentGenerator):
     async def verify_section(
         self, section: dict[str, Any], payload: dict[str, Any], *, k: int
     ) -> dict[str, Any]:
+        cp = prompts.resolve_core_prompts(payload)
+        if cp is not None:
+            # Spec mode verify is a blind solve — run it cool (§9.4).
+            return await self._call_tool(
+                system_prompt=cp.system_verify,
+                user_message=cp.render_verify(section, payload, k),
+                tool=cp.verify_section_tool,
+                temperature=prompts.VERIFY_TEMPERATURE,
+            )
         pv = prompts.get_prompt_version(payload.get("prompt_version"))
         return await self._call_tool(
             system_prompt=pv.system_verify,
             user_message=pv.render_verify(section, payload, k),
             tool=pv.verify_section_tool or prompts.VERIFY_SECTION_TOOL,
-            # Spec mode verify is a blind solve — run it cool (§9.4). The v2
-            # rewrite verify (spec_mode=False) keeps the default sampling.
             temperature=prompts.VERIFY_TEMPERATURE if pv.spec_mode else None,
         )
 
     async def analyze_section(self, payload: dict[str, Any]) -> dict[str, Any]:
+        cp = prompts.resolve_core_prompts(payload)
+        if cp is not None:
+            return await self._call_tool(
+                system_prompt=cp.system_analyze,
+                user_message=cp.render_analyze(payload),
+                tool=cp.emit_skill_map_tool,
+                temperature=prompts.ANALYZE_TEMPERATURE,
+            )
         pv = prompts.get_prompt_version(payload.get("prompt_version"))
         if not pv.system_analyze or not pv.render_analyze:
             raise RuntimeError(f"prompt version {pv.name!r} has no analyze step")
@@ -99,6 +121,14 @@ class OpenAICompatibleGenerator(AIContentGenerator):
     async def fix_section(
         self, section: dict[str, Any], payload: dict[str, Any], *, k: int
     ) -> dict[str, Any]:
+        cp = prompts.resolve_core_prompts(payload)
+        if cp is not None:
+            return await self._call_tool(
+                system_prompt=cp.system_fix,
+                user_message=cp.render_fix(section, payload, k),
+                tool=cp.fix_section_tool,
+                temperature=prompts.VERIFY_TEMPERATURE,
+            )
         pv = prompts.get_prompt_version(payload.get("prompt_version"))
         if not pv.system_fix or not pv.render_fix:
             raise RuntimeError(f"prompt version {pv.name!r} has no fix step")

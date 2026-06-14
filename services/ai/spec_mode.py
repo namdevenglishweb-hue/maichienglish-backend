@@ -66,19 +66,55 @@ def mc_core_eligibility(section: dict[str, Any]) -> Optional[str]:
     return None
 
 
+def mc_cloze_eligibility(section: dict[str, Any]) -> Optional[str]:
+    """mc_cloze eligibility (PET_R_P5 / KET_R_P4). A cloze LOOKS like a plain-MC
+    section, so on top of mc_core_eligibility it requires the text material to
+    carry exactly N numbered gaps {{gap:1}}..{{gap:N}} (N = question count).
+    None = eligible; else reason."""
+    base = mc_core_eligibility(section)
+    if base is not None:
+        return base
+    mats = section.get("materials") or []
+    content = (mats[0].get("content") or "") if (mats and isinstance(mats[0], dict)) else ""
+    gaps = sorted(int(m) for m in re.findall(r"\{\{gap:(\d+)\}\}", content))
+    qn = len(section.get("questions") or [])
+    if gaps != list(range(1, qn + 1)):
+        return f"cloze needs {qn} numbered gaps 1..{qn} (found {gaps or 'none'})"
+    return None
+
+
+# Ordered SPECIFIC → GENERAL: a cloze (has gaps) must be caught before plain MC
+# (mc_core_eligibility passes for both). Only implemented AI-gen cores here.
+_CORE_ELIGIBILITY = (
+    ("mc_cloze", mc_cloze_eligibility),
+    ("multiple_choice", mc_core_eligibility),
+)
+
+
 def assign_core_with_reason(
-    section: dict[str, Any], k: int, level: Optional[str]
+    section: dict[str, Any], k: int, level: Optional[str],
+    preferred_core: Optional[str] = None,
 ) -> tuple[Optional[str], str]:
-    """Like assign_core but also returns a human-readable eligibility reason
-    (B6, surfaced in the gen report/preview so the FE can show "Part này chạy
-    rewrite vì: <reason>"). core None → rewrite fallback."""
+    """Assign a spec core + human-readable reason (B6). When `preferred_core` is
+    given (from preset.ai_core), validate the SOURCE against THAT core's
+    eligibility and use it — don't guess from the source (design §4.1). Without a
+    preferred core, scan eligibility specific→general. core None → rewrite."""
     gate = orchestration_gate(k, level)
     if gate is not None:
         return None, f"rewrite — {gate}"
-    elig = mc_core_eligibility(section)
-    if elig is not None:
-        return None, f"rewrite — {elig}"
-    return "multiple_choice", "spec — eligible (core: multiple_choice)"
+    elig_map = dict(_CORE_ELIGIBILITY)
+    if preferred_core is not None:
+        fn = elig_map.get(preferred_core)
+        if fn is None:
+            return None, f"rewrite — core {preferred_core!r} chưa hỗ trợ AI-gen"
+        reason = fn(section)
+        if reason is not None:
+            return None, f"rewrite — {reason}"
+        return preferred_core, f"spec — eligible ({preferred_core}, from preset)"
+    for core, fn in _CORE_ELIGIBILITY:
+        if fn(section) is None:
+            return core, f"spec — eligible ({core})"
+    return None, f"rewrite — {mc_core_eligibility(section)}"
 
 
 def assign_core(section: dict[str, Any], k: int, level: Optional[str]) -> Optional[str]:

@@ -27,7 +27,7 @@ from typing import Optional
 
 # AI-gen cores implemented this round. AI generation refuses a part whose
 # ai_core is not in here (builder/scaffold are NOT gated).
-AI_GEN_CORES: frozenset[str] = frozenset({"multiple_choice"})
+AI_GEN_CORES: frozenset[str] = frozenset({"multiple_choice", "mc_cloze"})
 
 
 @dataclass(frozen=True)
@@ -313,12 +313,18 @@ def structure_facts(preset: PartPreset) -> dict:
 
 def preset_skeleton(preset: PartPreset) -> dict:
     """Minimal 'original'-shaped section from the preset, used as the reference
-    for the Tầng-B structural-invariant check (replaces the source). MC reading
-    = 1 text material + N MC questions."""
+    for the Tầng-B structural-invariant check (replaces the source). 1 text
+    material + N questions. For gap-marker Parts (mc_cloze / open cloze) the text
+    encodes N {{gap:N}} so _assert_structure_preserved's gap-count check matches
+    the generated cloze (else 0-vs-N would fail). MC reading (no gaps) unchanged."""
+    text_material: dict = {"type": "text"}
+    if preset.gap_markers:
+        text_material["content"] = " ".join(
+            "{{gap:%d}}" % i for i in range(1, preset.num_questions + 1))
     return {
         "type": preset.section_type,
         "max_audio_plays": None,
-        "materials": [{"type": "text"}],
+        "materials": [text_material],
         "questions": [{
             "question_type": preset.question_type,
             "points": preset.points_per_question,
