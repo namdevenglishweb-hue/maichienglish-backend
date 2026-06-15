@@ -2,14 +2,17 @@
 feature: exam-part-presets
 type: design
 status: draft
-last-updated: 2026-06-13
+last-updated: 2026-06-15
 author: backend
 depends-on: [exam-ai-generation, exam-gen-v3-spec-mode]
-changelog: 2026-06-13 (rev3) — B3–B7 SHIPPED. Full preset catalogue (B1),
-  part_code/format_standard persist + migration 0024 (B2), scaffold-section (B3),
-  scaffold-exam (B4), validate-on-save (B5), eligibility_reason (B6),
-  error-codes endpoint (B7). mc_cloze core SHIPPED (PET_R_P5/KET_R_P4, commit
-  f331fc0). B8 + remaining multi-core (matching/gapped/listening) remain ⏳.
+changelog: 2026-06-15 (rev4) — open_cloze core SHIPPED (PET_R_P6/KET_R_P5,
+  commit 98d6ef7): free-text gap fill (no options), per-gap accept-list, blind
+  examiner TYPES a word + FIX expands the list. | 2026-06-13 (rev3) — B3–B7
+  SHIPPED. Full preset catalogue (B1), part_code/format_standard persist +
+  migration 0024 (B2), scaffold-section (B3), scaffold-exam (B4),
+  validate-on-save (B5), eligibility_reason (B6), error-codes endpoint (B7).
+  mc_cloze core SHIPPED (PET_R_P5/KET_R_P4, commit f331fc0). B8 + remaining
+  multi-core (matching/gapped/listening) remain ⏳.
 ---
 
 # Part Presets — Design / Core feature
@@ -17,8 +20,9 @@ changelog: 2026-06-13 (rev3) — B3–B7 SHIPPED. Full preset catalogue (B1),
 > **Một dòng:** PRESET = định nghĩa cứng của một Part Cambridge (số câu/option/
 > word-count/CEFR…), một nguồn sự thật dùng chung cho **builder**, **validator**,
 > và **AI generate**. AI-gen: preset đè đề gốc về cấu trúc (✅ **multiple_choice +
-> mc_cloze**). Builder: scaffold section/đề đúng khuôn + validate-on-save (✅, mọi
-> Part). Core còn lại (matching/gapped_text/listening) + AI-gen cả-đề (⏳).
+> mc_cloze + open_cloze**). Builder: scaffold section/đề đúng khuôn + validate-on-
+> save (✅, mọi Part). Core còn lại (matching/gapped_text/listening) + AI-gen
+> cả-đề (⏳).
 >
 > **Nguồn tầm nhìn:** amendment `AMENDMENT_part-presets_multi-core.md` của client
 > (§2 preset, §3 builder flow, §4.2 eligibility, §6 listening). Kiến trúc lõi
@@ -26,8 +30,8 @@ changelog: 2026-06-13 (rev3) — B3–B7 SHIPPED. Full preset catalogue (B1),
 > all-or-nothing) **GIỮ NGUYÊN — prompt FROZEN.**
 
 ## Bảng trạng thái
-✅ ĐÃ SHIP (B1–B7 + mc_cloze core, commits `b5be508`/`fdab6e8`/`978ad90`/`f331fc0`)
-· ⏳ ĐỂ SAU (B8 + cores matching/gapped/listening).
+✅ ĐÃ SHIP (B1–B7 + mc_cloze + open_cloze cores, commits `b5be508`/`fdab6e8`/
+`978ad90`/`f331fc0`/`98d6ef7`) · ⏳ ĐỂ SAU (B8 + cores matching/gapped/listening).
 
 ---
 
@@ -42,8 +46,9 @@ có định nghĩa máy-đọc-được của từng Part.** → tầng PRESET.
 Listening/Writing/Speaking) với field builder: `materials_spec`, `gap_markers`,
 `shared_options`, `instructions_en`, `default_position`, `ai_core`, `per_question`.
 - AI-gen chỉ chạy preset có `ai_core ∈ AI_GEN_CORES` (= `{"multiple_choice",
-  "mc_cloze"}` ⇒ `PET_R_P3` 5q/4opt/B1, `KET_R_P3` 5q/3opt/A2 (MC reading);
-  `PET_R_P5` 6q/4opt, `KET_R_P4` 6q/3opt (mc_cloze)). `supports_ai_gen()` +
+  "mc_cloze", "open_cloze"}` ⇒ `PET_R_P3` 5q/4opt/B1, `KET_R_P3` 5q/3opt/A2 (MC
+  reading); `PET_R_P5` 6q/4opt, `KET_R_P4` 6q/3opt (mc_cloze); `PET_R_P6`,
+  `KET_R_P5` 6q (open_cloze, điền-từ tự gõ)). `supports_ai_gen()` +
   `aiGenSupported` flag. Builder/scaffold/validator áp cho **mọi** Part.
 - `GET /api/presets` ✅ trả full catalogue (mọi field trên + `aiGenSupported`,
   `imageDependent`). Word-count (verify Cambridge 2025/2026 = format 2020 vẫn
@@ -52,16 +57,18 @@ Listening/Writing/Speaking) với field builder: `materials_spec`, `gap_markers`
 ## 3. AI generate — preset-authoritative + CoreSpec registry (✅ đã ship)
 Engine spec **core-agnostic**: `CORE_PROMPTS` (prompts.py) + `CORE_ENGINE`
 (service) keyed theo `core`. `multiple_choice` trỏ **đúng object v3** (byte-
-identical, test `is`); `mc_cloze` cắm cạnh. Routing: có preset ⇒ `core =
-preset.ai_core` (validate source theo core đó).
+identical, test `is`); `mc_cloze` + `open_cloze` cắm cạnh. Routing: có preset ⇒
+`core = preset.ai_core` (validate source theo core đó).
 
 Khi gen có `part_code`:
 1. structure = `presets.structure_facts(preset)` (đè counts/options/word-count/
    CEFR) → khe `STRUCTURE SPEC`.
 2. `reshape_per_question(spec, N)` — căn gap/skill-profile của ANALYZE về N (code).
-3. assemble theo core: MC `_merge_generated_section(preset=)`; **cloze
+3. assemble theo core: MC `_merge_generated_section(preset=)`; **mc_cloze
    `_assemble_cloze_section`** (carve single-marker `[[i]]`→`{{gap:i}}`, build
-   options từ target+distractors, force N/type/points theo preset).
+   options từ target+distractors); **open_cloze `_assemble_open_cloze_section`**
+   (carve `[[i]]`→`{{gap:i}}`, build `fill_blank` `correct_answers` = answer +
+   accepted_alternatives, không options) — đều force N/type/points theo preset.
 4. `_validate_section_structure(preset_skeleton(preset), …)` (Tầng B; cloze:
    skeleton encode N `{{gap}}`) + `validate_output_against_preset`.
 5. Giữ nguyên ANALYZE/leak/similarity/blind-solve. **Prompt MC diff = rỗng**;
@@ -75,6 +82,22 @@ passage) + per_gap{target,distractors,reason}; VERIFY **2-pass blind** (strip ke
 không source) — CODE so key, bất kỳ lượt lệch/critical ⇒ FIX; **minor-ambiguity =
 accept** (chỉ critical→FIX), chờ client feedback. Gen thật Opus 4.8: ổn định 4/4
 (0 retry), verify khớp key mọi gap, trigram 0–0.9%.
+
+**open_cloze (PET_R_P6 / KET_R_P5) — điền-từ TỰ GÕ (không option):** câu là
+`fill_blank`, đáp án lưu **accept-list** `correct_answers` (so khớp không phân
+biệt hoa/thường + trim, tái dùng grading fill_blank). ANALYZE → gap-profile theo
+taxonomy **từ chức năng/ngữ pháp** (article/preposition/auxiliary/pronoun/
+relative/conjunction/quantifier… — không leak source). GENERATE viết passage +
+**single-marker `[[N]]`** (không ghi đáp án) + per_gap{answer (1 từ),
+accepted_alternatives, reason}; CODE build `correct_answers = [answer] +
+alternatives` (dedupe, mỗi đáp án 1 từ). VERIFY **2-pass blind**: giám khảo **tự
+GÕ một từ** mỗi gap (`examiner_answer` STRING, không phải index) — view verify
+**strip `correct_answers`/`case_sensitive`** (key của open cloze là accept-list,
+khác MC strip `correct_index`); CODE so từ đã gõ với accept-list. Từ giám khảo gõ
+**hợp lệ mà chưa có trong list** ⇒ tín hiệu list thiếu ⇒ **FIX** quyết định *thêm
+từ đó vào accept-list* hoặc *siết passage* cho đáp án duy nhất; rồi re-assemble +
+re-check. Gen thật Opus 4.8: ổn định 3/3 (0 retry, 0 FIX — giám khảo khớp
+accept-list mọi gap cả 2 lượt), trigram 0–0.9%, ~$0.09/run.
 
 Guard: `part_code` của Part **không** `aiGenSupported` → 400 ("chưa hỗ trợ
 AI-gen"). `report.sections[].{part_code, mode, core, eligibility_reason}` ✅
@@ -124,6 +147,7 @@ text đề). `assign_core` giữ nguyên (gọi lại hàm mới).
 | B6 | `eligibility_reason` per section trong report | ✅ `978ad90` | `spec_mode`, `exam_generation_service` |
 | B7 | endpoint mã lỗi validator → message EN/VI | ✅ `978ad90` | `GET /api/presets/error-codes` |
 | mc_cloze | Core thứ 2 (PET_R_P5/KET_R_P4): CoreSpec registry, single-marker carve, 2-pass blind verify | ✅ `f331fc0` | `prompts.py`, `spec_mode.py`, `exam_generation_service.py`, adapters |
+| open_cloze | Core thứ 3 (PET_R_P6/KET_R_P5): điền-từ tự gõ (fill_blank), per-gap accept-list, giám khảo blind GÕ từ + FIX mở-rộng-list | ✅ `98d6ef7` | `prompts.py`, `spec_mode.py`, `exam_generation_service.py` |
 | **B8** | AI-gen Mode-1 cả-đề/preview theo `part_code` (map từng section) | ⏳ ĐỂ SAU | `exam_generation_service`, routes, job |
 | **⏳** | Core còn lại (matching/gapped_text/listening) + render_hint + listening audio-pending | ⏳ ĐỂ SAU | nhiều (có thể migration) |
 
@@ -136,7 +160,7 @@ Cũng đã ship: request-timeout 180s + `AI_MAX_RETRIES=2` (2 adapter); default 
 | Nguồn cấu trúc AI-gen | **Preset đè source** | source-authoritative | Đề ra chuẩn Cambridge, không phụ thuộc đề mẫu |
 | Ánh xạ per_question N≠M | **reshape code, prompt FROZEN** | sửa ANALYZE prompt | Không đụng prompt client; deterministic, test được |
 | Lưu preset | **code constant** | DB table | Format Cambridge ⇒ git |
-| Phạm vi AI-gen core | **MC + mc_cloze** (CoreSpec registry) | đủ core ngay | Làm từng core, MC byte-identical khi thêm core 2 |
+| Phạm vi AI-gen core | **MC + mc_cloze + open_cloze** (CoreSpec registry) | đủ core ngay | Làm từng core, MC/cloze byte-identical khi thêm core mới |
 | Cloze carve | **single-marker `[[N]]`** (đáp án ở per_gap) | paired `[[i]]…[[i]]` | Model bọc-đôi flaky ~50%; single-marker ổn định 4/4 |
 | Cloze verify | **2-pass blind, code-graded; minor-ambiguity accept** | 1-pass / FIX cả minor | Cloze dễ 2-đáp-án → 2-pass chặt; minor để client feedback |
 | Builder vs source | **builder/scaffold cho MỌI preset** | chỉ MC | Khung là cấu trúc thuần, không cần AI-core |
