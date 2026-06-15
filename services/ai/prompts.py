@@ -946,6 +946,235 @@ via the `emit_cloze` tool (text with [[i]]…[[i]] sentinels + per_gap).\
 """
 
 
+# ---- open_cloze prompts (PET_R_P6 / KET_R_P5). Like mc_cloze BUT the student
+# TYPES one word per gap — no options. The author emits an ACCEPT-LIST per gap
+# (answer + accepted_alternatives); CODE grades fill_blank against it (case-
+# insensitive + trim). DIFF vs mc_cloze: ANALYZE taxonomy (grammar/function
+# words), GENERATE/VERIFY/FIX wording + the emit_open_cloze tool, and a verify
+# tool whose examiner TYPES a word (string) instead of picking an index — so the
+# verify view must strip correct_answers (not correct_index). SHARED: render_
+# analyze/generate/fix, EMIT_SKILL_MAP_TOOL, blind-solve mechanic, leak check. --
+
+SYSTEM_PROMPT_ANALYZE_OPEN_CLOZE = """\
+You are an exam-design analyst for Cambridge English (KET/PET) OPEN-CLOZE tasks
+(the candidate writes ONE word in each gap — there are NO options). Analyze the
+source open-cloze section below and produce an ABSTRACT GAP PROFILE — what each
+numbered gap tests — WITHOUT copying any source content.
+
+Rules:
+- Do NOT include any sentence, phrase, proper noun, topic, domain or storyline
+from the source in your output. The profile must be fully abstract; a reader
+must NOT be able to guess what the source was about.
+- The `text_genre` field describes ONLY the text form (article/email/notice/
+narrative...), narrative voice + register, and tone — NEVER events, locations,
+activities, relationships, or why the text was written.
+- Open cloze tests GRAMMAR and FUNCTION words, not topic vocabulary. For EACH
+gap, classify the TEST POINT using this taxonomy (pick the closest):
+article_determiner / preposition / auxiliary_verb / modal / pronoun /
+relative_pronoun / conjunction_linker / quantifier / comparison /
+verb_form_agreement / fixed_expression / phrasal_verb_particle.
+- For EACH gap also give: the answer's WORD CLASS (article / preposition /
+auxiliary / modal / pronoun / conjunction / determiner / quantifier / adverb /
+particle) and, as the DISTRACTOR PATTERN, the kind of WRONG word a candidate
+might plausibly type there (e.g. "wrong preposition in this collocation",
+"a different auxiliary that breaks agreement") — open cloze has no printed
+options, so describe the common candidate ERROR, not a built distractor.
+- Estimate the CEFR level of the vocabulary and the word count of the passage.
+
+Return your result by calling the `emit_skill_map` tool: put the test point in
+`skill_tested`, the word class in `answer_scope`, and the candidate-error
+pattern in `distractor_pattern`, one `per_question` entry per gap.\
+"""
+
+SYSTEM_PROMPT_GENERATE_OPEN_CLOZE = """\
+You are a professional item writer for Cambridge English (KET/PET) OPEN CLOZE.
+Write ONE complete, brand-new open-cloze task following the specification in the
+user message. You are NOT shown any existing exam — invent all content.
+
+HARD CONSTRAINTS (violating any makes the output unusable):
+1. The passage MUST be about the given topic and text genre, and incorporate the
+given story elements naturally.
+2. Word count within the stated range (count before finalising); vocabulary must
+not exceed the stated CEFR level except proper nouns.
+3. EXACTLY N gaps (N from the spec). Gap i MUST test the test point listed for
+its position in the PER-GAP SPEC; the answer's word class must match. Open cloze
+tests GRAMMAR / FUNCTION words (articles, prepositions, auxiliaries, pronouns,
+conjunctions, quantifiers, relatives...). Each answer is EXACTLY ONE word.
+4. Each gap must have ONE clearly best answer given the surrounding text. Design
+the context so the intended word is forced; then list, in `accepted_alternatives`,
+EVERY other single word that a careful candidate could also defensibly write in
+that gap (often none, sometimes one or two). Grading accepts the answer OR any
+listed alternative (case-insensitive).
+5. In `text`, mark each gap with a SINGLE numbered blank token [[1]], [[2]], …,
+[[N]] — one token per gap, each used EXACTLY ONCE, in any order. Do NOT write the
+answer word in the passage (the gap is a BLANK; the answer lives only in
+per_gap.answer). Do NOT use underscores or {{...}}.
+   CORRECT:   "I have lived here [[1]] 2019 and I like [[2]] a lot."  (blanks only)
+   WRONG:     "I have lived here [[1]]since 2019..."   (answer written in)
+   WRONG:     "I have lived here [[1]]since[[1]] 2019..."  (paired/duplicated)
+
+OUTPUT SHAPE (return via the `emit_open_cloze` tool):
+- `text`: the full passage with the N single numbered blank tokens [[1]]..[[N]],
+no answer words written in.
+- `per_gap`: one entry per gap {position, answer (the single best word),
+accepted_alternatives:[other acceptable single words, possibly empty], reason}
+in order 1..N (reason = why the answer is right / what is tested).
+- a fitting `part_label` and student-facing `instructions` (do NOT leave empty).\
+"""
+
+EMIT_OPEN_CLOZE_TOOL: dict[str, Any] = {
+    "name": "emit_open_cloze",
+    "description": "Return the brand-new open-cloze task: a passage with single "
+                   "numbered blank tokens [[1]]..[[N]] (no answer words written "
+                   "in), plus a per-gap accept-list (answer + acceptable "
+                   "alternatives). The system replaces the tokens with blanks and "
+                   "builds the fill-in answer key.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "part_label": {"type": "string"},
+            "instructions": {"type": "string"},
+            "text": {"type": "string",
+                     "description": "Passage with each gap as a SINGLE numbered "
+                                    "blank token [[1]]..[[N]] (each used once); do "
+                                    "NOT write the answer word into the passage."},
+            "per_gap": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "position": {"type": "integer"},
+                        "answer": {"type": "string",
+                                   "description": "the single best word for the gap"},
+                        "accepted_alternatives": {
+                            "type": "array", "items": {"type": "string"},
+                            "description": "other acceptable single words (may be "
+                                           "empty)"},
+                        "reason": {"type": ["string", "null"]},
+                    },
+                    "required": ["position", "answer"],
+                },
+            },
+        },
+        "required": ["part_label", "instructions", "text", "per_gap"],
+    },
+}
+
+SYSTEM_PROMPT_VERIFY_OPEN_CLOZE = """\
+You are an independent Cambridge examiner taking this OPEN-CLOZE task as a
+candidate. There are NO options and NO answer key — for EACH gap, WRITE the one
+word you think best fits, using only the passage.
+
+For EVERY gap, in order, return one entry in `per_question` with:
+- position
+- examiner_answer: the single word YOU would write in the gap
+- evidence_quote: the exact words around the gap that justify your word (copy
+them verbatim; never leave empty).
+
+Then, in `issues`, mark severity 'critical' for any gap where: it is unanswerable;
+OR several DIFFERENT words fit equally well so there is no single best answer (an
+over-open gap); OR the surrounding grammar is wrong. Use 'minor' for
+wording/register/level. Write the word the passage actually calls for — do not
+try to guess a hidden intended word. Call `report_review`. Do NOT return a
+corrected task.\
+"""
+
+VERIFY_OPEN_CLOZE_TOOL: dict[str, Any] = {
+    "name": "report_review",
+    "description": "Report your independent blind solve (TYPE one word per gap) "
+                   "plus any remaining issues. Do NOT return a corrected task.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "per_question": {
+                "type": "array",
+                "description": "REQUIRED — exactly one entry per gap, in order. "
+                               "The word YOU would write in each gap, reached "
+                               "independently, with a verbatim evidence quote.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "position": {"type": "integer"},
+                        "examiner_answer": {"type": "string"},
+                        "evidence_quote": {"type": "string"},
+                    },
+                    "required": ["position", "examiner_answer", "evidence_quote"],
+                },
+            },
+            "issues": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "severity": {"type": "string",
+                                     "enum": ["critical", "minor"]},
+                        "question_position": {"type": ["integer", "null"]},
+                        "problem": {"type": "string"},
+                        "fix": {"type": ["string", "null"]},
+                    },
+                    "required": ["severity", "problem"],
+                },
+            },
+        },
+        "required": ["per_question", "issues"],
+    },
+}
+
+SYSTEM_PROMPT_FIX_OPEN_CLOZE = """\
+You are the item writer correcting an open-cloze task you wrote. You ARE shown
+the intended accept-list per gap and the problems an independent examiner found
+(including any word the examiner wrote that the accept-list did not contain).
+For EACH problem decide:
+- if the examiner's word is ALSO a correct single-word answer in this context,
+ADD it to that gap's accept-list (correct_answers);
+- if the gap is genuinely over-open (too many unrelated words fit), REWRITE the
+surrounding passage so the intended answer is forced, OR replace the gap with a
+cleaner test point.
+Keep the structure: same number of gaps, each answer ONE word, same word-count
+range and CEFR level. Return the corrected task via the `emit_open_cloze` tool
+(text with [[1]]..[[N]] blank tokens + per_gap answer/accepted_alternatives).\
+"""
+
+
+def _strip_open_cloze_keys(section: dict[str, Any]) -> dict[str, Any]:
+    """Blind-solve view of an open-cloze section: remove `correct_answers` and
+    `case_sensitive` from every question_data and drop `answer_justification`.
+    For open cloze the ACCEPT-LIST is the answer key, so (unlike _strip_answer_keys,
+    which targets MC `correct_index`) it is what must be hidden from the examiner.
+    Deep-copies only the parts it mutates."""
+    out = dict(section)
+    qs: list[dict[str, Any]] = []
+    for q in section.get("questions") or []:
+        if not isinstance(q, dict):
+            qs.append(q)
+            continue
+        q = {kk: vv for kk, vv in q.items() if kk != "answer_justification"}
+        qd = q.get("question_data")
+        if isinstance(qd, dict):
+            q["question_data"] = {kk: vv for kk, vv in qd.items()
+                                  if kk not in ("correct_answers", "case_sensitive")}
+        qs.append(q)
+    out["questions"] = qs
+    return out
+
+
+def render_verify_open_cloze_user_message(
+    section: dict[str, Any], payload: dict[str, Any], k: int
+) -> str:
+    """Open-cloze BLIND-SOLVE verify: STRUCTURE spec + the section with its
+    accept-list STRIPPED — NO source, NO key. The examiner types one word per
+    {{gap:N}}."""
+    structure = (payload.get("spec") or {}).get("structure") or {}
+    blind = _strip_open_cloze_keys(section)
+    return (
+        "SPECIFICATION:\n"
+        + json.dumps(structure, ensure_ascii=False, indent=2)
+        + "\n\nOPEN-CLOZE TASK TO SOLVE (no answer key — for each {{gap:N}} in the "
+        "passage, write the ONE word that best fits):\n"
+        + json.dumps(blind, ensure_ascii=False, indent=2)
+    )
+
+
 @dataclass(frozen=True)
 class CorePrompts:
     """Per-core spec prompt set (resolved by the adapters in spec mode)."""
@@ -987,6 +1216,21 @@ CORE_PROMPTS: dict[str, CorePrompts] = {
         verify_section_tool=VERIFY_SECTION_SPEC_TOOL,
         system_fix=SYSTEM_PROMPT_FIX_CLOZE, render_fix=_V3.render_fix,
         fix_section_tool=EMIT_CLOZE_TOOL,
+    ),
+    # open_cloze: type-the-word gap fill (fill_blank). New system prompts +
+    # emit_open_cloze tool + a string-answer verify tool with its OWN verify
+    # render (strips the accept-list, not correct_index). analyze/generate/fix
+    # renders reused verbatim.
+    "open_cloze": CorePrompts(
+        system_analyze=SYSTEM_PROMPT_ANALYZE_OPEN_CLOZE, render_analyze=_V3.render_analyze,
+        emit_skill_map_tool=EMIT_SKILL_MAP_TOOL,
+        system_generate=SYSTEM_PROMPT_GENERATE_OPEN_CLOZE, render_generate=_V3.render_generate,
+        emit_section_tool=EMIT_OPEN_CLOZE_TOOL,
+        system_verify=SYSTEM_PROMPT_VERIFY_OPEN_CLOZE,
+        render_verify=render_verify_open_cloze_user_message,
+        verify_section_tool=VERIFY_OPEN_CLOZE_TOOL,
+        system_fix=SYSTEM_PROMPT_FIX_OPEN_CLOZE, render_fix=_V3.render_fix,
+        fix_section_tool=EMIT_OPEN_CLOZE_TOOL,
     ),
 }
 

@@ -27,7 +27,7 @@ from typing import Optional
 
 # AI-gen cores implemented this round. AI generation refuses a part whose
 # ai_core is not in here (builder/scaffold are NOT gated).
-AI_GEN_CORES: frozenset[str] = frozenset({"multiple_choice", "mc_cloze"})
+AI_GEN_CORES: frozenset[str] = frozenset({"multiple_choice", "mc_cloze", "open_cloze"})
 
 
 @dataclass(frozen=True)

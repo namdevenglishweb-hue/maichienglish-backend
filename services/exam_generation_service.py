@@ -948,6 +948,223 @@ async def _spec_verify_cloze(
     )
 
 
+# ---------------------------------------------------------------------------
+# open_cloze core (PET_R_P6 / KET_R_P5). The AI emits a passage with single
+# numbered blank tokens [[N]] + per_gap{answer, accepted_alternatives}; CODE
+# carves the tokens into {{gap:N}}, builds fill_blank correct_answers accept-
+# lists, and validates. The student TYPES a word (no options). The blind-solve
+# examiner also TYPES a word (string) → CODE grades it against the accept-list;
+# a valid-but-unlisted word is the signal to EXPAND the list (FIX), not a wrong
+# key. Orchestration (ANALYZE→leak→seed→generate→verify→Tầng B) is shared.
+# ---------------------------------------------------------------------------
+
+
+def _norm_answer(s: Any) -> str:
+    """Grading normal form for open-cloze answers: trim + casefold (matches
+    utils.grading_utils._grade_fill_blank with case_sensitive=False)."""
+    return s.strip().lower() if isinstance(s, str) else ""
+
+
+def _assemble_open_cloze_section(
+    source: dict[str, Any], ai_out: dict[str, Any], preset: Any
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Build a fill_blank open-cloze section from emit_open_cloze output, forcing
+    structure from the preset. Carves SINGLE numbered blank tokens [[i]] →
+    {{gap:i}} (each used once, 1..N); builds each question's correct_answers =
+    [answer] + accepted_alternatives (deduped, case-insensitive). Each answer is
+    one word. Raises StructureMismatch (numbers/labels only) on any malformed gap
+    → counts as a generate retry."""
+    n = preset.num_questions
+    per_gap = ai_out.get("per_gap")
+    if not isinstance(per_gap, list) or len(per_gap) != n:
+        got = len(per_gap) if isinstance(per_gap, list) else "none"
+        raise StructureMismatch(f"expected {n} gaps, got {got}")
+    by_pos: dict[int, dict[str, Any]] = {}
+    for g in per_gap:
+        if isinstance(g, dict):
+            by_pos[g.get("position")] = g
+    if sorted(by_pos) != list(range(1, n + 1)):
+        raise StructureMismatch(f"gap positions must be 1..{n} (got {sorted(by_pos)})")
+
+    text = ai_out.get("text") or ""
+    if not text.strip():
+        raise StructureMismatch("open-cloze text missing (no source fallback in spec mode)")
+    found = sorted(int(m) for m in _CLOZE_MARKER.findall(text))
+    if found != list(range(1, n + 1)):
+        raise StructureMismatch(
+            f"text must contain blank tokens [[1]]..[[{n}]] each exactly once "
+            f"(found {found or 'none'})")
+    out_text = _CLOZE_MARKER.sub(lambda m: "{{gap:%s}}" % m.group(1), text)
+
+    out_qs: list[dict[str, Any]] = []
+    justifications: list[dict[str, Any]] = []
+    for i in range(1, n + 1):
+        g = by_pos[i]
+        answer = (g.get("answer") or "").strip()
+        if not answer:
+            raise StructureMismatch(f"gap {i} missing answer")
+        if len(answer.split()) != 1:
+            raise StructureMismatch(f"gap {i} answer must be a single word")
+        # accept-list = answer + alternatives, deduped case-insensitively, order
+        # preserved (the primary answer stays first).
+        accepted: list[str] = []
+        seen: set[str] = set()
+        for cand in [answer, *(g.get("accepted_alternatives") or [])]:
+            cand = (cand or "").strip() if isinstance(cand, str) else ""
+            if not cand or len(cand.split()) != 1:
+                continue  # alternatives must also be single words; drop noise
+            key = cand.lower()
+            if key not in seen:
+                seen.add(key)
+                accepted.append(cand)
+        out_qs.append({
+            "position": i,
+            "question_type": preset.question_type,          # FORCED from preset
+            "points": preset.points_per_question,           # FORCED from preset
+            "question_data": {"correct_answers": accepted, "case_sensitive": False},
+        })
+        if g.get("reason"):
+            justifications.append({"position": i, "justification": g["reason"]})
+
+    if not ((ai_out.get("part_label") or "").strip()
+            and (ai_out.get("instructions") or "").strip()):
+        raise StructureMismatch("part_label/instructions missing (no source fallback)")
+    section = {
+        "type": preset.section_type,
+        "part_label": ai_out["part_label"],
+        "instructions": ai_out["instructions"],
+        "max_audio_plays": None,
+        "materials": [{"type": "text", "content": out_text}],
+        "questions": out_qs,
+    }
+    return section, justifications
+
+
+def _spec_code_checks_open_cloze(
+    section: dict[str, Any], spec: dict[str, Any], src_material: str,
+    rng: Optional[_random.Random], preset: Any = None,
+) -> None:
+    """open-cloze code checks: word-count → gap integrity (count==N, 1..N) →
+    trigram guard. No option shuffle (fill_blank has no options). Pure code,
+    runs BEFORE verify."""
+    from services.ai import spec_mode
+
+    material_text = (section.get("materials") or [{}])[0].get("content") or ""
+    err = spec_mode.word_count_violation(
+        material_text, (spec.get("structure") or {}).get("word_count_range"))
+    if err:
+        raise StructureMismatch(err)
+    n = len(section.get("questions") or [])
+    gaps = sorted(int(m) for m in _GAP_MARKER.findall(material_text))
+    if gaps != list(range(1, n + 1)):
+        raise StructureMismatch(
+            f"open-cloze gap markers {gaps or 'none'} != 1..{n} questions")
+    err = spec_mode.similarity_violation(material_text, src_material)
+    if err:
+        raise StructureMismatch(err)
+
+
+def _validate_per_question_str(section: dict[str, Any], per_question: Any) -> None:
+    """Open-cloze blind-solve verdict shape: exactly one entry per question
+    position (no missing/extra/dup), a NON-EMPTY string examiner_answer, and a
+    NON-EMPTY evidence_quote. Malformed → StructureMismatch (counts as a retry)."""
+    want = {q.get("position") for q in section.get("questions") or []}
+    if not isinstance(per_question, list) or len(per_question) != len(want):
+        got = len(per_question) if isinstance(per_question, list) else "none"
+        raise StructureMismatch(
+            f"blind-solve per_question count {got} != {len(want)} questions")
+    seen: set[Any] = set()
+    for item in per_question:
+        if not isinstance(item, dict):
+            raise StructureMismatch("blind-solve per_question entry not an object")
+        pos = item.get("position")
+        if pos not in want or pos in seen:
+            raise StructureMismatch(
+                f"blind-solve per_question position {pos!r} unknown or duplicated")
+        seen.add(pos)
+        if not (item.get("examiner_answer") or "").strip():
+            raise StructureMismatch(
+                f"blind-solve Q{pos} has an empty examiner_answer")
+        if not (item.get("evidence_quote") or "").strip():
+            raise StructureMismatch(
+                f"blind-solve Q{pos} has an empty evidence quote")
+
+
+def _grade_open_cloze_blind_solve(
+    section: dict[str, Any], per_question: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """CODE grades the open-cloze blind solve: the examiner TYPED a word per gap;
+    compare it (case-insensitive + trim) to that gap's accept-list. A typed word
+    NOT in the accept-list is a 'critical' signal that the list may be incomplete
+    (or the gap over-open) — FIX decides whether to ADD it or tighten the gap.
+    Empty (= examiner agreed on every gap)."""
+    accept: dict[Any, list[str]] = {}
+    for q in section.get("questions") or []:
+        if isinstance(q, dict):
+            accept[q.get("position")] = (q.get("question_data") or {}).get("correct_answers") or []
+    problems: list[dict[str, Any]] = []
+    for item in per_question:
+        pos = item.get("position")
+        typed = item.get("examiner_answer")
+        listed = accept.get(pos) or []
+        if _norm_answer(typed) not in {_norm_answer(a) for a in listed}:
+            problems.append({
+                "severity": "critical",
+                "question_position": pos,
+                "problem": (f"blind examiner wrote {str(typed)!r} for gap {pos}, "
+                            f"which is not in the accepted answers {listed}. If "
+                            f"it is also correct here, add it; otherwise tighten "
+                            f"the passage so only the intended word fits."),
+            })
+    return problems
+
+
+async def _spec_verify_open_cloze(
+    source_section: dict[str, Any], section: dict[str, Any], payload: dict[str, Any],
+    k: int, generator, rounds: int, spec: dict[str, Any], src_material: str,
+    rng: Optional[_random.Random], preset: Any = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """open-cloze verify (strict, 2-pass): each round runs the type-a-word blind
+    solve TWICE (independent) to gather alternatives. ANY pass where the examiner
+    types a word outside the accept-list, OR a model 'critical' (over-open gap) →
+    FIX (key-aware: ADD the word to the accept-list or tighten the gap) →
+    re-assemble via the open-cloze carver → re-check → next round. Clean on both
+    passes → accept. Rounds exhausted with criticals → StructureMismatch (→ fresh
+    GENERATE)."""
+    if rounds <= 0:
+        return section, {"rounds": 0, "final_issues": []}
+    issues: list[dict[str, Any]] = []
+    done = 0
+    for round_i in range(rounds):
+        criticals: list[dict[str, Any]] = []
+        issues = []
+        for _pass in range(2):                       # 2 independent blind solves
+            verdict = await generator.verify_section(section, payload, k=k)
+            per_question = verdict.get("per_question")
+            _validate_per_question_str(section, per_question)
+            model_issues = verdict.get("issues") or []
+            key_problems = _grade_open_cloze_blind_solve(section, per_question)
+            issues += model_issues + key_problems
+            criticals += key_problems + [
+                i for i in model_issues if i.get("severity") == "critical"]
+        done += 1
+        if not criticals:
+            return section, {"rounds": done, "final_issues": issues}
+        if round_i == rounds - 1:
+            break
+        fix_payload = {**payload,
+                       "fix_problems": [i.get("problem", "") for i in criticals]}
+        fixed = await generator.fix_section(section, fix_payload, k=k)
+        section, _ = _assemble_open_cloze_section(source_section, fixed, preset)
+        _spec_code_checks_open_cloze(section, spec, src_material, rng, preset)
+    raise StructureMismatch(
+        "open-cloze blind-solve left critical issues after "
+        f"{done} round(s): "
+        + "; ".join(i.get("problem", "") for i in issues
+                    if i.get("severity") == "critical")
+    )
+
+
 def _mc_assemble(source, ai_out, preset):
     return _merge_generated_section(source, ai_out, strict_spec=True, preset=preset)
 
@@ -963,6 +1180,9 @@ CORE_ENGINE: dict[str, dict[str, Any]] = {
     "mc_cloze": {"assemble": _assemble_cloze_section,
                  "code_checks": _spec_code_checks_cloze,
                  "verify": _spec_verify_cloze},
+    "open_cloze": {"assemble": _assemble_open_cloze_section,
+                   "code_checks": _spec_code_checks_open_cloze,
+                   "verify": _spec_verify_open_cloze},
 }
 
 
@@ -1488,7 +1708,7 @@ class ExamGenerationService:
         if preset is not None and not supports_ai_gen(preset):
             raise ValidationError(
                 f"part_code {preset.part_code!r} (core {preset.ai_core!r}) chưa hỗ "
-                "trợ AI-gen đợt này (chỉ multiple_choice). Builder/scaffold vẫn dùng được."
+                "trợ AI-gen đợt này. Builder/scaffold vẫn dùng được."
             )
         section, exam_context = await self.load_section_for_gen(source_section_id)
         _assert_source_media_meta([section])

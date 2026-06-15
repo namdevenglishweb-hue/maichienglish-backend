@@ -803,8 +803,10 @@ def test_preset_catalog_covers_all_parts_and_is_consistent():
         assert P.supports_ai_gen(p) == (p.ai_core in P.AI_GEN_CORES)
 
     # AI-gen được: MC reading (P3) + mc_cloze (PET_R_P5 / KET_R_P4)
+    # + open_cloze (PET_R_P6 / KET_R_P5)
     gen_ok = {c for c, p in P.PART_PRESETS.items() if P.supports_ai_gen(p)}
-    assert gen_ok == {"PET_R_P3", "KET_R_P3", "PET_R_P5", "KET_R_P4"}
+    assert gen_ok == {"PET_R_P3", "KET_R_P3", "PET_R_P5", "KET_R_P4",
+                      "PET_R_P6", "KET_R_P5"}
 
     # list_presets phơi field cho builder
     item = next(d for d in P.list_presets() if d["partCode"] == "PET_R_P4")
@@ -1317,3 +1319,249 @@ def test_verbatim_overlap_metric_separates_copy_from_rewrite():
     }
     assert G.compute_verbatim_overlap(src, copy)["max"] == 1.0
     assert G.compute_verbatim_overlap(src, rewrite)["max"] < 0.3
+
+
+# --- open_cloze core (type-the-word fill_blank; PET_R_P6 / KET_R_P5) -------- #
+
+def _open_cloze_src_section():
+    """An open-cloze-shaped source: 1 text with {{gap:1..6}} + 6 fill_blank
+    questions (accept-lists). fill_blank → disjoint from the MC cores."""
+    return {
+        "id": "ocz-1", "position": 1, "type": "fill_blank", "part_label": "Part 6",
+        "instructions": "Write one word in each gap.", "max_audio_plays": None,
+        "materials": [{"type": "text", "content":
+            "I have lived here {{gap:1}} 2019 and I like it {{gap:2}} lot. The town "
+            "is small {{gap:3}} friendly, {{gap:4}} everyone knows each other. There "
+            "is a market {{gap:5}} Sundays {{gap:6}} the square."}],
+        "questions": [{
+            "id": f"q{i}", "position": i, "question_type": "fill_blank", "points": 1,
+            "question_data": {"correct_answers": [f"w{i}"], "case_sensitive": False},
+        } for i in range(1, 7)],
+    }
+
+
+def _open_cloze_ai_out(n=6):
+    filler = " ".join(f"w{i}" for i in range(110))
+    markers = " ".join(f"[[{i}]]" for i in range(1, n + 1))  # SINGLE blank tokens
+    return {
+        "part_label": "Part 6", "instructions": "Write one word in each gap.",
+        "text": filler + " " + markers,                      # no answer in passage
+        "per_gap": [{"position": i, "answer": f"a{i}",
+                     "accepted_alternatives": ([f"alt{i}"] if i % 2 else []),
+                     "reason": "grammar point"} for i in range(1, n + 1)],
+    }
+
+
+def test_open_cloze_core_prompts_registry():
+    """open_cloze resolves to its own prompts + emit_open_cloze tool + a verify
+    tool whose examiner TYPES a word; renders for analyze/generate/fix reused."""
+    from services.ai import prompts as P
+    v3 = P.PROMPT_VERSIONS["v3"]
+    oc = P.CORE_PROMPTS["open_cloze"]
+    assert oc.system_generate is P.SYSTEM_PROMPT_GENERATE_OPEN_CLOZE
+    assert oc.emit_section_tool is P.EMIT_OPEN_CLOZE_TOOL
+    assert oc.system_analyze is P.SYSTEM_PROMPT_ANALYZE_OPEN_CLOZE
+    assert oc.verify_section_tool is P.VERIFY_OPEN_CLOZE_TOOL
+    assert oc.render_analyze is v3.render_analyze           # renders reused
+    assert oc.render_generate is v3.render_generate
+    assert oc.render_fix is v3.render_fix
+    # verify render is open-cloze-specific (must strip the accept-list, not index)
+    assert oc.render_verify is P.render_verify_open_cloze_user_message
+    assert P.resolve_core_prompts({"prompt_version": "v3", "core": "open_cloze"}) is oc
+    # examiner answers a STRING, not an index
+    props = P.VERIFY_OPEN_CLOZE_TOOL["input_schema"]["properties"]["per_question"]["items"]["properties"]
+    assert "examiner_answer" in props and "examiner_answer_index" not in props
+
+
+def test_open_cloze_verify_view_strips_accept_list():
+    """LEAK GUARD: the blind-solve verify payload must NOT contain correct_answers
+    (the open-cloze answer key) — else the examiner isn't solving blind."""
+    from services.ai import prompts as P
+    section = {
+        "type": "fill_blank", "materials": [{"type": "text", "content": "x {{gap:1}}"}],
+        "questions": [{"position": 1, "question_type": "fill_blank",
+                       "question_data": {"correct_answers": ["since", "from"],
+                                         "case_sensitive": False},
+                       "answer_justification": "tense marker"}],
+    }
+    msg = P.render_verify_open_cloze_user_message(section, {"spec": {"structure": {}}}, 5)
+    assert "since" not in msg and "from" not in msg and "correct_answers" not in msg
+    assert "answer_justification" not in msg
+    # original section is untouched (strip deep-copies the parts it mutates)
+    assert section["questions"][0]["question_data"]["correct_answers"] == ["since", "from"]
+
+
+def test_open_cloze_eligibility_and_routing():
+    from services.ai import spec_mode as S
+    oc = _open_cloze_src_section()
+    plain = _spec_src_section()                              # plain MC
+    cloze = _cloze_src_section()                             # mc_cloze (MC + gaps)
+    assert S.open_cloze_eligibility(oc) is None
+    assert S.open_cloze_eligibility(plain) is not None      # multiple_choice, not fill_blank
+    assert S.open_cloze_eligibility(cloze) is not None      # MC, not fill_blank
+
+    # preset-driven routing: preferred open_cloze on a fill_blank+gaps source
+    core, reason = S.assign_core_with_reason(oc, 5, "PET", preferred_core="open_cloze")
+    assert core == "open_cloze" and "open_cloze" in reason
+    # preferred open_cloze on a plain-MC source → rewrite
+    core, reason = S.assign_core_with_reason(plain, 5, "KET", preferred_core="open_cloze")
+    assert core is None and "rewrite" in reason
+    # no preferred: an open-cloze source scans to open_cloze (disjoint from MC)
+    assert S.assign_core_with_reason(oc, 3, "PET")[0] == "open_cloze"
+
+
+def test_assemble_open_cloze_section_carves_and_builds():
+    import services.exam_generation_service as G
+    from services.presets import PART_PRESETS
+    preset = PART_PRESETS["PET_R_P6"]                       # 6 gaps, fill_blank
+    section, justifs = G._assemble_open_cloze_section(None, _open_cloze_ai_out(), preset)
+    content = section["materials"][0]["content"]
+    assert all(("{{gap:%d}}" % i) in content for i in range(1, 7))
+    assert "[[" not in content                              # tokens carved away
+    assert section["type"] == "fill_blank" and len(section["questions"]) == 6
+    for i, q in enumerate(section["questions"], 1):
+        assert q["question_type"] == "fill_blank"
+        ca = q["question_data"]["correct_answers"]
+        assert ca[0] == f"a{i}"                             # primary answer first
+        assert ca == list(dict.fromkeys(ca))               # deduped
+    # odd gaps carried an alternative → 2 accepted; even gaps → 1
+    assert section["questions"][0]["question_data"]["correct_answers"] == ["a1", "alt1"]
+    assert section["questions"][1]["question_data"]["correct_answers"] == ["a2"]
+    assert len(justifs) == 6
+
+    # malformed → StructureMismatch (counted as retry)
+    bad = _open_cloze_ai_out(); bad["per_gap"] = bad["per_gap"][:5]      # 5 gaps
+    with pytest.raises(G.StructureMismatch):
+        G._assemble_open_cloze_section(None, bad, preset)
+    bad2 = _open_cloze_ai_out(); bad2["text"] = bad2["text"].replace("[[3]]", "")
+    with pytest.raises(G.StructureMismatch):                # missing blank token 3
+        G._assemble_open_cloze_section(None, bad2, preset)
+    bad3 = _open_cloze_ai_out(); bad3["per_gap"][0]["answer"] = "two words"
+    with pytest.raises(G.StructureMismatch):                # answer not single word
+        G._assemble_open_cloze_section(None, bad3, preset)
+    bad4 = _open_cloze_ai_out(); bad4["per_gap"][0]["answer"] = ""
+    with pytest.raises(G.StructureMismatch):                # missing answer
+        G._assemble_open_cloze_section(None, bad4, preset)
+
+
+def test_grade_open_cloze_blind_solve_matches_accept_list():
+    """CODE grades the typed word against the accept-list (case-insensitive +
+    trim); an unlisted word becomes a 'critical' (signal to expand/tighten)."""
+    import services.exam_generation_service as G
+    section = {"questions": [
+        {"position": 1, "question_data": {"correct_answers": ["since", "from"]}},
+        {"position": 2, "question_data": {"correct_answers": ["a"]}},
+    ]}
+    # listed (case/space-insensitive) → no problem; unlisted → 1 critical
+    ok = G._grade_open_cloze_blind_solve(section, [
+        {"position": 1, "examiner_answer": " SINCE "},
+        {"position": 2, "examiner_answer": "a"}])
+    assert ok == []
+    bad = G._grade_open_cloze_blind_solve(section, [
+        {"position": 1, "examiner_answer": "for"},          # not listed
+        {"position": 2, "examiner_answer": "a"}])
+    assert len(bad) == 1 and bad[0]["question_position"] == 1
+    assert bad[0]["severity"] == "critical" and "for" in bad[0]["problem"]
+
+
+class FakeOpenClozeGen:
+    """analyze → open-cloze skill map; generate → emit_open_cloze; verify echoes
+    the primary accept-list word on both passes → agree (no fix)."""
+
+    def __init__(self):
+        self.usage = {"input": 1, "output": 2}
+        self.model = "fake"
+        self.analyze_calls = self.generate_calls = self.verify_calls = self.fix_calls = 0
+
+    async def analyze_section(self, payload):
+        self.analyze_calls += 1
+        return {
+            "structure": {"exam_level": "PET", "cefr_level": "B1",
+                          "text_genre": "informal email, first-person, friendly tone",
+                          "word_count_range": [90, 130]},
+            "per_question": [{"position": i, "skill_tested": "preposition",
+                              "answer_scope": "preposition",
+                              "distractor_pattern": "wrong preposition in collocation"}
+                             for i in range(1, 7)],
+            "style_notes": "present perfect + present simple",
+        }
+
+    async def generate_section(self, payload, *, k):
+        self.generate_calls += 1
+        return _open_cloze_ai_out()
+
+    async def verify_section(self, section, payload, *, k):
+        self.verify_calls += 1
+        pq = [{"position": q["position"],
+               "examiner_answer": q["question_data"]["correct_answers"][0],
+               "evidence_quote": "the grammar requires it"}
+              for q in section["questions"]]
+        return {"per_question": pq, "issues": []}
+
+    async def fix_section(self, section, payload, *, k):
+        self.fix_calls += 1
+        return _open_cloze_ai_out()
+
+
+async def test_open_cloze_full_pipeline():
+    """End-to-end (mock): open-cloze source + PET_R_P6 → core open_cloze → 6-gap
+    fill_blank section, 2-pass type-a-word verify agrees, passes Tầng-B."""
+    import random
+    from services.presets import PART_PRESETS
+    gen = FakeOpenClozeGen()
+    section, report = await G.generate_one_section(
+        _open_cloze_src_section(), 5, exam_context={"level": "PET", "skill": "reading"},
+        generator=gen, rounds=1, prompt_version="v3", rng=random.Random(2),
+        skill_map_cache_override=FakeSkillMapCache(), preset=PART_PRESETS["PET_R_P6"])
+
+    assert report["mode"] == "spec" and report["core"] == "open_cloze"
+    assert report["part_code"] == "PET_R_P6" and "open_cloze" in report["eligibility_reason"]
+    qs = section["questions"]
+    assert len(qs) == 6 and all(q["question_type"] == "fill_blank" for q in qs)
+    assert all(q["question_data"]["correct_answers"] for q in qs)   # non-empty accept-list
+    content = section["materials"][0]["content"]
+    assert all(("{{gap:%d}}" % i) in content for i in range(1, 7))
+    assert gen.analyze_calls == 1 and gen.generate_calls == 1
+    assert gen.verify_calls == 2 and gen.fix_calls == 0     # 2-pass, no fix needed
+
+
+async def test_open_cloze_fix_round_expands_accept_list():
+    """When the blind examiner types an unlisted-but-valid word, the FIX round
+    feeds it back; here FIX returns an output that includes that word so the next
+    round agrees → section accepted (verify_calls > 2, fix_calls >= 1)."""
+    import random
+    from services.presets import PART_PRESETS
+
+    class ExpandingGen(FakeOpenClozeGen):
+        def __init__(self):
+            super().__init__()
+            self._round = 0
+
+        async def verify_section(self, section, payload, *, k):
+            self.verify_calls += 1
+            # First round, pass 1: examiner types an unlisted word on gap 1.
+            if self.verify_calls == 1:
+                pq = [{"position": q["position"],
+                       "examiner_answer": ("UNLISTED" if q["position"] == 1
+                                           else q["question_data"]["correct_answers"][0]),
+                       "evidence_quote": "x"} for q in section["questions"]]
+                return {"per_question": pq, "issues": []}
+            pq = [{"position": q["position"],
+                   "examiner_answer": q["question_data"]["correct_answers"][0],
+                   "evidence_quote": "x"} for q in section["questions"]]
+            return {"per_question": pq, "issues": []}
+
+        async def fix_section(self, section, payload, *, k):
+            self.fix_calls += 1
+            out = _open_cloze_ai_out()
+            out["per_gap"][0]["answer"] = "unlisted"        # adopt the examiner word
+            return out
+
+    gen = ExpandingGen()
+    section, report = await G.generate_one_section(
+        _open_cloze_src_section(), 5, exam_context={"level": "PET", "skill": "reading"},
+        generator=gen, rounds=2, prompt_version="v3", rng=random.Random(3),
+        skill_map_cache_override=FakeSkillMapCache(), preset=PART_PRESETS["PET_R_P6"])
+    assert report["core"] == "open_cloze"
+    assert gen.fix_calls >= 1 and gen.verify_calls > 2
+    assert section["questions"][0]["question_data"]["correct_answers"][0] == "unlisted"

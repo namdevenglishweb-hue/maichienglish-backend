@@ -83,9 +83,42 @@ def mc_cloze_eligibility(section: dict[str, Any]) -> Optional[str]:
     return None
 
 
+def open_cloze_eligibility(section: dict[str, Any]) -> Optional[str]:
+    """open_cloze eligibility (PET_R_P6 / KET_R_P5). The source is a fill_blank
+    passage: exactly 1 non-empty text material carrying N numbered gaps
+    {{gap:1}}..{{gap:N}} (N = question count), and every question is fill_blank
+    with a non-empty correct_answers accept-list. None = eligible; else reason.
+    Disjoint from the MC cores (which require multiple_choice questions)."""
+    if section.get("type") not in (None, "fill_blank"):
+        return f"section type {section.get('type')!r} is not fill_blank"
+    mats = section.get("materials") or []
+    if len(mats) != 1 or not isinstance(mats[0], dict) or mats[0].get("type") != "text":
+        got = (f"{len(mats)} materials" if len(mats) != 1
+               else f"1 {mats[0].get('type') if isinstance(mats[0], dict) else '?'} material")
+        return f"needs exactly 1 text material (got {got})"
+    content = (mats[0].get("content") or "")
+    if not content.strip():
+        return "text material is empty"
+    qs = section.get("questions") or []
+    if not qs:
+        return "no questions"
+    for i, q in enumerate(qs):
+        if q.get("question_type") != "fill_blank":
+            return f"question {i + 1} is {q.get('question_type')!r}, not fill_blank"
+        ans = (q.get("question_data") or {}).get("correct_answers") or []
+        if not isinstance(ans, list) or not any((a or "").strip() for a in ans):
+            return f"question {i + 1} has no correct_answers"
+    gaps = sorted(int(m) for m in re.findall(r"\{\{gap:(\d+)\}\}", content))
+    if gaps != list(range(1, len(qs) + 1)):
+        return f"open cloze needs {len(qs)} numbered gaps 1..{len(qs)} (found {gaps or 'none'})"
+    return None
+
+
 # Ordered SPECIFIC → GENERAL: a cloze (has gaps) must be caught before plain MC
-# (mc_core_eligibility passes for both). Only implemented AI-gen cores here.
+# (mc_core_eligibility passes for both). open_cloze is disjoint (fill_blank).
+# Only implemented AI-gen cores here.
 _CORE_ELIGIBILITY = (
+    ("open_cloze", open_cloze_eligibility),
     ("mc_cloze", mc_cloze_eligibility),
     ("multiple_choice", mc_core_eligibility),
 )
